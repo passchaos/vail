@@ -6,8 +6,10 @@
 
 pub const tls = @import("tls/mod.zig");
 pub const x509 = @import("x509/mod.zig");
+pub const crypto = @import("crypto/mod.zig");
 
 test {
+    _ = crypto.mac;
     _ = tls.auth;
     _ = tls.client_auth;
     _ = tls.key_exchange;
