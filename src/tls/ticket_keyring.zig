@@ -8,16 +8,19 @@
 const std = @import("std");
 const codec = @import("ticket.zig");
 const cipher_suite = @import("cipher_suite.zig");
+const secret = @import("secret.zig");
 
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 pub const key_len = Aes256Gcm.key_length;
 pub const nonce_len = Aes256Gcm.nonce_length;
 pub const tag_len = Aes256Gcm.tag_length;
 pub const max_keys = 4;
-const format_version: u8 = 2;
+const format_version: u8 = 3;
 const header_len = 1 + @sizeOf(u32) + nonce_len;
-const plaintext_len =
-    @sizeOf(u64) + @sizeOf(u32) + @sizeOf(u32) + @sizeOf(u16) + 32;
+const secret_len_offset =
+    @sizeOf(u64) + @sizeOf(u32) + @sizeOf(u32) + @sizeOf(u16);
+const secret_offset = secret_len_offset + @sizeOf(u8);
+const plaintext_len = secret_offset + secret.max_len;
 pub const sealed_len = header_len + plaintext_len + tag_len;
 
 pub const Error = error{
@@ -42,6 +45,16 @@ pub const Opened = struct {
     issued_at_ms: u64,
     lifetime_seconds: u32,
     cipher_suite: cipher_suite.Suite = .aes_128_gcm_sha256,
+};
+
+pub const OpenedSecret = struct {
+    secret: secret.Secret,
+    age_add: u32,
+    issued_at_ms: u64,
+    lifetime_seconds: u32,
+    /// TLS cipher-suite wire ID.  The ticket layer recognizes 0x1302 before
+    /// negotiation publishes that suite, but validates its SHA-384 binding.
+    cipher_suite_wire: u16,
 };
 
 pub const Keyring = struct {
@@ -93,8 +106,33 @@ pub const Keyring = struct {
         alpn: []const u8,
         opened: Opened,
     ) Error![sealed_len]u8 {
+        return self.sealSecret(
+            nonce,
+            server_id,
+            alpn,
+            .{
+                .secret = .fromSha256(opened.secret),
+                .age_add = opened.age_add,
+                .issued_at_ms = opened.issued_at_ms,
+                .lifetime_seconds = opened.lifetime_seconds,
+                .cipher_suite_wire = opened.cipher_suite.wireValue(),
+            },
+        );
+    }
+
+    pub fn sealSecret(
+        self: *const Keyring,
+        nonce: [nonce_len]u8,
+        server_id: []const u8,
+        alpn: []const u8,
+        opened: OpenedSecret,
+    ) Error![sealed_len]u8 {
         try validateContext(server_id, alpn);
-        try validateOpened(opened);
+        try validateOpenedFields(
+            opened.lifetime_seconds,
+            opened.secret.hash,
+            opened.cipher_suite_wire,
+        );
         const current = &self.keys[0];
 
         var output: [sealed_len]u8 = undefined;
@@ -109,10 +147,16 @@ pub const Keyring = struct {
         std.mem.writeInt(
             u16,
             plaintext[16..18],
-            opened.cipher_suite.wireValue(),
+            opened.cipher_suite_wire,
             .big,
         );
-        @memcpy(plaintext[18..], &opened.secret);
+        plaintext[secret_len_offset] =
+            @intCast(opened.secret.bytes().len);
+        @memset(plaintext[secret_offset..], 0);
+        @memcpy(
+            plaintext[secret_offset..][0..opened.secret.bytes().len],
+            opened.secret.bytes(),
+        );
         defer std.crypto.secureZero(u8, &plaintext);
 
         var aad: [512]u8 = undefined;
@@ -135,6 +179,31 @@ pub const Keyring = struct {
         alpn: []const u8,
         now_ms: u64,
     ) Error!Opened {
+        const opened = try self.openSecret(
+            identity,
+            server_id,
+            alpn,
+            now_ms,
+        );
+        return .{
+            .secret = opened.secret.sha256() catch
+                return error.InvalidTicket,
+            .issued_at_ms = opened.issued_at_ms,
+            .lifetime_seconds = opened.lifetime_seconds,
+            .age_add = opened.age_add,
+            .cipher_suite = cipher_suite.Suite.fromWire(
+                opened.cipher_suite_wire,
+            ) orelse return error.InvalidTicket,
+        };
+    }
+
+    pub fn openSecret(
+        self: *const Keyring,
+        identity: []const u8,
+        server_id: []const u8,
+        alpn: []const u8,
+        now_ms: u64,
+    ) Error!OpenedSecret {
         try validateContext(server_id, alpn);
         if (identity.len != sealed_len or identity[0] != format_version) {
             return error.InvalidTicket;
@@ -158,18 +227,32 @@ pub const Keyring = struct {
             key.secret,
         ) catch return error.AuthenticationFailed;
 
-        const opened = Opened{
+        const suite_wire = std.mem.readInt(
+            u16,
+            plaintext[16..18],
+            .big,
+        );
+        const encoded_secret_len = plaintext[secret_len_offset];
+        const hash: secret.Hash = switch (encoded_secret_len) {
+            32 => .sha256,
+            48 => .sha384,
+            else => return error.InvalidTicket,
+        };
+        const opened = OpenedSecret{
             .issued_at_ms = std.mem.readInt(u64, plaintext[0..8], .big),
             .lifetime_seconds = std.mem.readInt(u32, plaintext[8..12], .big),
             .age_add = std.mem.readInt(u32, plaintext[12..16], .big),
-            .cipher_suite = cipher_suite.Suite.fromWire(std.mem.readInt(
-                u16,
-                plaintext[16..18],
-                .big,
-            )) orelse return error.InvalidTicket,
-            .secret = plaintext[18..][0..32].*,
+            .cipher_suite_wire = suite_wire,
+            .secret = secret.Secret.init(
+                hash,
+                plaintext[secret_offset..][0..encoded_secret_len],
+            ) catch return error.InvalidTicket,
         };
-        try validateOpened(opened);
+        try validateOpenedFields(
+            opened.lifetime_seconds,
+            opened.secret.hash,
+            opened.cipher_suite_wire,
+        );
         if (now_ms < opened.issued_at_ms) return error.ExpiredTicket;
         const lifetime_ms = @as(u64, opened.lifetime_seconds) *
             std.time.ms_per_s;
@@ -191,12 +274,22 @@ fn validateKey(key: Key) Error!void {
     if (key.id == 0) return error.InvalidKeyId;
 }
 
-fn validateOpened(opened: Opened) Error!void {
-    if (opened.lifetime_seconds == 0 or
-        opened.lifetime_seconds > codec.max_lifetime_seconds)
+fn validateOpenedFields(
+    lifetime_seconds: u32,
+    hash: secret.Hash,
+    suite_wire: u16,
+) Error!void {
+    if (lifetime_seconds == 0 or
+        lifetime_seconds > codec.max_lifetime_seconds)
     {
         return error.InvalidTicketLifetime;
     }
+    const expected_hash: secret.Hash = switch (suite_wire) {
+        0x1301, 0x1303 => .sha256,
+        0x1302 => .sha384,
+        else => return error.InvalidTicket,
+    };
+    if (expected_hash != hash) return error.InvalidTicket;
 }
 
 fn validateContext(server_id: []const u8, alpn: []const u8) Error!void {

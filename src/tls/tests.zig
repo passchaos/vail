@@ -4,6 +4,7 @@ const cipher_suite = @import("cipher_suite.zig");
 const client_auth = @import("client_auth.zig");
 const key_schedule = @import("key_schedule.zig");
 const key_exchange = @import("key_exchange.zig");
+const secret = @import("secret.zig");
 const ticket_keyring = @import("ticket_keyring.zig");
 const transcript = @import("transcript.zig");
 
@@ -336,6 +337,45 @@ test "stateless ticket keyring binds context and retains rotation history" {
         .secret = [_]u8{0x22} ** ticket_keyring.key_len,
     });
     _ = try keyring.open(&identity, "example:443", "h3", 1500);
+}
+
+test "stateless ticket keyring preserves a SHA-384 PSK" {
+    var keyring = try ticket_keyring.Keyring.init(.{
+        .id = 7,
+        .secret = [_]u8{0x71} ** ticket_keyring.key_len,
+    });
+    defer keyring.deinit();
+    const expected = secret.Secret.fromSha384([_]u8{0x72} ** 48);
+    const identity = try keyring.sealSecret(
+        [_]u8{0x73} ** ticket_keyring.nonce_len,
+        "sha384.example:443",
+        "h3",
+        .{
+            .secret = expected,
+            .age_add = 21,
+            .issued_at_ms = 2000,
+            .lifetime_seconds = 60,
+            .cipher_suite_wire = 0x1302,
+        },
+    );
+    const opened = try keyring.openSecret(
+        &identity,
+        "sha384.example:443",
+        "h3",
+        2500,
+    );
+    try std.testing.expectEqual(secret.Hash.sha384, opened.secret.hash);
+    try std.testing.expect(expected.eql(&opened.secret));
+    try std.testing.expectEqual(@as(u16, 0x1302), opened.cipher_suite_wire);
+    try std.testing.expectError(
+        error.InvalidTicket,
+        keyring.open(
+            &identity,
+            "sha384.example:443",
+            "h3",
+            2500,
+        ),
+    );
 }
 
 test "X25519 exchange and transcript hashing agree on both roles" {

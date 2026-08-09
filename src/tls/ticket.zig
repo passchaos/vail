@@ -139,11 +139,31 @@ pub fn deriveResumptionMasterSecret(
     );
 }
 
+pub fn deriveResumptionMasterSecretSha384(
+    master_secret: [48]u8,
+    transcript_hash: [48]u8,
+) [48]u8 {
+    return key_schedule.Sha384.deriveResumptionMasterSecret(
+        master_secret,
+        transcript_hash,
+    );
+}
+
 pub fn derivePsk(
     resumption_master_secret: [32]u8,
     ticket_nonce: []const u8,
 ) [32]u8 {
     return key_schedule.deriveResumptionPsk(
+        resumption_master_secret,
+        ticket_nonce,
+    );
+}
+
+pub fn derivePskSha384(
+    resumption_master_secret: [48]u8,
+    ticket_nonce: []const u8,
+) [48]u8 {
+    return key_schedule.Sha384.deriveResumptionPsk(
         resumption_master_secret,
         ticket_nonce,
     );
