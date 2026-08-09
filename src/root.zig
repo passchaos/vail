@@ -7,11 +7,13 @@
 pub const tls = @import("tls/mod.zig");
 pub const x509 = @import("x509/mod.zig");
 pub const crypto = @import("crypto/mod.zig");
+pub const quic = @import("quic/mod.zig");
 
 test {
     _ = crypto.mac;
     _ = crypto.memory;
     _ = crypto.sha256;
+    _ = quic.traffic_crypto;
     _ = tls.auth;
     _ = tls.client_auth;
     _ = tls.key_exchange;

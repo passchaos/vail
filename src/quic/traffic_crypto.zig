@@ -1,0 +1,220 @@
+//! QUIC traffic-secret packet cryptography for TLS 1.3 cipher suites.
+//!
+//! Header construction, packet-number reconstruction, and key-phase state are
+//! transport concerns. This module owns key derivation, nonce construction,
+//! AEAD payload protection, and header-protection masks.
+
+const std = @import("std");
+
+const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
+const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
+const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
+const ChaCha20IETF = std.crypto.stream.chacha.ChaCha20IETF;
+
+pub const secret_len = HkdfSha256.prk_length;
+pub const max_key_len = ChaCha20Poly1305.key_length;
+pub const iv_len = Aes128Gcm.nonce_length;
+pub const tag_len = Aes128Gcm.tag_length;
+pub const sample_len = 16;
+pub const mask_len = 5;
+
+pub const Suite = enum(u16) {
+    aes_128_gcm_sha256 = 0x1301,
+    chacha20_poly1305_sha256 = 0x1303,
+
+    pub fn keyLen(self: Suite) usize {
+        return switch (self) {
+            .aes_128_gcm_sha256 => Aes128Gcm.key_length,
+            .chacha20_poly1305_sha256 => ChaCha20Poly1305.key_length,
+        };
+    }
+
+    pub fn confidentialityLimit(self: Suite) u64 {
+        return switch (self) {
+            .aes_128_gcm_sha256 => @as(u64, 1) << 23,
+            .chacha20_poly1305_sha256 => @as(u64, 1) << 62,
+        };
+    }
+
+    pub fn integrityLimit(self: Suite) u64 {
+        return switch (self) {
+            .aes_128_gcm_sha256 => @as(u64, 1) << 52,
+            // RFC 9001 §6.6: ChaCha20-Poly1305 integrity limit is 2^36
+            // packets for the conservative bounds used by QUIC.
+            .chacha20_poly1305_sha256 => @as(u64, 1) << 36,
+        };
+    }
+};
+
+pub const Labels = struct {
+    key: []const u8 = "quic key",
+    iv: []const u8 = "quic iv",
+    hp: []const u8 = "quic hp",
+};
+
+pub const Keys = struct {
+    suite: Suite,
+    secret: [secret_len]u8,
+    key: [max_key_len]u8,
+    iv: [iv_len]u8,
+    hp: [max_key_len]u8,
+
+    pub fn derive(
+        suite: Suite,
+        secret: [secret_len]u8,
+        labels: Labels,
+    ) Keys {
+        var keys = Keys{
+            .suite = suite,
+            .secret = secret,
+            .key = [_]u8{0} ** max_key_len,
+            .iv = std.crypto.tls.hkdfExpandLabel(
+                HkdfSha256,
+                secret,
+                labels.iv,
+                "",
+                iv_len,
+            ),
+            .hp = [_]u8{0} ** max_key_len,
+        };
+        switch (suite) {
+            .aes_128_gcm_sha256 => {
+                keys.key[0..Aes128Gcm.key_length].* =
+                    std.crypto.tls.hkdfExpandLabel(
+                        HkdfSha256,
+                        secret,
+                        labels.key,
+                        "",
+                        Aes128Gcm.key_length,
+                    );
+                keys.hp[0..Aes128Gcm.key_length].* =
+                    std.crypto.tls.hkdfExpandLabel(
+                        HkdfSha256,
+                        secret,
+                        labels.hp,
+                        "",
+                        Aes128Gcm.key_length,
+                    );
+            },
+            .chacha20_poly1305_sha256 => {
+                keys.key = std.crypto.tls.hkdfExpandLabel(
+                    HkdfSha256,
+                    secret,
+                    labels.key,
+                    "",
+                    ChaCha20Poly1305.key_length,
+                );
+                keys.hp = std.crypto.tls.hkdfExpandLabel(
+                    HkdfSha256,
+                    secret,
+                    labels.hp,
+                    "",
+                    ChaCha20Poly1305.key_length,
+                );
+            },
+        }
+        return keys;
+    }
+
+    pub fn protect(
+        self: Keys,
+        packet_number: u64,
+        associated_data: []const u8,
+        plaintext: []const u8,
+        ciphertext: []u8,
+        tag: *[tag_len]u8,
+    ) error{InvalidPayloadLength}!void {
+        if (ciphertext.len != plaintext.len) {
+            return error.InvalidPayloadLength;
+        }
+        const nonce = packetNonce(self.iv, packet_number);
+        switch (self.suite) {
+            .aes_128_gcm_sha256 => Aes128Gcm.encrypt(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                nonce,
+                self.key[0..Aes128Gcm.key_length].*,
+            ),
+            .chacha20_poly1305_sha256 => ChaCha20Poly1305.encrypt(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                nonce,
+                self.key,
+            ),
+        }
+    }
+
+    pub fn open(
+        self: Keys,
+        packet_number: u64,
+        associated_data: []const u8,
+        ciphertext: []const u8,
+        tag: [tag_len]u8,
+        plaintext: []u8,
+    ) (error{InvalidPayloadLength} ||
+        std.crypto.errors.AuthenticationError)!void {
+        if (plaintext.len != ciphertext.len) {
+            return error.InvalidPayloadLength;
+        }
+        const nonce = packetNonce(self.iv, packet_number);
+        switch (self.suite) {
+            .aes_128_gcm_sha256 => try Aes128Gcm.decrypt(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                nonce,
+                self.key[0..Aes128Gcm.key_length].*,
+            ),
+            .chacha20_poly1305_sha256 => try ChaCha20Poly1305.decrypt(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                nonce,
+                self.key,
+            ),
+        }
+    }
+
+    pub fn headerProtectionMask(
+        self: Keys,
+        sample: [sample_len]u8,
+    ) [mask_len]u8 {
+        switch (self.suite) {
+            .aes_128_gcm_sha256 => {
+                const aes = std.crypto.core.aes.Aes128.initEnc(
+                    self.hp[0..Aes128Gcm.key_length].*,
+                );
+                var encrypted: [sample_len]u8 = undefined;
+                aes.encrypt(&encrypted, &sample);
+                return encrypted[0..mask_len].*;
+            },
+            .chacha20_poly1305_sha256 => {
+                const counter = std.mem.readInt(
+                    u32,
+                    sample[0..4],
+                    .little,
+                );
+                const nonce = sample[4..16].*;
+                var mask: [mask_len]u8 = undefined;
+                ChaCha20IETF.stream(&mask, counter, self.hp, nonce);
+                return mask;
+            },
+        }
+    }
+};
+
+pub fn packetNonce(iv: [iv_len]u8, packet_number: u64) [iv_len]u8 {
+    var nonce = iv;
+    var packet_number_bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &packet_number_bytes, packet_number, .big);
+    for (packet_number_bytes, 0..) |byte, index| {
+        nonce[iv_len - packet_number_bytes.len + index] ^= byte;
+    }
+    return nonce;
+}

@@ -20,6 +20,9 @@ The current foundation provides:
   early-data signaling, ticket-age validation, and NewSessionTicket codec.
 - Allocation-free AES-256-GCM stateless session tickets with origin/ALPN
   associated-data binding and bounded current/history key rotation.
+- Allocation-free QUIC traffic-secret protection for AES-128-GCM and
+  ChaCha20-Poly1305, including nonce derivation, header protection, and suite
+  confidentiality/integrity limits.
 
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.
