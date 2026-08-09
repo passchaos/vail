@@ -17,7 +17,6 @@ pub const HandshakeSecrets = Sha256.HandshakeSecrets;
 pub const ApplicationSecrets = Sha256.ApplicationSecrets;
 
 pub const earlySecret = Sha256.earlySecret;
-pub const deriveHandshake = Sha256.deriveHandshake;
 pub const deriveApplication = Sha256.deriveApplication;
 pub const deriveClientEarlyTrafficSecret =
     Sha256.deriveClientEarlyTrafficSecret;
@@ -28,3 +27,15 @@ pub const deriveResumptionMasterSecret =
     Sha256.deriveResumptionMasterSecret;
 pub const deriveResumptionPsk = Sha256.deriveResumptionPsk;
 pub const nextTrafficSecret = Sha256.nextTrafficSecret;
+
+pub fn deriveHandshake(
+    shared_secret: [secret_len]u8,
+    transcript_hash: [secret_len]u8,
+    psk: ?[secret_len]u8,
+) HandshakeSecrets {
+    return Sha256.deriveHandshake(
+        &shared_secret,
+        transcript_hash,
+        psk,
+    );
+}

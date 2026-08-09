@@ -244,7 +244,7 @@ test "TLS 1.3 SHA-384 schedule keeps 48-byte secrets and Finished values" {
     const transcript_hash = [_]u8{0x82} ** Schedule.secret_len;
     const psk = [_]u8{0x83} ** Schedule.secret_len;
     const handshake = Schedule.deriveHandshake(
-        shared,
+        &shared,
         transcript_hash,
         psk,
     );

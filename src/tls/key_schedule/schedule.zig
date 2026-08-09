@@ -42,7 +42,7 @@ pub fn Schedule(comptime Hash: type) type {
         }
 
         pub fn deriveHandshake(
-            shared_secret: [secret_len]u8,
+            shared_secret: []const u8,
             transcript_hash: [secret_len]u8,
             psk: ?[secret_len]u8,
         ) HandshakeSecrets {
@@ -55,7 +55,7 @@ pub fn Schedule(comptime Hash: type) type {
             );
             const handshake_secret = Hkdf.extract(
                 &derived_secret,
-                &shared_secret,
+                shared_secret,
             );
             return .{
                 .early_secret = early_secret,
