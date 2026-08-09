@@ -66,6 +66,7 @@ pub const Suite = enum(u16) {
 /// put ChaCha first, or expose only ChaCha, without changing parser behavior.
 pub const default_preference = [_]Suite{
     .aes_128_gcm_sha256,
+    .aes_256_gcm_sha384,
     .chacha20_poly1305_sha256,
 };
 

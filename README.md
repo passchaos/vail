@@ -20,11 +20,12 @@ The current foundation provides:
   early-data signaling, ticket-age validation, and NewSessionTicket codec.
 - Allocation-free AES-256-GCM stateless session tickets with origin/ALPN
   associated-data binding and bounded current/history key rotation.
-- Allocation-free QUIC traffic-secret protection for AES-128-GCM and
-  ChaCha20-Poly1305, including nonce derivation, header protection, and suite
-  confidentiality/integrity limits.
-- A strict 48-byte-secret AES-256-GCM/HKDF-SHA384 QUIC traffic primitive,
-  isolated from negotiation until the full TLS SHA-384 schedule is enabled.
+- Allocation-free QUIC traffic-secret protection for AES-128-GCM,
+  AES-256-GCM, and ChaCha20-Poly1305, including nonce derivation, header
+  protection, and suite confidentiality/integrity limits.
+- Compile-time-specialized SHA-256/SHA-384 TLS 1.3 schedules, runtime
+  hash-bound secrets/transcripts, 32/48-byte PSK binders, CertificateVerify,
+  Finished, resumption PSKs, and stateless tickets.
 - Canonical TLS 1.3 cipher-suite identities and validated client/server
   preference selection, with stateless tickets bound to their issuing suite.
 
