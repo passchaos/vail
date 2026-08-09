@@ -15,6 +15,7 @@ test {
     _ = crypto.sha256;
     _ = quic.traffic_crypto;
     _ = tls.auth;
+    _ = tls.cipher_suite;
     _ = tls.client_auth;
     _ = tls.key_exchange;
     _ = tls.key_schedule;

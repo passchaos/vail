@@ -10,6 +10,7 @@ const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const ChaCha20IETF = std.crypto.stream.chacha.ChaCha20IETF;
+const cipher_suite = @import("../tls/cipher_suite.zig");
 
 pub const secret_len = HkdfSha256.prk_length;
 pub const max_key_len = ChaCha20Poly1305.key_length;
@@ -18,33 +19,10 @@ pub const tag_len = Aes128Gcm.tag_length;
 pub const sample_len = 16;
 pub const mask_len = 5;
 
-pub const Suite = enum(u16) {
-    aes_128_gcm_sha256 = 0x1301,
-    chacha20_poly1305_sha256 = 0x1303,
-
-    pub fn keyLen(self: Suite) usize {
-        return switch (self) {
-            .aes_128_gcm_sha256 => Aes128Gcm.key_length,
-            .chacha20_poly1305_sha256 => ChaCha20Poly1305.key_length,
-        };
-    }
-
-    pub fn confidentialityLimit(self: Suite) u64 {
-        return switch (self) {
-            .aes_128_gcm_sha256 => @as(u64, 1) << 23,
-            .chacha20_poly1305_sha256 => @as(u64, 1) << 62,
-        };
-    }
-
-    pub fn integrityLimit(self: Suite) u64 {
-        return switch (self) {
-            .aes_128_gcm_sha256 => @as(u64, 1) << 52,
-            // RFC 9001 §6.6: ChaCha20-Poly1305 integrity limit is 2^36
-            // packets for the conservative bounds used by QUIC.
-            .chacha20_poly1305_sha256 => @as(u64, 1) << 36,
-        };
-    }
-};
+/// QUIC uses the TLS-negotiated suite identity directly.  Keeping one enum in
+/// the TLS layer prevents adapters from translating or accidentally assigning
+/// different limits to the same wire value.
+pub const Suite = cipher_suite.Suite;
 
 pub const Labels = struct {
     key: []const u8 = "quic key",

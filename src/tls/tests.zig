@@ -1,5 +1,6 @@
 const std = @import("std");
 const auth = @import("auth.zig");
+const cipher_suite = @import("cipher_suite.zig");
 const client_auth = @import("client_auth.zig");
 const key_schedule = @import("key_schedule.zig");
 const key_exchange = @import("key_exchange.zig");
@@ -8,6 +9,23 @@ const transcript = @import("transcript.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+
+test "TLS cipher suites expose protocol limits from one canonical type" {
+    try std.testing.expectEqual(
+        @as(u16, 0x1301),
+        cipher_suite.Suite.aes_128_gcm_sha256.wireValue(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 32),
+        cipher_suite.Suite.chacha20_poly1305_sha256.keyLen(),
+    );
+    try std.testing.expect(
+        cipher_suite.Suite.chacha20_poly1305_sha256
+            .confidentialityLimit() >
+            cipher_suite.Suite.aes_128_gcm_sha256
+                .confidentialityLimit(),
+    );
+}
 
 test "Certificate and Ed25519 CertificateVerify round-trip" {
     const allocator = std.testing.allocator;
