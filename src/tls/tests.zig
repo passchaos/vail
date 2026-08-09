@@ -215,6 +215,7 @@ test "stateless ticket keyring binds context and retains rotation history" {
         .age_add = 17,
         .issued_at_ms = 1000,
         .lifetime_seconds = 10,
+        .cipher_suite = .chacha20_poly1305_sha256,
     };
     const identity = try keyring.seal(
         [_]u8{0x01} ** ticket_keyring.nonce_len,
@@ -229,6 +230,7 @@ test "stateless ticket keyring binds context and retains rotation history" {
         1500,
     );
     try std.testing.expectEqualSlices(u8, &opened.secret, &decoded.secret);
+    try std.testing.expectEqual(opened.cipher_suite, decoded.cipher_suite);
     try std.testing.expectError(
         error.AuthenticationFailed,
         keyring.open(&identity, "other:443", "h3", 1500),

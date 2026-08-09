@@ -7,15 +7,17 @@
 
 const std = @import("std");
 const codec = @import("ticket.zig");
+const cipher_suite = @import("cipher_suite.zig");
 
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 pub const key_len = Aes256Gcm.key_length;
 pub const nonce_len = Aes256Gcm.nonce_length;
 pub const tag_len = Aes256Gcm.tag_length;
 pub const max_keys = 4;
-const format_version: u8 = 1;
+const format_version: u8 = 2;
 const header_len = 1 + @sizeOf(u32) + nonce_len;
-const plaintext_len = @sizeOf(u64) + @sizeOf(u32) + @sizeOf(u32) + 32;
+const plaintext_len =
+    @sizeOf(u64) + @sizeOf(u32) + @sizeOf(u32) + @sizeOf(u16) + 32;
 pub const sealed_len = header_len + plaintext_len + tag_len;
 
 pub const Error = error{
@@ -39,6 +41,7 @@ pub const Opened = struct {
     age_add: u32,
     issued_at_ms: u64,
     lifetime_seconds: u32,
+    cipher_suite: cipher_suite.Suite = .aes_128_gcm_sha256,
 };
 
 pub const Keyring = struct {
@@ -103,7 +106,13 @@ pub const Keyring = struct {
         std.mem.writeInt(u64, plaintext[0..8], opened.issued_at_ms, .big);
         std.mem.writeInt(u32, plaintext[8..12], opened.lifetime_seconds, .big);
         std.mem.writeInt(u32, plaintext[12..16], opened.age_add, .big);
-        @memcpy(plaintext[16..], &opened.secret);
+        std.mem.writeInt(
+            u16,
+            plaintext[16..18],
+            opened.cipher_suite.wireValue(),
+            .big,
+        );
+        @memcpy(plaintext[18..], &opened.secret);
         defer std.crypto.secureZero(u8, &plaintext);
 
         var aad: [512]u8 = undefined;
@@ -153,7 +162,12 @@ pub const Keyring = struct {
             .issued_at_ms = std.mem.readInt(u64, plaintext[0..8], .big),
             .lifetime_seconds = std.mem.readInt(u32, plaintext[8..12], .big),
             .age_add = std.mem.readInt(u32, plaintext[12..16], .big),
-            .secret = plaintext[16..][0..32].*,
+            .cipher_suite = cipher_suite.Suite.fromWire(std.mem.readInt(
+                u16,
+                plaintext[16..18],
+                .big,
+            )) orelse return error.InvalidTicket,
+            .secret = plaintext[18..][0..32].*,
         };
         try validateOpened(opened);
         if (now_ms < opened.issued_at_ms) return error.ExpiredTicket;
