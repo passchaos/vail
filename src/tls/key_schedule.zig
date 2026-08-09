@@ -7,6 +7,8 @@
 
 const std = @import("std");
 const schedule = @import("key_schedule/schedule.zig");
+const secret = @import("secret.zig");
+const transcript = @import("transcript.zig");
 
 pub const Schedule = schedule.Schedule;
 pub const Sha256 = Schedule(std.crypto.hash.sha2.Sha256);
@@ -38,4 +40,126 @@ pub fn deriveHandshake(
         transcript_hash,
         psk,
     );
+}
+
+pub const RuntimeHandshakeSecrets = struct {
+    early_secret: secret.Secret,
+    handshake_secret: secret.Secret,
+    client_traffic_secret: secret.Secret,
+    server_traffic_secret: secret.Secret,
+};
+
+pub const RuntimeApplicationSecrets = struct {
+    master_secret: secret.Secret,
+    client_traffic_secret: secret.Secret,
+    server_traffic_secret: secret.Secret,
+};
+
+pub const Error = secret.Error || error{
+    HashMismatch,
+    BadFinished,
+};
+
+pub fn deriveHandshakeFor(
+    algorithm: secret.Hash,
+    shared_secret: []const u8,
+    transcript_hash: transcript.Digest,
+    psk: ?secret.Secret,
+) Error!RuntimeHandshakeSecrets {
+    if (transcript_hash.hash != algorithm) return error.HashMismatch;
+    if (psk) |value| {
+        if (value.hash != algorithm) return error.HashMismatch;
+    }
+    return switch (algorithm) {
+        .sha256 => blk: {
+            const hash = try transcript_hash.sha256();
+            const derived = Sha256.deriveHandshake(
+                shared_secret,
+                hash,
+                if (psk) |value| try value.sha256() else null,
+            );
+            break :blk .{
+                .early_secret = .fromSha256(derived.early_secret),
+                .handshake_secret = .fromSha256(derived.handshake_secret),
+                .client_traffic_secret = .fromSha256(derived.client_traffic_secret),
+                .server_traffic_secret = .fromSha256(derived.server_traffic_secret),
+            };
+        },
+        .sha384 => blk: {
+            const hash = try transcript_hash.sha384();
+            const derived = Sha384.deriveHandshake(
+                shared_secret,
+                hash,
+                if (psk) |value| try value.sha384() else null,
+            );
+            break :blk .{
+                .early_secret = .fromSha384(derived.early_secret),
+                .handshake_secret = .fromSha384(derived.handshake_secret),
+                .client_traffic_secret = .fromSha384(derived.client_traffic_secret),
+                .server_traffic_secret = .fromSha384(derived.server_traffic_secret),
+            };
+        },
+    };
+}
+
+pub fn deriveApplicationFor(
+    handshake_secret: secret.Secret,
+    transcript_hash: transcript.Digest,
+) Error!RuntimeApplicationSecrets {
+    if (handshake_secret.hash != transcript_hash.hash) {
+        return error.HashMismatch;
+    }
+    return switch (handshake_secret.hash) {
+        .sha256 => blk: {
+            const derived = Sha256.deriveApplication(
+                try handshake_secret.sha256(),
+                try transcript_hash.sha256(),
+            );
+            break :blk .{
+                .master_secret = .fromSha256(derived.master_secret),
+                .client_traffic_secret = .fromSha256(derived.client_traffic_secret),
+                .server_traffic_secret = .fromSha256(derived.server_traffic_secret),
+            };
+        },
+        .sha384 => blk: {
+            const derived = Sha384.deriveApplication(
+                try handshake_secret.sha384(),
+                try transcript_hash.sha384(),
+            );
+            break :blk .{
+                .master_secret = .fromSha384(derived.master_secret),
+                .client_traffic_secret = .fromSha384(derived.client_traffic_secret),
+                .server_traffic_secret = .fromSha384(derived.server_traffic_secret),
+            };
+        },
+    };
+}
+
+pub fn computeFinishedFor(
+    base_key: secret.Secret,
+    transcript_hash: transcript.Digest,
+) Error!secret.Secret {
+    if (base_key.hash != transcript_hash.hash) {
+        return error.HashMismatch;
+    }
+    return switch (base_key.hash) {
+        .sha256 => .fromSha256(Sha256.computeFinished(
+            try base_key.sha256(),
+            try transcript_hash.sha256(),
+        )),
+        .sha384 => .fromSha384(Sha384.computeFinished(
+            try base_key.sha384(),
+            try transcript_hash.sha384(),
+        )),
+    };
+}
+
+pub fn verifyFinishedFor(
+    base_key: secret.Secret,
+    transcript_hash: transcript.Digest,
+    verify_data: secret.Secret,
+) Error!void {
+    if (base_key.hash != verify_data.hash) return error.HashMismatch;
+    const expected = try computeFinishedFor(base_key, transcript_hash);
+    if (!expected.eql(&verify_data)) return error.BadFinished;
 }

@@ -295,6 +295,48 @@ test "TLS 1.3 SHA-384 schedule keeps 48-byte secrets and Finished values" {
     );
 }
 
+test "runtime TLS key schedule dispatch preserves SHA-384 secret identity" {
+    const shared = [_]u8{0x91} ** 32;
+    const handshake_hash = transcript.hashFor(
+        .sha384,
+        &.{ "client hello", "server hello" },
+    );
+    const handshake = try key_schedule.deriveHandshakeFor(
+        .sha384,
+        &shared,
+        handshake_hash,
+        null,
+    );
+    try std.testing.expectEqual(
+        secret.Hash.sha384,
+        handshake.handshake_secret.hash,
+    );
+    const application_hash = transcript.hashFor(
+        .sha384,
+        &.{ "client hello", "server flight" },
+    );
+    const application = try key_schedule.deriveApplicationFor(
+        handshake.handshake_secret,
+        application_hash,
+    );
+    const finished = try key_schedule.computeFinishedFor(
+        application.client_traffic_secret,
+        application_hash,
+    );
+    try key_schedule.verifyFinishedFor(
+        application.client_traffic_secret,
+        application_hash,
+        finished,
+    );
+    try std.testing.expectError(
+        error.HashMismatch,
+        key_schedule.deriveApplicationFor(
+            secret.Secret.fromSha256([_]u8{0} ** 32),
+            application_hash,
+        ),
+    );
+}
+
 fn expectHex(expected_hex: []const u8, actual: []const u8) !void {
     var expected: [64]u8 = undefined;
     const decoded = try std.fmt.hexToBytes(&expected, expected_hex);
