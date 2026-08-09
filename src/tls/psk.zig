@@ -7,6 +7,9 @@
 const std = @import("std");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const Sha384 = std.crypto.hash.sha2.Sha384;
+const key_schedule = @import("key_schedule.zig");
+const secret = @import("secret.zig");
 
 pub const ext_pre_shared_key: u16 = 0x0029;
 pub const ext_early_data: u16 = 0x002a;
@@ -30,7 +33,8 @@ pub const Error = std.mem.Allocator.Error || error{
 pub const Offer = struct {
     identity: []const u8,
     obfuscated_ticket_age: u32,
-    binder: [Sha256.digest_length]u8,
+    binder_hash: secret.Hash,
+    binder: []const u8,
     binder_truncated_len: usize,
 };
 
@@ -67,6 +71,62 @@ pub fn appendClientOfferWithEarlyData(
     psk: [Sha256.digest_length]u8,
     offer_early_data: bool,
 ) Error!void {
+    return appendClientOfferForSchedule(
+        key_schedule.Sha256,
+        client_hello,
+        allocator,
+        identity,
+        obfuscated_ticket_age,
+        psk,
+        offer_early_data,
+    );
+}
+
+pub fn appendClientOfferSha384(
+    client_hello: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    identity: []const u8,
+    obfuscated_ticket_age: u32,
+    psk: [Sha384.digest_length]u8,
+) Error!void {
+    return appendClientOfferWithEarlyDataSha384(
+        client_hello,
+        allocator,
+        identity,
+        obfuscated_ticket_age,
+        psk,
+        false,
+    );
+}
+
+pub fn appendClientOfferWithEarlyDataSha384(
+    client_hello: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    identity: []const u8,
+    obfuscated_ticket_age: u32,
+    psk: [Sha384.digest_length]u8,
+    offer_early_data: bool,
+) Error!void {
+    return appendClientOfferForSchedule(
+        key_schedule.Sha384,
+        client_hello,
+        allocator,
+        identity,
+        obfuscated_ticket_age,
+        psk,
+        offer_early_data,
+    );
+}
+
+fn appendClientOfferForSchedule(
+    comptime Schedule: type,
+    client_hello: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    identity: []const u8,
+    obfuscated_ticket_age: u32,
+    psk: [Schedule.secret_len]u8,
+    offer_early_data: bool,
+) Error!void {
     if (identity.len == 0 or identity.len > std.math.maxInt(u16)) {
         return error.InvalidPskIdentity;
     }
@@ -94,7 +154,7 @@ pub fn appendClientOfferWithEarlyData(
 
     const identity_entry_len = 2 + identity.len + 4;
     const identities_len = identity_entry_len;
-    const binders_len = 1 + Sha256.digest_length;
+    const binders_len = 1 + Schedule.secret_len;
     const psk_payload_len = 2 + identities_len + 2 + binders_len;
     if (psk_payload_len > std.math.maxInt(u16)) {
         return error.InvalidPskIdentity;
@@ -111,10 +171,10 @@ pub fn appendClientOfferWithEarlyData(
     try client_hello.appendSlice(allocator, &age);
     var binder_header: [3]u8 = undefined;
     std.mem.writeInt(u16, binder_header[0..2], @intCast(binders_len), .big);
-    binder_header[2] = Sha256.digest_length;
+    binder_header[2] = Schedule.secret_len;
     try client_hello.appendSlice(allocator, &binder_header);
     const binder_offset = client_hello.items.len;
-    try client_hello.appendNTimes(allocator, 0, Sha256.digest_length);
+    try client_hello.appendNTimes(allocator, 0, Schedule.secret_len);
 
     const added = client_hello.items.len - offsets.message_len;
     const new_extensions_len = std.math.add(
@@ -143,12 +203,16 @@ pub fn appendClientOfferWithEarlyData(
     // RFC 8446 §4.2.11.2: transcript ends immediately before the binders
     // vector's uint16 length field.
     const binder_truncated_len = binder_offset - 3;
-    const binder = computeBinder(
+    const binder_hash = transcriptHash(
+        Schedule,
+        client_hello.items[0..binder_truncated_len],
+    );
+    const binder = Schedule.computeBinder(
         psk,
-        transcriptHash(client_hello.items[0..binder_truncated_len]),
+        binder_hash,
     );
     @memcpy(
-        client_hello.items[binder_offset..][0..Sha256.digest_length],
+        client_hello.items[binder_offset..][0..Schedule.secret_len],
         &binder,
     );
 }
@@ -231,16 +295,61 @@ pub fn verifyClientOffer(
     expected_identity: []const u8,
     psk: [Sha256.digest_length]u8,
 ) Error!void {
+    return verifyClientOfferForSchedule(
+        key_schedule.Sha256,
+        .sha256,
+        client_hello,
+        offer,
+        expected_identity,
+        psk,
+    );
+}
+
+pub fn verifyClientOfferSha384(
+    client_hello: []const u8,
+    offer: Offer,
+    expected_identity: []const u8,
+    psk: [Sha384.digest_length]u8,
+) Error!void {
+    return verifyClientOfferForSchedule(
+        key_schedule.Sha384,
+        .sha384,
+        client_hello,
+        offer,
+        expected_identity,
+        psk,
+    );
+}
+
+fn verifyClientOfferForSchedule(
+    comptime Schedule: type,
+    expected_hash: secret.Hash,
+    client_hello: []const u8,
+    offer: Offer,
+    expected_identity: []const u8,
+    psk: [Schedule.secret_len]u8,
+) Error!void {
     if (!std.mem.eql(u8, offer.identity, expected_identity)) {
         return error.InvalidPskIdentity;
     }
-    const expected = computeBinder(
-        psk,
-        transcriptHash(client_hello[0..offer.binder_truncated_len]),
+    if (offer.binder_hash != expected_hash or
+        offer.binder.len != Schedule.secret_len)
+    {
+        return error.InvalidPskBinder;
+    }
+    const binder_hash = transcriptHash(
+        Schedule,
+        client_hello[0..offer.binder_truncated_len],
     );
+    const expected = Schedule.computeBinder(
+        psk,
+        binder_hash,
+    );
+    const actual: [Schedule.secret_len]u8 =
+        offer.binder[0..Schedule.secret_len].*;
     if (!std.crypto.timing_safe.eql(
-        [Sha256.digest_length]u8,
-        offer.binder,
+        [Schedule.secret_len]u8,
+        actual,
         expected,
     )) {
         return error.InvalidPskBinder;
@@ -344,7 +453,7 @@ pub fn computeBinder(
     psk: [Sha256.digest_length]u8,
     truncated_client_hello_hash: [Sha256.digest_length]u8,
 ) [Sha256.digest_length]u8 {
-    return @import("key_schedule.zig").computeBinder(
+    return key_schedule.computeBinder(
         psk,
         truncated_client_hello_hash,
     );
@@ -353,14 +462,14 @@ pub fn computeBinder(
 pub fn earlySecret(
     psk: ?[Sha256.digest_length]u8,
 ) [Sha256.digest_length]u8 {
-    return @import("key_schedule.zig").earlySecret(psk);
+    return key_schedule.earlySecret(psk);
 }
 
 pub fn deriveClientEarlyTrafficSecret(
     psk: [Sha256.digest_length]u8,
     client_hello_hash: [Sha256.digest_length]u8,
 ) [Sha256.digest_length]u8 {
-    return @import("key_schedule.zig")
+    return key_schedule
         .deriveClientEarlyTrafficSecret(
         psk,
         client_hello_hash,
@@ -412,17 +521,23 @@ fn parseOfferPayload(
         std.mem.readInt(u16, client_hello[pos..][0..2], .big);
     const binder_truncated_len = pos;
     pos += 2;
-    if (binders_len != 1 + Sha256.digest_length or
-        payload_end - pos != binders_len or
-        client_hello[pos] != Sha256.digest_length)
+    const binder_len = client_hello[pos];
+    const binder_hash: secret.Hash = switch (binder_len) {
+        Sha256.digest_length => .sha256,
+        Sha384.digest_length => .sha384,
+        else => return error.InvalidPskBinder,
+    };
+    if (binders_len != 1 + binder_len or
+        payload_end - pos != binders_len)
     {
         return error.InvalidPskBinder;
     }
     pos += 1;
-    const binder = client_hello[pos..][0..Sha256.digest_length].*;
+    const binder = client_hello[pos..][0..binder_len];
     return .{
         .identity = identity,
         .obfuscated_ticket_age = age,
+        .binder_hash = binder_hash,
         .binder = binder,
         .binder_truncated_len = binder_truncated_len,
     };
@@ -476,9 +591,18 @@ fn clientHelloOffsets(bytes: []const u8) Error!ClientHelloOffsets {
     };
 }
 
-fn transcriptHash(bytes: []const u8) [Sha256.digest_length]u8 {
-    var out: [Sha256.digest_length]u8 = undefined;
-    Sha256.hash(bytes, &out, .{});
+fn transcriptHash(
+    comptime Schedule: type,
+    bytes: []const u8,
+) [Schedule.secret_len]u8 {
+    const Hash = if (Schedule == key_schedule.Sha256)
+        Sha256
+    else if (Schedule == key_schedule.Sha384)
+        Sha384
+    else
+        @compileError("unsupported TLS key schedule");
+    var out: [Schedule.secret_len]u8 = undefined;
+    Hash.hash(bytes, &out, .{});
     return out;
 }
 
@@ -528,6 +652,41 @@ test "TLS PSK appends and verifies a mandatory-last binder" {
     try std.testing.expectError(
         error.InvalidPskIdentity,
         verifyClientOffer(hello.items, offer, "other", psk),
+    );
+}
+
+test "TLS PSK SHA-384 binder uses 48 wire bytes and rejects SHA-256 verification" {
+    const allocator = std.testing.allocator;
+    var hello = try baseClientHello(allocator);
+    defer hello.deinit(allocator);
+    const psk = [_]u8{0x84} ** Sha384.digest_length;
+    try appendClientOfferSha384(
+        &hello,
+        allocator,
+        "sha384-ticket",
+        0x11223344,
+        psk,
+    );
+    const offer = try parseClientOffer(hello.items);
+    try std.testing.expectEqual(secret.Hash.sha384, offer.binder_hash);
+    try std.testing.expectEqual(
+        @as(usize, Sha384.digest_length),
+        offer.binder.len,
+    );
+    try verifyClientOfferSha384(
+        hello.items,
+        offer,
+        "sha384-ticket",
+        psk,
+    );
+    try std.testing.expectError(
+        error.InvalidPskBinder,
+        verifyClientOffer(
+            hello.items,
+            offer,
+            "sha384-ticket",
+            psk[0..Sha256.digest_length].*,
+        ),
     );
 }
 
