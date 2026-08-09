@@ -1,9 +1,9 @@
 //! TLS 1.3 server Certificate and CertificateVerify helpers.
 //!
 //! The handshake codec is certificate-format agnostic, while the built-in
-//! Ed25519 authenticator accepts either a raw 32-byte public key or an X.509
-//! leaf whose SubjectPublicKeyInfo uses Ed25519. Applications can additionally
-//! provide a trust callback for chain, validity, EKU, and policy validation.
+//! Built-in possession verification supports Ed25519, ECDSA P-256, and
+//! RSA-PSS/RSAE SHA-256 X.509 leaves. Applications can additionally provide a
+//! trust callback for chain, validity, EKU, and policy validation.
 
 const std = @import("std");
 
@@ -13,6 +13,7 @@ const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const signature_scheme_ecdsa_secp256r1_sha256: u16 = 0x0403;
+pub const signature_scheme_rsa_pss_rsae_sha256: u16 = 0x0804;
 pub const signature_scheme_ed25519: u16 = 0x0807;
 pub const handshake_type_certificate: u8 = 0x0b;
 pub const handshake_type_certificate_verify: u8 = 0x0f;
@@ -112,6 +113,10 @@ pub const ClientVerifier = struct {
     context: ?*anyopaque = null,
     pinned_ed25519_public_key: ?[Ed25519.PublicKey.encoded_length]u8 = null,
     pinned_ecdsa_p256_public_key: ?[EcdsaP256Sha256.PublicKey.uncompressed_sec1_encoded_length]u8 = null,
+    /// DER RSAPublicKey bytes from X.509 SubjectPublicKeyInfo's BIT STRING
+    /// payload (not the complete SubjectPublicKeyInfo). The caller retains
+    /// ownership.
+    pinned_rsa_public_key: ?[]const u8 = null,
 
     pub fn verifyTrust(
         self: ClientVerifier,
@@ -144,6 +149,13 @@ pub const ClientVerifier = struct {
                 actual,
                 pinned,
             )) {
+                return error.CertificateUntrusted;
+            }
+            return;
+        }
+        if (self.pinned_rsa_public_key) |pinned| {
+            const actual = try rsaCertificatePublicKey(chain[0]);
+            if (!timingSafeEqlBytes(actual, pinned)) {
                 return error.CertificateUntrusted;
             }
             return;
@@ -347,7 +359,8 @@ pub fn parseCertificateVerify(
     if (body_len != bytes.len - pos) return error.InvalidCertificateVerify;
     const scheme = try readInt(u16, bytes, &pos);
     if (scheme != signature_scheme_ed25519 and
-        scheme != signature_scheme_ecdsa_secp256r1_sha256)
+        scheme != signature_scheme_ecdsa_secp256r1_sha256 and
+        scheme != signature_scheme_rsa_pss_rsae_sha256)
     {
         return error.UnsupportedSignatureScheme;
     }
@@ -418,6 +431,44 @@ pub fn verifyCertificateVerifyForRole(
             updateCertificateVerifyInput(&verifier, transcript_hash, role);
             verifier.verify() catch return error.BadCertificateVerify;
         },
+        signature_scheme_rsa_pss_rsae_sha256 => {
+            const public_key_der = try rsaCertificatePublicKey(certificate);
+            const components = Certificate.rsa.PublicKey.parseDer(
+                public_key_der,
+            ) catch return error.InvalidCertificate;
+            const modulus = components.modulus;
+            const exponent = components.exponent;
+            switch (modulus.len) {
+                inline 128, 256, 384, 512 => |modulus_len| {
+                    if (parsed.signature.len != modulus_len) {
+                        return error.InvalidCertificateVerify;
+                    }
+                    const public_key = Certificate.rsa.PublicKey.fromBytes(
+                        exponent,
+                        modulus,
+                    ) catch return error.InvalidCertificate;
+                    const signature =
+                        Certificate.rsa.PSSSignature.fromBytes(
+                            modulus_len,
+                            parsed.signature,
+                        );
+                    const separator = [_]u8{0};
+                    Certificate.rsa.PSSSignature.concatVerify(
+                        modulus_len,
+                        signature,
+                        &.{
+                            " " ** 64,
+                            certificateVerifyContext(role),
+                            &separator,
+                            transcript_hash,
+                        },
+                        public_key,
+                        Sha256,
+                    ) catch return error.BadCertificateVerify;
+                },
+                else => return error.UnsupportedCertificateKey,
+            }
+        },
         else => return error.UnsupportedSignatureScheme,
     }
 }
@@ -483,6 +534,28 @@ fn p256CertificatePublicKey(
     }
     return public_key[0..EcdsaP256Sha256.PublicKey
         .uncompressed_sec1_encoded_length].*;
+}
+
+fn rsaCertificatePublicKey(certificate: []const u8) Error![]const u8 {
+    const parsed = try parseX509(certificate);
+    if (parsed.pub_key_algo != .rsaEncryption) {
+        return error.UnsupportedCertificateKey;
+    }
+    const public_key = parsed.pubKey();
+    // Parse now so malformed or non-canonical DER cannot be accepted merely
+    // because a caller uses trust callbacks instead of the built-in pin.
+    _ = Certificate.rsa.PublicKey.parseDer(public_key) catch
+        return error.InvalidCertificate;
+    return public_key;
+}
+
+fn timingSafeEqlBytes(a: []const u8, b: []const u8) bool {
+    // Length is public key metadata. Once equal, visit every byte and avoid
+    // data-dependent early exits so pin mismatch position is not observable.
+    if (a.len != b.len) return false;
+    var difference: u8 = 0;
+    for (a, b) |lhs, rhs| difference |= lhs ^ rhs;
+    return difference == 0;
 }
 
 fn parseX509(certificate: []const u8) Error!Certificate.Parsed {

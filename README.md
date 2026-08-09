@@ -9,7 +9,9 @@ The current foundation provides:
 - domain-separated HMAC-SHA256 and constant-time tag verification;
 - fixed-size SHA-256 digests and explicit secure-memory wiping;
 - TLS 1.3 Certificate and CertificateVerify codecs;
-- Ed25519 and ECDSA P-256 signer/verifier implementations;
+- Ed25519 and ECDSA P-256 signer/verifier implementations, plus
+  RSA-PSS/RSAE SHA-256 X.509 CertificateVerify and DER RSAPublicKey pin
+  verification;
 - type-safe server identities and pinned-key client verification;
 - CertificateRequest codec and mTLS policy types;
 - X.509 chain, hostname, validity, custom-bundle, and system-CA verification.
