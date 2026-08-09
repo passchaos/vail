@@ -264,7 +264,7 @@ pub fn writeCertificateVerify(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     signer: Signer,
-    transcript_hash: [Sha256.digest_length]u8,
+    transcript_hash: []const u8,
 ) Error!void {
     return writeCertificateVerifyForRole(
         list,
@@ -279,27 +279,34 @@ pub fn writeCertificateVerifyForRole(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     signer: Signer,
-    transcript_hash: [Sha256.digest_length]u8,
+    transcript_hash: []const u8,
     role: EndpointRole,
 ) Error!void {
+    if (transcript_hash.len != Sha256.digest_length and
+        transcript_hash.len != std.crypto.hash.sha2.Sha384.digest_length)
+    {
+        return error.InvalidCertificateVerify;
+    }
     const context = certificateVerifyContext(role);
     var signed_content: [
         64 + client_certificate_verify_context.len + 1 +
-            Sha256.digest_length
+            std.crypto.hash.sha2.Sha384.digest_length
     ]u8 = undefined;
     @memset(signed_content[0..64], 0x20);
     @memcpy(signed_content[64 .. 64 + context.len], context);
     const separator = 64 + context.len;
     signed_content[separator] = 0;
     @memcpy(
-        signed_content[separator + 1 ..][0..Sha256.digest_length],
-        &transcript_hash,
+        signed_content[separator + 1 ..][0..transcript_hash.len],
+        transcript_hash,
     );
+    const content = signed_content[0 .. separator + 1 +
+        transcript_hash.len];
     var signature_storage: [EcdsaP256Sha256.Signature.der_encoded_length_max]u8 = undefined;
     const signature_bytes: []const u8 = switch (signer) {
         .ed25519 => |ed| blk: {
             const signature = ed.key_pair.sign(
-                &signed_content,
+                content,
                 ed.noise,
             ) catch return error.InvalidCertificateVerify;
             const bytes = signature.toBytes();
@@ -308,7 +315,7 @@ pub fn writeCertificateVerifyForRole(
         },
         .ecdsa_p256_sha256 => |ecdsa| blk: {
             const signature = ecdsa.key_pair.sign(
-                &signed_content,
+                content,
                 ecdsa.noise,
             ) catch return error.InvalidCertificateVerify;
             var der: [EcdsaP256Sha256.Signature.der_encoded_length_max]u8 =
@@ -359,7 +366,7 @@ pub fn parseCertificateVerify(
 pub fn verifyCertificateVerify(
     certificate: []const u8,
     parsed: ParsedCertificateVerify,
-    transcript_hash: [Sha256.digest_length]u8,
+    transcript_hash: []const u8,
 ) Error!void {
     return verifyCertificateVerifyForRole(
         certificate,
@@ -372,9 +379,14 @@ pub fn verifyCertificateVerify(
 pub fn verifyCertificateVerifyForRole(
     certificate: []const u8,
     parsed: ParsedCertificateVerify,
-    transcript_hash: [Sha256.digest_length]u8,
+    transcript_hash: []const u8,
     role: EndpointRole,
 ) Error!void {
+    if (transcript_hash.len != Sha256.digest_length and
+        transcript_hash.len != std.crypto.hash.sha2.Sha384.digest_length)
+    {
+        return error.InvalidCertificateVerify;
+    }
     switch (parsed.scheme) {
         signature_scheme_ed25519 => {
             if (parsed.signature.len != Ed25519.Signature.encoded_length) {
@@ -412,13 +424,13 @@ pub fn verifyCertificateVerifyForRole(
 
 fn updateCertificateVerifyInput(
     verifier: anytype,
-    transcript_hash: [Sha256.digest_length]u8,
+    transcript_hash: []const u8,
     role: EndpointRole,
 ) void {
     verifier.update(" " ** 64);
     verifier.update(certificateVerifyContext(role));
     verifier.update(&.{0});
-    verifier.update(&transcript_hash);
+    verifier.update(transcript_hash);
 }
 
 fn certificateVerifyContext(role: EndpointRole) []const u8 {

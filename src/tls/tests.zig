@@ -46,13 +46,13 @@ test "Certificate and Ed25519 CertificateVerify round-trip" {
         &verify,
         allocator,
         .{ .ed25519 = .{ .key_pair = key_pair } },
-        transcript_hash,
+        &transcript_hash,
     );
     const parsed_verify = try auth.parseCertificateVerify(verify.items);
     try auth.verifyCertificateVerify(
         parsed.entries[0],
         parsed_verify,
-        transcript_hash,
+        &transcript_hash,
     );
     var wrong_hash = transcript_hash;
     wrong_hash[0] ^= 1;
@@ -61,7 +61,7 @@ test "Certificate and Ed25519 CertificateVerify round-trip" {
         auth.verifyCertificateVerify(
             parsed.entries[0],
             parsed_verify,
-            wrong_hash,
+            &wrong_hash,
         ),
     );
 }
@@ -79,10 +79,10 @@ test "ECDSA P256 CertificateVerify round-trip" {
         &verify,
         allocator,
         .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
-        transcript_hash,
+        &transcript_hash,
     );
     const parsed = try auth.parseCertificateVerify(verify.items);
-    try auth.verifyCertificateVerify(&public_key, parsed, transcript_hash);
+    try auth.verifyCertificateVerify(&public_key, parsed, &transcript_hash);
 }
 
 test "CertificateRequest advertises built-in signature schemes" {
@@ -114,14 +114,14 @@ test "client CertificateVerify uses the distinct TLS context" {
         &encoded,
         allocator,
         .{ .ed25519 = .{ .key_pair = key_pair } },
-        transcript_hash,
+        &transcript_hash,
         .client,
     );
     const parsed = try auth.parseCertificateVerify(encoded.items);
     try auth.verifyCertificateVerifyForRole(
         &public_key,
         parsed,
-        transcript_hash,
+        &transcript_hash,
         .client,
     );
     try std.testing.expectError(
@@ -129,8 +129,41 @@ test "client CertificateVerify uses the distinct TLS context" {
         auth.verifyCertificateVerifyForRole(
             &public_key,
             parsed,
-            transcript_hash,
+            &transcript_hash,
             .server,
+        ),
+    );
+}
+
+test "CertificateVerify signs a SHA-384 transcript without truncation" {
+    const allocator = std.testing.allocator;
+    const key_pair = try Ed25519.KeyPair.generateDeterministic(
+        [_]u8{0x63} ** Ed25519.KeyPair.seed_length,
+    );
+    const public_key = key_pair.public_key.toBytes();
+    const transcript_hash = [_]u8{0x64} **
+        std.crypto.hash.sha2.Sha384.digest_length;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try auth.writeCertificateVerify(
+        &encoded,
+        allocator,
+        .{ .ed25519 = .{ .key_pair = key_pair } },
+        &transcript_hash,
+    );
+    const parsed = try auth.parseCertificateVerify(encoded.items);
+    try auth.verifyCertificateVerify(
+        &public_key,
+        parsed,
+        &transcript_hash,
+    );
+    var truncated = transcript_hash[0..32].*;
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        auth.verifyCertificateVerify(
+            &public_key,
+            parsed,
+            &truncated,
         ),
     );
 }
