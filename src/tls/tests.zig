@@ -2,7 +2,9 @@ const std = @import("std");
 const auth = @import("auth.zig");
 const client_auth = @import("client_auth.zig");
 const key_schedule = @import("key_schedule.zig");
+const key_exchange = @import("key_exchange.zig");
 const ticket_keyring = @import("ticket_keyring.zig");
+const transcript = @import("transcript.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -117,10 +119,10 @@ test "client CertificateVerify uses the distinct TLS context" {
 
 test "TLS 1.3 key schedule separates handshake application and PSK secrets" {
     const shared = [_]u8{0x71} ** key_schedule.secret_len;
-    const transcript = [_]u8{0x72} ** key_schedule.secret_len;
+    const transcript_hash = [_]u8{0x72} ** key_schedule.secret_len;
     const psk = [_]u8{0x73} ** key_schedule.secret_len;
-    const plain = key_schedule.deriveHandshake(shared, transcript, null);
-    const resumed = key_schedule.deriveHandshake(shared, transcript, psk);
+    const plain = key_schedule.deriveHandshake(shared, transcript_hash, null);
+    const resumed = key_schedule.deriveHandshake(shared, transcript_hash, psk);
     try std.testing.expect(!std.mem.eql(
         u8,
         &plain.handshake_secret,
@@ -134,7 +136,7 @@ test "TLS 1.3 key schedule separates handshake application and PSK secrets" {
 
     const application = key_schedule.deriveApplication(
         resumed.handshake_secret,
-        transcript,
+        transcript_hash,
     );
     try std.testing.expect(!std.mem.eql(
         u8,
@@ -143,11 +145,11 @@ test "TLS 1.3 key schedule separates handshake application and PSK secrets" {
     ));
     const finished = key_schedule.computeFinished(
         resumed.client_traffic_secret,
-        transcript,
+        transcript_hash,
     );
     try key_schedule.verifyFinished(
         resumed.client_traffic_secret,
-        transcript,
+        transcript_hash,
         finished,
     );
     var wrong = finished;
@@ -156,14 +158,14 @@ test "TLS 1.3 key schedule separates handshake application and PSK secrets" {
         error.BadFinished,
         key_schedule.verifyFinished(
             resumed.client_traffic_secret,
-            transcript,
+            transcript_hash,
             wrong,
         ),
     );
 
     const resumption_master = key_schedule.deriveResumptionMasterSecret(
         application.master_secret,
-        transcript,
+        transcript_hash,
     );
     const first_psk = key_schedule.deriveResumptionPsk(
         resumption_master,
@@ -218,6 +220,36 @@ test "stateless ticket keyring binds context and retains rotation history" {
         .secret = [_]u8{0x22} ** ticket_keyring.key_len,
     });
     _ = try keyring.open(&identity, "example:443", "h3", 1500);
+}
+
+test "X25519 exchange and transcript hashing agree on both roles" {
+    const client_secret = [_]u8{0x31} ** key_exchange.secret_len;
+    const server_secret = [_]u8{0x32} ** key_exchange.secret_len;
+    const client_public = try key_exchange.publicKey(client_secret);
+    const server_public = try key_exchange.publicKey(server_secret);
+    const client_shared = try key_exchange.sharedSecret(
+        client_secret,
+        &server_public,
+    );
+    const server_shared = try key_exchange.sharedSecret(
+        server_secret,
+        &client_public,
+    );
+    try std.testing.expectEqualSlices(u8, &client_shared, &server_shared);
+    try std.testing.expectError(
+        error.InvalidPublicKey,
+        key_exchange.sharedSecret(client_secret, "short"),
+    );
+
+    const one_shot = transcript.hash(&.{ "client", "server" });
+    var incremental = transcript.Transcript{};
+    incremental.update("client");
+    incremental.update("server");
+    try std.testing.expectEqualSlices(
+        u8,
+        &one_shot,
+        &incremental.digest(),
+    );
 }
 
 fn checkCertificateAllocationFailure(allocator: std.mem.Allocator) !void {
