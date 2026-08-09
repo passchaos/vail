@@ -3,6 +3,8 @@
 pub const auth = @import("auth.zig");
 pub const client_auth = @import("client_auth.zig");
 pub const key_schedule = @import("key_schedule.zig");
+pub const psk = @import("psk.zig");
+pub const ticket = @import("ticket.zig");
 
 test {
     _ = @import("tests.zig");

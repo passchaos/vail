@@ -11,5 +11,7 @@ test {
     _ = tls.auth;
     _ = tls.client_auth;
     _ = tls.key_schedule;
+    _ = tls.psk;
+    _ = tls.ticket;
     _ = x509.trust;
 }

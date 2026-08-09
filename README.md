@@ -13,6 +13,8 @@ The current foundation provides:
 - X.509 chain, hostname, validity, custom-bundle, and system-CA verification.
 - TLS 1.3 SHA-256 early, handshake, application, resumption, PSK binder,
   Finished, 0-RTT, and traffic-update key scheduling.
+- TLS 1.3 PSK-DHE ClientHello/ServerHello extensions, constant-time binders,
+  early-data signaling, ticket-age validation, and NewSessionTicket codec.
 
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.
