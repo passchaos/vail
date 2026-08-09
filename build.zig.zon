@@ -1,0 +1,16 @@
+.{
+    .name = .vail,
+    .version = "0.1.0",
+    .fingerprint = 0xd63e_7cd6_31a7_8dd7,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test",
+        "README.md",
+        "LICENSE",
+        ".gitignore",
+    },
+}
