@@ -61,6 +61,53 @@ pub fn main(init: std.process.Init) !void {
             },
         );
     }
+
+    const aes256 = traffic.aes256_sha384;
+    const aes256_keys = aes256.Keys.derive(
+        [_]u8{0x42} ** aes256.secret_len,
+        .{},
+    );
+    const seal_start = nowNs(init.io);
+    var checksum: u64 = 0;
+    for (0..iterations) |packet_number| {
+        try aes256_keys.protect(
+            packet_number,
+            aad,
+            &plaintext,
+            &ciphertext,
+            &tag,
+        );
+        checksum +%= ciphertext[0];
+    }
+    const seal_ns = nowNs(init.io) -| seal_start;
+
+    const open_start = nowNs(init.io);
+    for (0..iterations) |packet_number| {
+        try aes256_keys.protect(
+            packet_number,
+            aad,
+            &plaintext,
+            &ciphertext,
+            &tag,
+        );
+        try aes256_keys.open(
+            packet_number,
+            aad,
+            &ciphertext,
+            tag,
+            &opened,
+        );
+        checksum +%= opened[0];
+    }
+    const open_ns = nowNs(init.io) -| open_start;
+    std.debug.print(
+        "aes_256_gcm_sha384: seal={d} ns/op open+seal={d} ns/op checksum={d}\n",
+        .{
+            seal_ns / iterations,
+            open_ns / iterations,
+            checksum,
+        },
+    );
 }
 
 fn nowNs(io: std.Io) u64 {

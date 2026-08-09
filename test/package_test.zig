@@ -8,6 +8,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.crypto, "sha256"));
     try std.testing.expect(@hasDecl(vail, "quic"));
     try std.testing.expect(@hasDecl(vail.quic, "traffic_crypto"));
+    try std.testing.expect(@hasDecl(
+        vail.quic.traffic_crypto,
+        "aes256_sha384",
+    ));
     try std.testing.expect(@hasDecl(vail, "tls"));
     try std.testing.expect(@hasDecl(vail.tls, "auth"));
     try std.testing.expect(@hasDecl(vail.tls, "client_auth"));

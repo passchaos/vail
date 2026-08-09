@@ -11,24 +11,32 @@ const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const ChaCha20IETF = std.crypto.stream.chacha.ChaCha20IETF;
 const cipher_suite = @import("../tls/cipher_suite.zig");
+const common = @import("traffic_crypto/common.zig");
+
+/// SHA-384 traffic protection is exposed separately until the higher-level TLS
+/// key schedule can carry both 32-byte and 48-byte traffic secrets.
+pub const aes256_sha384 =
+    @import("traffic_crypto/aes256_sha384.zig");
 
 pub const secret_len = HkdfSha256.prk_length;
-pub const max_key_len = ChaCha20Poly1305.key_length;
-pub const iv_len = Aes128Gcm.nonce_length;
-pub const tag_len = Aes128Gcm.tag_length;
-pub const sample_len = 16;
-pub const mask_len = 5;
+pub const max_key_len = common.max_key_len;
+pub const iv_len = common.iv_len;
+pub const tag_len = common.tag_len;
+pub const sample_len = common.sample_len;
+pub const mask_len = common.mask_len;
+
+comptime {
+    std.debug.assert(ChaCha20Poly1305.key_length == max_key_len);
+    std.debug.assert(Aes128Gcm.nonce_length == iv_len);
+    std.debug.assert(Aes128Gcm.tag_length == tag_len);
+}
 
 /// QUIC uses the TLS-negotiated suite identity directly.  Keeping one enum in
 /// the TLS layer prevents adapters from translating or accidentally assigning
 /// different limits to the same wire value.
 pub const Suite = cipher_suite.Suite;
 
-pub const Labels = struct {
-    key: []const u8 = "quic key",
-    iv: []const u8 = "quic iv",
-    hp: []const u8 = "quic hp",
-};
+pub const Labels = common.Labels;
 
 pub const Keys = struct {
     suite: Suite,
@@ -188,11 +196,5 @@ pub const Keys = struct {
 };
 
 pub fn packetNonce(iv: [iv_len]u8, packet_number: u64) [iv_len]u8 {
-    var nonce = iv;
-    var packet_number_bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &packet_number_bytes, packet_number, .big);
-    for (packet_number_bytes, 0..) |byte, index| {
-        nonce[iv_len - packet_number_bytes.len + index] ^= byte;
-    }
-    return nonce;
+    return common.packetNonce(iv, packet_number);
 }

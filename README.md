@@ -23,6 +23,8 @@ The current foundation provides:
 - Allocation-free QUIC traffic-secret protection for AES-128-GCM and
   ChaCha20-Poly1305, including nonce derivation, header protection, and suite
   confidentiality/integrity limits.
+- A strict 48-byte-secret AES-256-GCM/HKDF-SHA384 QUIC traffic primitive,
+  isolated from negotiation until the full TLS SHA-384 schedule is enabled.
 - Canonical TLS 1.3 cipher-suite identities and validated client/server
   preference selection, with stateless tickets bound to their issuing suite.
 
