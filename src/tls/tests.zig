@@ -204,6 +204,69 @@ test "TLS 1.3 key schedule separates handshake application and PSK secrets" {
     ));
 }
 
+test "TLS 1.3 SHA-384 schedule keeps 48-byte secrets and Finished values" {
+    const Schedule = key_schedule.Sha384;
+    const shared = [_]u8{0x81} ** Schedule.secret_len;
+    const transcript_hash = [_]u8{0x82} ** Schedule.secret_len;
+    const psk = [_]u8{0x83} ** Schedule.secret_len;
+    const handshake = Schedule.deriveHandshake(
+        shared,
+        transcript_hash,
+        psk,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 48),
+        handshake.handshake_secret.len,
+    );
+    try expectHex(
+        "fffef14f7d6ee618525454268d25ec5ff81d5c28bfd6ca38dc3df7acadb0ac16aaac1a81f6f08115550935b74afbf7ac",
+        &handshake.handshake_secret,
+    );
+    try expectHex(
+        "a54c4371989e45778aa9cf31ecb21a6c7ab1ffc13675257f0b072ea27074eb7fa9e74488eea18cb40135a37f33c8c7f3",
+        &handshake.client_traffic_secret,
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &handshake.client_traffic_secret,
+        &handshake.server_traffic_secret,
+    ));
+
+    const application = Schedule.deriveApplication(
+        handshake.handshake_secret,
+        transcript_hash,
+    );
+    const finished = Schedule.computeFinished(
+        application.client_traffic_secret,
+        transcript_hash,
+    );
+    try expectHex(
+        "b0f1f1f5e4665d80ff3e6ba0bf0c1095bfff9cdc79a9a23de31eba619f204151749243d66ed82b5af9a727efa774c02e",
+        &finished,
+    );
+    try Schedule.verifyFinished(
+        application.client_traffic_secret,
+        transcript_hash,
+        finished,
+    );
+    var wrong = finished;
+    wrong[wrong.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.BadFinished,
+        Schedule.verifyFinished(
+            application.client_traffic_secret,
+            transcript_hash,
+            wrong,
+        ),
+    );
+}
+
+fn expectHex(expected_hex: []const u8, actual: []const u8) !void {
+    var expected: [64]u8 = undefined;
+    const decoded = try std.fmt.hexToBytes(&expected, expected_hex);
+    try std.testing.expectEqualSlices(u8, decoded, actual);
+}
+
 test "stateless ticket keyring binds context and retains rotation history" {
     var keyring = try ticket_keyring.Keyring.init(.{
         .id = 1,
@@ -270,6 +333,14 @@ test "X25519 exchange and transcript hashing agree on both roles" {
         &one_shot,
         &incremental.digest(),
     );
+
+    const sha384 = transcript.Sha384.hash(&.{ "client", "server" });
+    try std.testing.expectEqual(@as(usize, 48), sha384.len);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        one_shot[0..],
+        sha384[0..one_shot.len],
+    ));
 }
 
 fn checkCertificateAllocationFailure(allocator: std.mem.Allocator) !void {
