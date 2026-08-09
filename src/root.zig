@@ -10,6 +10,8 @@ pub const crypto = @import("crypto/mod.zig");
 
 test {
     _ = crypto.mac;
+    _ = crypto.memory;
+    _ = crypto.sha256;
     _ = tls.auth;
     _ = tls.client_auth;
     _ = tls.key_exchange;

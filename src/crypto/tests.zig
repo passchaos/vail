@@ -1,5 +1,7 @@
 const std = @import("std");
 const mac = @import("mac.zig");
+const memory = @import("memory.zig");
+const sha256 = @import("sha256.zig");
 
 test "domain-separated MAC binds part boundaries" {
     const key = [_]u8{0x42} ** mac.key_len;
@@ -12,4 +14,16 @@ test "domain-separated MAC binds part boundaries" {
     var tampered = joined;
     tampered[0] ^= 1;
     try std.testing.expect(!mac.verify(joined, tampered));
+}
+
+test "secure memory and SHA256 helpers preserve fixed-size contracts" {
+    const digest = sha256.hash("vail");
+    try std.testing.expect(sha256.eql(digest, digest));
+    var wrong = digest;
+    wrong[0] ^= 1;
+    try std.testing.expect(!sha256.eql(digest, wrong));
+
+    var secret = [_]u8{0x42} ** 32;
+    memory.zeroValue(&secret);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &secret);
 }
