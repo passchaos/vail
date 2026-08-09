@@ -24,6 +24,7 @@ pub const ParsedRequest = struct {
     request_context: []const u8,
     supports_ed25519: bool,
     supports_ecdsa_p256_sha256: bool,
+    supports_ecdsa_p384_sha384: bool,
 };
 
 pub fn writeRequest(
@@ -41,13 +42,19 @@ pub fn writeRequest(
     var extensions: std.ArrayList(u8) = .empty;
     defer extensions.deinit(allocator);
     try appendInt(&extensions, allocator, u16, ext_signature_algorithms);
+    try appendInt(&extensions, allocator, u16, 8);
     try appendInt(&extensions, allocator, u16, 6);
-    try appendInt(&extensions, allocator, u16, 4);
     try appendInt(
         &extensions,
         allocator,
         u16,
         auth.signature_scheme_ecdsa_secp256r1_sha256,
+    );
+    try appendInt(
+        &extensions,
+        allocator,
+        u16,
+        auth.signature_scheme_ecdsa_secp384r1_sha384,
     );
     try appendInt(
         &extensions,
@@ -132,7 +139,8 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
     if (pos != bytes.len) return error.InvalidCertificateRequest;
 
     var supports_ed25519 = false;
-    var supports_ecdsa = false;
+    var supports_ecdsa_p256 = false;
+    var supports_ecdsa_p384 = false;
     var saw_signature_algorithms = false;
     var ext_pos: usize = 0;
     while (ext_pos < extensions.len) {
@@ -159,7 +167,12 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
                 if (scheme ==
                     auth.signature_scheme_ecdsa_secp256r1_sha256)
                 {
-                    supports_ecdsa = true;
+                    supports_ecdsa_p256 = true;
+                }
+                if (scheme ==
+                    auth.signature_scheme_ecdsa_secp384r1_sha384)
+                {
+                    supports_ecdsa_p384 = true;
                 }
             }
         } else if (typ == ext_certificate_authorities) {
@@ -183,7 +196,8 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
     return .{
         .request_context = request_context,
         .supports_ed25519 = supports_ed25519,
-        .supports_ecdsa_p256_sha256 = supports_ecdsa,
+        .supports_ecdsa_p256_sha256 = supports_ecdsa_p256,
+        .supports_ecdsa_p384_sha384 = supports_ecdsa_p384,
     };
 }
 

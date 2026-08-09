@@ -10,6 +10,7 @@ const transcript = @import("transcript.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 
 test "TLS cipher suites expose protocol limits from one canonical type" {
     try std.testing.expectEqual(
@@ -86,6 +87,47 @@ test "ECDSA P256 CertificateVerify round-trip" {
     try auth.verifyCertificateVerify(&public_key, parsed, &transcript_hash);
 }
 
+test "ECDSA P384 CertificateVerify round-trip and pin" {
+    const allocator = std.testing.allocator;
+    const key_pair = try EcdsaP384Sha384.KeyPair.generateDeterministic(
+        [_]u8{0x44} ** EcdsaP384Sha384.KeyPair.seed_length,
+    );
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const transcript_hash = [_]u8{0x35} ** 48;
+    var verify: std.ArrayList(u8) = .empty;
+    defer verify.deinit(allocator);
+    try auth.writeCertificateVerify(
+        &verify,
+        allocator,
+        .{ .ecdsa_p384_sha384 = .{ .key_pair = key_pair } },
+        &transcript_hash,
+    );
+    const parsed = try auth.parseCertificateVerify(verify.items);
+    try std.testing.expectEqual(
+        auth.signature_scheme_ecdsa_secp384r1_sha384,
+        parsed.scheme,
+    );
+    try auth.verifyCertificateVerify(
+        &public_key,
+        parsed,
+        &transcript_hash,
+    );
+    const verifier = auth.ClientVerifier{
+        .pinned_ecdsa_p384_public_key = public_key,
+    };
+    try verifier.verifyTrust(null, &.{&public_key});
+    var wrong_hash = transcript_hash;
+    wrong_hash[0] ^= 1;
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        auth.verifyCertificateVerify(
+            &public_key,
+            parsed,
+            &wrong_hash,
+        ),
+    );
+}
+
 test "CertificateRequest advertises built-in signature schemes" {
     const allocator = std.testing.allocator;
     var encoded: std.ArrayList(u8) = .empty;
@@ -100,6 +142,7 @@ test "CertificateRequest advertises built-in signature schemes" {
     try std.testing.expectEqualStrings("request", parsed.request_context);
     try std.testing.expect(parsed.supports_ed25519);
     try std.testing.expect(parsed.supports_ecdsa_p256_sha256);
+    try std.testing.expect(parsed.supports_ecdsa_p384_sha384);
 }
 
 test "client CertificateVerify uses the distinct TLS context" {
