@@ -2,6 +2,7 @@ const std = @import("std");
 const auth = @import("auth.zig");
 const client_auth = @import("client_auth.zig");
 const key_schedule = @import("key_schedule.zig");
+const ticket_keyring = @import("ticket_keyring.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -181,6 +182,42 @@ test "TLS 1.3 key schedule separates handshake application and PSK secrets" {
         &updated,
         &application.client_traffic_secret,
     ));
+}
+
+test "stateless ticket keyring binds context and retains rotation history" {
+    var keyring = try ticket_keyring.Keyring.init(.{
+        .id = 1,
+        .secret = [_]u8{0x11} ** ticket_keyring.key_len,
+    });
+    defer keyring.deinit();
+    const opened = ticket_keyring.Opened{
+        .secret = [_]u8{0x42} ** 32,
+        .age_add = 17,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 10,
+    };
+    const identity = try keyring.seal(
+        [_]u8{0x01} ** ticket_keyring.nonce_len,
+        "example:443",
+        "h3",
+        opened,
+    );
+    const decoded = try keyring.open(
+        &identity,
+        "example:443",
+        "h3",
+        1500,
+    );
+    try std.testing.expectEqualSlices(u8, &opened.secret, &decoded.secret);
+    try std.testing.expectError(
+        error.AuthenticationFailed,
+        keyring.open(&identity, "other:443", "h3", 1500),
+    );
+    try keyring.rotate(.{
+        .id = 2,
+        .secret = [_]u8{0x22} ** ticket_keyring.key_len,
+    });
+    _ = try keyring.open(&identity, "example:443", "h3", 1500);
 }
 
 fn checkCertificateAllocationFailure(allocator: std.mem.Allocator) !void {

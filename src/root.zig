@@ -13,5 +13,6 @@ test {
     _ = tls.key_schedule;
     _ = tls.psk;
     _ = tls.ticket;
+    _ = tls.ticket_keyring;
     _ = x509.trust;
 }

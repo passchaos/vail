@@ -15,6 +15,8 @@ The current foundation provides:
   Finished, 0-RTT, and traffic-update key scheduling.
 - TLS 1.3 PSK-DHE ClientHello/ServerHello extensions, constant-time binders,
   early-data signaling, ticket-age validation, and NewSessionTicket codec.
+- Allocation-free AES-256-GCM stateless session tickets with origin/ALPN
+  associated-data binding and bounded current/history key rotation.
 
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.
