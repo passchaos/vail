@@ -4,6 +4,10 @@ const std = @import("std");
 
 pub const x25519_mlkem768 =
     @import("key_exchange/x25519_mlkem768.zig");
+pub const secp256r1_mlkem768 =
+    @import("key_exchange/secp256r1_mlkem768.zig").implementation;
+pub const secp384r1_mlkem1024 =
+    @import("key_exchange/secp384r1_mlkem1024.zig").implementation;
 
 pub const secret_len = std.crypto.dh.X25519.secret_length;
 pub const public_len = std.crypto.dh.X25519.public_length;

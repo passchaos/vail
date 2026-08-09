@@ -122,3 +122,91 @@ test "X25519MLKEM768 rejects malformed shares and binds both components" {
         &tampered_x25519_shared,
     ));
 }
+
+test "secp256r1MLKEM768 agrees and uses classical-first TLS layout" {
+    try testEcdhMlKemGroup(
+        @import("secp256r1_mlkem768.zig").implementation,
+        std.crypto.ecc.P256,
+        std.crypto.kem.ml_kem.MLKem768,
+        0x11eb,
+        1249,
+        1153,
+    );
+}
+
+test "secp384r1MLKEM1024 agrees and uses classical-first TLS layout" {
+    try testEcdhMlKemGroup(
+        @import("secp384r1_mlkem1024.zig").implementation,
+        std.crypto.ecc.P384,
+        std.crypto.kem.ml_kem.MLKem1024,
+        0x11ed,
+        1665,
+        1665,
+    );
+}
+
+fn testEcdhMlKemGroup(
+    comptime Group: type,
+    comptime Curve: type,
+    comptime MLKem: type,
+    expected_group: u16,
+    expected_client_len: usize,
+    expected_server_len: usize,
+) !void {
+    const client_curve =
+        [_]u8{0} ** (Group.curve_secret_len - 1) ++ [_]u8{1};
+    const server_curve =
+        [_]u8{0} ** (Group.curve_secret_len - 1) ++ [_]u8{2};
+    const mlkem_seed = [_]u8{0x72} ** Group.mlkem_seed_len;
+    const encaps_seed = [_]u8{0x73} ** Group.encaps_seed_len;
+    var client = try Group.clientStart(client_curve, mlkem_seed);
+    defer client.secret.wipe();
+    var response = try Group.serverRespond(
+        &client.share,
+        server_curve,
+        encaps_seed,
+    );
+    defer response.wipeSharedSecret();
+    const client_shared = try Group.clientSharedSecret(
+        &client.secret,
+        &response.share,
+    );
+    try std.testing.expectEqual(expected_group, Group.named_group);
+    try std.testing.expectEqual(expected_client_len, client.share.len);
+    try std.testing.expectEqual(expected_server_len, response.share.len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &response.shared_secret,
+        &client_shared,
+    );
+
+    const client_public = try Curve.basePoint.mul(
+        client_curve,
+        .big,
+    );
+    const client_sec1 = client_public.toUncompressedSec1();
+    try std.testing.expectEqualSlices(
+        u8,
+        &client_sec1,
+        client.share[0..Group.curve_public_len],
+    );
+    var kem = try MLKem.KeyPair.generateDeterministic(mlkem_seed);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&kem));
+    const kem_public = kem.public_key.toBytes();
+    try std.testing.expectEqualSlices(
+        u8,
+        &kem_public,
+        client.share[Group.curve_public_len..],
+    );
+
+    var malformed = client.share;
+    malformed[0] = 0x02;
+    try std.testing.expectError(
+        error.InvalidClientShare,
+        Group.serverRespond(
+            &malformed,
+            server_curve,
+            encaps_seed,
+        ),
+    );
+}

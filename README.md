@@ -23,6 +23,9 @@ The current foundation provides:
 - Standards-aligned X25519MLKEM768 hybrid post-quantum key exchange with the
   registered `0x11ec` ML-KEM-first TLS share layout, compact seeded client
   state, explicit secret wiping, and full 64-byte hybrid HKDF input.
+- Registered classical-first secp256r1MLKEM768 (`0x11eb`) and
+  secp384r1MLKEM1024 (`0x11ed`) TLS groups, including exact SEC1/ML-KEM wire
+  layouts, 64/80-byte hybrid HKDF inputs, and shared generic secret handling.
 - TLS 1.3 PSK-DHE ClientHello/ServerHello extensions, constant-time binders,
   early-data signaling, ticket-age validation, and NewSessionTicket codec.
 - Allocation-free AES-256-GCM stateless session tickets with origin/ALPN
