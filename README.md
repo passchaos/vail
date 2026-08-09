@@ -17,8 +17,9 @@ The current foundation provides:
 - X.509 chain, hostname, validity, custom-bundle, and system-CA verification.
 - TLS 1.3 SHA-256 early, handshake, application, resumption, PSK binder,
   Finished, 0-RTT, and traffic-update key scheduling.
-- X25519 and constant-time secp256r1 ECDH key exchange plus incremental
-  SHA-256/SHA-384 transcript hashing.
+- X25519 plus constant-time secp256r1 and secp384r1 ECDH key exchange, with
+  uncompressed SEC1 validation and incremental SHA-256/SHA-384 transcript
+  hashing.
 - TLS 1.3 PSK-DHE ClientHello/ServerHello extensions, constant-time binders,
   early-data signaling, ticket-age validation, and NewSessionTicket codec.
 - Allocation-free AES-256-GCM stateless session tickets with origin/ALPN
