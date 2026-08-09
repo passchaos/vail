@@ -106,4 +106,21 @@ test "AES-256-GCM SHA-384 traffic keys match an independent vector" {
     var opened: [plaintext.len]u8 = undefined;
     try keys.open(7, "header", &ciphertext, tag, &opened);
     try std.testing.expectEqualStrings(plaintext, &opened);
+
+    const unified = try traffic.Keys.deriveChecked(
+        .aes_256_gcm_sha384,
+        .fromSha384(secret),
+        .{},
+    );
+    try std.testing.expectEqualSlices(u8, &keys.key, &unified.key);
+    try std.testing.expectEqualSlices(u8, &keys.iv, &unified.iv);
+    try std.testing.expectEqualSlices(u8, &keys.hp, &unified.hp);
+    try std.testing.expectError(
+        error.HashMismatch,
+        traffic.Keys.deriveChecked(
+            .aes_256_gcm_sha384,
+            .fromSha256([_]u8{0} ** 32),
+            .{},
+        ),
+    );
 }

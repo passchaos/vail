@@ -163,3 +163,38 @@ pub fn verifyFinishedFor(
     const expected = try computeFinishedFor(base_key, transcript_hash);
     if (!expected.eql(&verify_data)) return error.BadFinished;
 }
+
+pub fn deriveResumptionMasterSecretFor(
+    master_secret: secret.Secret,
+    transcript_hash: transcript.Digest,
+) Error!secret.Secret {
+    if (master_secret.hash != transcript_hash.hash) {
+        return error.HashMismatch;
+    }
+    return switch (master_secret.hash) {
+        .sha256 => .fromSha256(Sha256.deriveResumptionMasterSecret(
+            try master_secret.sha256(),
+            try transcript_hash.sha256(),
+        )),
+        .sha384 => .fromSha384(Sha384.deriveResumptionMasterSecret(
+            try master_secret.sha384(),
+            try transcript_hash.sha384(),
+        )),
+    };
+}
+
+pub fn deriveResumptionPskFor(
+    resumption_master_secret: secret.Secret,
+    ticket_nonce: []const u8,
+) Error!secret.Secret {
+    return switch (resumption_master_secret.hash) {
+        .sha256 => .fromSha256(Sha256.deriveResumptionPsk(
+            try resumption_master_secret.sha256(),
+            ticket_nonce,
+        )),
+        .sha384 => .fromSha384(Sha384.deriveResumptionPsk(
+            try resumption_master_secret.sha384(),
+            ticket_nonce,
+        )),
+    };
+}

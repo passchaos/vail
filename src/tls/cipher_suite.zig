@@ -9,6 +9,7 @@ const secret = @import("secret.zig");
 
 pub const Suite = enum(u16) {
     aes_128_gcm_sha256 = 0x1301,
+    aes_256_gcm_sha384 = 0x1302,
     chacha20_poly1305_sha256 = 0x1303,
 
     pub fn wireValue(self: Suite) u16 {
@@ -18,6 +19,7 @@ pub const Suite = enum(u16) {
     pub fn fromWire(value: u16) ?Suite {
         return switch (value) {
             @intFromEnum(Suite.aes_128_gcm_sha256) => .aes_128_gcm_sha256,
+            @intFromEnum(Suite.aes_256_gcm_sha384) => .aes_256_gcm_sha384,
             @intFromEnum(Suite.chacha20_poly1305_sha256) => .chacha20_poly1305_sha256,
             else => null,
         };
@@ -26,7 +28,7 @@ pub const Suite = enum(u16) {
     pub fn keyLen(self: Suite) usize {
         return switch (self) {
             .aes_128_gcm_sha256 => 16,
-            .chacha20_poly1305_sha256 => 32,
+            .aes_256_gcm_sha384, .chacha20_poly1305_sha256 => 32,
         };
     }
 
@@ -35,13 +37,16 @@ pub const Suite = enum(u16) {
             .aes_128_gcm_sha256,
             .chacha20_poly1305_sha256,
             => .sha256,
+            .aes_256_gcm_sha384 => .sha384,
         };
     }
 
     /// RFC 9001 §6.6 per-key packet confidentiality limits.
     pub fn confidentialityLimit(self: Suite) u64 {
         return switch (self) {
-            .aes_128_gcm_sha256 => @as(u64, 1) << 23,
+            .aes_128_gcm_sha256,
+            .aes_256_gcm_sha384,
+            => @as(u64, 1) << 23,
             .chacha20_poly1305_sha256 => @as(u64, 1) << 62,
         };
     }
@@ -49,7 +54,9 @@ pub const Suite = enum(u16) {
     /// RFC 9001 §6.6 per-connection authentication-failure limits.
     pub fn integrityLimit(self: Suite) u64 {
         return switch (self) {
-            .aes_128_gcm_sha256 => @as(u64, 1) << 52,
+            .aes_128_gcm_sha256,
+            .aes_256_gcm_sha384,
+            => @as(u64, 1) << 52,
             .chacha20_poly1305_sha256 => @as(u64, 1) << 36,
         };
     }
@@ -158,7 +165,7 @@ fn selectClientOrder(
 test "TLS 1.3 cipher-suite selection supports both preference policies" {
     const offered = [_]u8{
         0x13, 0x03,
-        0x13, 0x02, // Unknown to this SHA-256-only implementation.
+        0x13, 0x02,
         0x13, 0x01,
     };
     try std.testing.expectEqual(
@@ -176,6 +183,10 @@ test "TLS 1.3 cipher-suite selection supports both preference policies" {
             &default_preference,
             .client_order,
         ),
+    );
+    try std.testing.expectEqual(
+        secret.Hash.sha384,
+        Suite.aes_256_gcm_sha384.hash(),
     );
 }
 
@@ -195,7 +206,7 @@ test "TLS 1.3 cipher-suite selection validates local and wire lists" {
     try std.testing.expectError(
         error.NoSharedCipherSuite,
         selectFromWire(
-            &.{ 0x13, 0x02 },
+            &.{ 0x13, 0x04 },
             &default_preference,
             .server_order,
         ),

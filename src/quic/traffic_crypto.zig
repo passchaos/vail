@@ -8,10 +8,12 @@ const std = @import("std");
 
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
+const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const ChaCha20IETF = std.crypto.stream.chacha.ChaCha20IETF;
 const cipher_suite = @import("../tls/cipher_suite.zig");
 const common = @import("traffic_crypto/common.zig");
+const tls_secret = @import("../tls/secret.zig");
 
 /// SHA-384 traffic protection is exposed separately until the higher-level TLS
 /// key schedule can carry both 32-byte and 48-byte traffic secrets.
@@ -40,7 +42,10 @@ pub const Labels = common.Labels;
 
 pub const Keys = struct {
     suite: Suite,
+    /// Source-compatible SHA-256 secret view.
     secret: [secret_len]u8,
+    traffic_secret: tls_secret.Secret =
+        .fromSha256([_]u8{0} ** secret_len),
     key: [max_key_len]u8,
     iv: [iv_len]u8,
     hp: [max_key_len]u8,
@@ -50,25 +55,49 @@ pub const Keys = struct {
         secret: [secret_len]u8,
         labels: Labels,
     ) Keys {
+        return deriveChecked(
+            suite,
+            .fromSha256(secret),
+            labels,
+        ) catch unreachable;
+    }
+
+    pub fn deriveChecked(
+        suite: Suite,
+        traffic_secret: tls_secret.Secret,
+        labels: Labels,
+    ) error{HashMismatch}!Keys {
+        if (traffic_secret.hash != suite.hash()) {
+            return error.HashMismatch;
+        }
+        var compatibility_secret = [_]u8{0} ** secret_len;
+        if (traffic_secret.hash == .sha256) {
+            compatibility_secret =
+                traffic_secret.sha256() catch unreachable;
+        }
         var keys = Keys{
             .suite = suite,
-            .secret = secret,
+            .secret = compatibility_secret,
+            .traffic_secret = traffic_secret,
             .key = [_]u8{0} ** max_key_len,
-            .iv = std.crypto.tls.hkdfExpandLabel(
-                HkdfSha256,
-                secret,
-                labels.iv,
-                "",
-                iv_len,
-            ),
+            .iv = undefined,
             .hp = [_]u8{0} ** max_key_len,
         };
         switch (suite) {
             .aes_128_gcm_sha256 => {
+                const sha256_secret =
+                    traffic_secret.sha256() catch unreachable;
+                keys.iv = std.crypto.tls.hkdfExpandLabel(
+                    HkdfSha256,
+                    sha256_secret,
+                    labels.iv,
+                    "",
+                    iv_len,
+                );
                 keys.key[0..Aes128Gcm.key_length].* =
                     std.crypto.tls.hkdfExpandLabel(
                         HkdfSha256,
-                        secret,
+                        sha256_secret,
                         labels.key,
                         "",
                         Aes128Gcm.key_length,
@@ -76,23 +105,41 @@ pub const Keys = struct {
                 keys.hp[0..Aes128Gcm.key_length].* =
                     std.crypto.tls.hkdfExpandLabel(
                         HkdfSha256,
-                        secret,
+                        sha256_secret,
                         labels.hp,
                         "",
                         Aes128Gcm.key_length,
                     );
             },
+            .aes_256_gcm_sha384 => {
+                const derived = aes256_sha384.Keys.derive(
+                    traffic_secret.sha384() catch unreachable,
+                    labels,
+                );
+                keys.iv = derived.iv;
+                keys.key = derived.key;
+                keys.hp = derived.hp;
+            },
             .chacha20_poly1305_sha256 => {
+                const sha256_secret =
+                    traffic_secret.sha256() catch unreachable;
+                keys.iv = std.crypto.tls.hkdfExpandLabel(
+                    HkdfSha256,
+                    sha256_secret,
+                    labels.iv,
+                    "",
+                    iv_len,
+                );
                 keys.key = std.crypto.tls.hkdfExpandLabel(
                     HkdfSha256,
-                    secret,
+                    sha256_secret,
                     labels.key,
                     "",
                     ChaCha20Poly1305.key_length,
                 );
                 keys.hp = std.crypto.tls.hkdfExpandLabel(
                     HkdfSha256,
-                    secret,
+                    sha256_secret,
                     labels.hp,
                     "",
                     ChaCha20Poly1305.key_length,
@@ -122,6 +169,14 @@ pub const Keys = struct {
                 associated_data,
                 nonce,
                 self.key[0..Aes128Gcm.key_length].*,
+            ),
+            .aes_256_gcm_sha384 => Aes256Gcm.encrypt(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                nonce,
+                self.key,
             ),
             .chacha20_poly1305_sha256 => ChaCha20Poly1305.encrypt(
                 ciphertext,
@@ -156,6 +211,14 @@ pub const Keys = struct {
                 nonce,
                 self.key[0..Aes128Gcm.key_length].*,
             ),
+            .aes_256_gcm_sha384 => try Aes256Gcm.decrypt(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                nonce,
+                self.key,
+            ),
             .chacha20_poly1305_sha256 => try ChaCha20Poly1305.decrypt(
                 plaintext,
                 ciphertext,
@@ -175,6 +238,14 @@ pub const Keys = struct {
             .aes_128_gcm_sha256 => {
                 const aes = std.crypto.core.aes.Aes128.initEnc(
                     self.hp[0..Aes128Gcm.key_length].*,
+                );
+                var encrypted: [sample_len]u8 = undefined;
+                aes.encrypt(&encrypted, &sample);
+                return encrypted[0..mask_len].*;
+            },
+            .aes_256_gcm_sha384 => {
+                const aes = std.crypto.core.aes.Aes256.initEnc(
+                    self.hp,
                 );
                 var encrypted: [sample_len]u8 = undefined;
                 aes.encrypt(&encrypted, &sample);
