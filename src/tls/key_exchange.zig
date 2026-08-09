@@ -1,6 +1,9 @@
-//! TLS 1.3 X25519, secp256r1, and secp384r1 key exchange primitives.
+//! TLS 1.3 classical and post-quantum hybrid key-exchange primitives.
 
 const std = @import("std");
+
+pub const x25519_mlkem768 =
+    @import("key_exchange/x25519_mlkem768.zig");
 
 pub const secret_len = std.crypto.dh.X25519.secret_length;
 pub const public_len = std.crypto.dh.X25519.public_length;
@@ -124,4 +127,8 @@ pub fn sharedSecret(
         secret_key,
         peer_public_key[0..public_len].*,
     ) catch return error.KeyExchangeFailed;
+}
+
+test {
+    _ = @import("key_exchange/tests.zig");
 }

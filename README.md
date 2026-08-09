@@ -20,6 +20,9 @@ The current foundation provides:
 - X25519 plus constant-time secp256r1 and secp384r1 ECDH key exchange, with
   uncompressed SEC1 validation and incremental SHA-256/SHA-384 transcript
   hashing.
+- Standards-aligned X25519MLKEM768 hybrid post-quantum key exchange with the
+  registered `0x11ec` ML-KEM-first TLS share layout, compact seeded client
+  state, explicit secret wiping, and full 64-byte hybrid HKDF input.
 - TLS 1.3 PSK-DHE ClientHello/ServerHello extensions, constant-time binders,
   early-data signaling, ticket-age validation, and NewSessionTicket codec.
 - Allocation-free AES-256-GCM stateless session tickets with origin/ALPN
