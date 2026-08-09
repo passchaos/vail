@@ -20,6 +20,7 @@ test {
     _ = tls.key_exchange;
     _ = tls.key_schedule;
     _ = tls.psk;
+    _ = tls.secret;
     _ = tls.ticket;
     _ = tls.ticket_keyring;
     _ = tls.transcript;

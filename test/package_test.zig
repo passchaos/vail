@@ -18,6 +18,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.tls, "key_schedule"));
     try std.testing.expect(@hasDecl(vail.tls, "key_exchange"));
     try std.testing.expect(@hasDecl(vail.tls, "psk"));
+    try std.testing.expect(@hasDecl(vail.tls, "secret"));
     try std.testing.expect(@hasDecl(vail.tls, "ticket"));
     try std.testing.expect(@hasDecl(vail.tls, "ticket_keyring"));
     try std.testing.expect(@hasDecl(vail.tls, "transcript"));

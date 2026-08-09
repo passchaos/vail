@@ -5,6 +5,7 @@
 //! must not each implement subtly different offer parsing or preference rules.
 
 const std = @import("std");
+const secret = @import("secret.zig");
 
 pub const Suite = enum(u16) {
     aes_128_gcm_sha256 = 0x1301,
@@ -26,6 +27,14 @@ pub const Suite = enum(u16) {
         return switch (self) {
             .aes_128_gcm_sha256 => 16,
             .chacha20_poly1305_sha256 => 32,
+        };
+    }
+
+    pub fn hash(self: Suite) secret.Hash {
+        return switch (self) {
+            .aes_128_gcm_sha256,
+            .chacha20_poly1305_sha256,
+            => .sha256,
         };
     }
 
