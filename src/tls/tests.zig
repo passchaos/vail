@@ -292,6 +292,69 @@ test "RSA-PSS/RSAE SHA-256 CertificateVerify validates an X.509 leaf" {
     );
 }
 
+test "RSA-PSS/RSAE SHA-384 and SHA-512 CertificateVerify validate" {
+    const vector = @import(
+        "test_vectors/rsa_pss_sha384_sha512.zig",
+    );
+    var certificate: [vector.certificate_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&certificate, vector.certificate_hex);
+    inline for (.{
+        .{
+            .scheme = auth.signature_scheme_rsa_pss_rsae_sha384,
+            .signature_hex = vector.sha384_signature_hex,
+            .hash_len = 48,
+        },
+        .{
+            .scheme = auth.signature_scheme_rsa_pss_rsae_sha512,
+            .signature_hex = vector.sha512_signature_hex,
+            .hash_len = 64,
+        },
+    }) |case| {
+        var signature: [case.signature_hex.len / 2]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&signature, case.signature_hex);
+        var transcript_hash: [case.hash_len]u8 =
+            [_]u8{0x5a} ** case.hash_len;
+        var verify_message: std.ArrayList(u8) = .empty;
+        defer verify_message.deinit(std.testing.allocator);
+        try verify_message.append(
+            std.testing.allocator,
+            auth.handshake_type_certificate_verify,
+        );
+        const body_len = 2 + 2 + signature.len;
+        try verify_message.appendSlice(std.testing.allocator, &.{
+            @truncate(body_len >> 16),
+            @truncate(body_len >> 8),
+            @truncate(body_len),
+            @truncate(case.scheme >> 8),
+            @truncate(case.scheme),
+            @truncate(signature.len >> 8),
+            @truncate(signature.len),
+        });
+        try verify_message.appendSlice(
+            std.testing.allocator,
+            &signature,
+        );
+        const parsed = try auth.parseCertificateVerify(
+            verify_message.items,
+        );
+        try auth.verifyCertificateVerify(
+            &certificate,
+            parsed,
+            &transcript_hash,
+        );
+
+        transcript_hash[0] ^= 1;
+        try std.testing.expectError(
+            error.BadCertificateVerify,
+            auth.verifyCertificateVerify(
+                &certificate,
+                parsed,
+                &transcript_hash,
+            ),
+        );
+    }
+}
+
 test "TLS 1.3 key schedule separates handshake application and PSK secrets" {
     const shared = [_]u8{0x71} ** key_schedule.secret_len;
     const transcript_hash = [_]u8{0x72} ** key_schedule.secret_len;

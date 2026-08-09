@@ -12,10 +12,14 @@ const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const Sha384 = std.crypto.hash.sha2.Sha384;
+const Sha512 = std.crypto.hash.sha2.Sha512;
 
 pub const signature_scheme_ecdsa_secp256r1_sha256: u16 = 0x0403;
 pub const signature_scheme_ecdsa_secp384r1_sha384: u16 = 0x0503;
 pub const signature_scheme_rsa_pss_rsae_sha256: u16 = 0x0804;
+pub const signature_scheme_rsa_pss_rsae_sha384: u16 = 0x0805;
+pub const signature_scheme_rsa_pss_rsae_sha512: u16 = 0x0806;
 pub const signature_scheme_ed25519: u16 = 0x0807;
 pub const handshake_type_certificate: u8 = 0x0b;
 pub const handshake_type_certificate_verify: u8 = 0x0f;
@@ -326,7 +330,8 @@ pub fn writeCertificateVerifyForRole(
     role: EndpointRole,
 ) Error!void {
     if (transcript_hash.len != Sha256.digest_length and
-        transcript_hash.len != std.crypto.hash.sha2.Sha384.digest_length)
+        transcript_hash.len != Sha384.digest_length and
+        transcript_hash.len != Sha512.digest_length)
     {
         return error.InvalidCertificateVerify;
     }
@@ -408,7 +413,9 @@ pub fn parseCertificateVerify(
     if (scheme != signature_scheme_ed25519 and
         scheme != signature_scheme_ecdsa_secp256r1_sha256 and
         scheme != signature_scheme_ecdsa_secp384r1_sha384 and
-        scheme != signature_scheme_rsa_pss_rsae_sha256)
+        scheme != signature_scheme_rsa_pss_rsae_sha256 and
+        scheme != signature_scheme_rsa_pss_rsae_sha384 and
+        scheme != signature_scheme_rsa_pss_rsae_sha512)
     {
         return error.UnsupportedSignatureScheme;
     }
@@ -444,7 +451,8 @@ pub fn verifyCertificateVerifyForRole(
     role: EndpointRole,
 ) Error!void {
     if (transcript_hash.len != Sha256.digest_length and
-        transcript_hash.len != std.crypto.hash.sha2.Sha384.digest_length)
+        transcript_hash.len != Sha384.digest_length and
+        transcript_hash.len != Sha512.digest_length)
     {
         return error.InvalidCertificateVerify;
     }
@@ -493,45 +501,72 @@ pub fn verifyCertificateVerifyForRole(
             updateCertificateVerifyInput(&verifier, transcript_hash, role);
             verifier.verify() catch return error.BadCertificateVerify;
         },
-        signature_scheme_rsa_pss_rsae_sha256 => {
-            const public_key_der = try rsaCertificatePublicKey(certificate);
-            const components = Certificate.rsa.PublicKey.parseDer(
-                public_key_der,
-            ) catch return error.InvalidCertificate;
-            const modulus = components.modulus;
-            const exponent = components.exponent;
-            switch (modulus.len) {
-                inline 128, 256, 384, 512 => |modulus_len| {
-                    if (parsed.signature.len != modulus_len) {
-                        return error.InvalidCertificateVerify;
-                    }
-                    const public_key = Certificate.rsa.PublicKey.fromBytes(
-                        exponent,
-                        modulus,
-                    ) catch return error.InvalidCertificate;
-                    const signature =
-                        Certificate.rsa.PSSSignature.fromBytes(
-                            modulus_len,
-                            parsed.signature,
-                        );
-                    const separator = [_]u8{0};
-                    Certificate.rsa.PSSSignature.concatVerify(
-                        modulus_len,
-                        signature,
-                        &.{
-                            " " ** 64,
-                            certificateVerifyContext(role),
-                            &separator,
-                            transcript_hash,
-                        },
-                        public_key,
-                        Sha256,
-                    ) catch return error.BadCertificateVerify;
-                },
-                else => return error.UnsupportedCertificateKey,
-            }
-        },
+        signature_scheme_rsa_pss_rsae_sha256 => try verifyRsaPss(
+            Sha256,
+            certificate,
+            parsed.signature,
+            transcript_hash,
+            role,
+        ),
+        signature_scheme_rsa_pss_rsae_sha384 => try verifyRsaPss(
+            Sha384,
+            certificate,
+            parsed.signature,
+            transcript_hash,
+            role,
+        ),
+        signature_scheme_rsa_pss_rsae_sha512 => try verifyRsaPss(
+            Sha512,
+            certificate,
+            parsed.signature,
+            transcript_hash,
+            role,
+        ),
         else => return error.UnsupportedSignatureScheme,
+    }
+}
+
+fn verifyRsaPss(
+    comptime Hash: type,
+    certificate: []const u8,
+    signature_bytes: []const u8,
+    transcript_hash: []const u8,
+    role: EndpointRole,
+) Error!void {
+    const public_key_der = try rsaCertificatePublicKey(certificate);
+    const components = Certificate.rsa.PublicKey.parseDer(
+        public_key_der,
+    ) catch return error.InvalidCertificate;
+    const modulus = components.modulus;
+    const exponent = components.exponent;
+    switch (modulus.len) {
+        inline 128, 256, 384, 512 => |modulus_len| {
+            if (signature_bytes.len != modulus_len) {
+                return error.InvalidCertificateVerify;
+            }
+            const public_key = Certificate.rsa.PublicKey.fromBytes(
+                exponent,
+                modulus,
+            ) catch return error.InvalidCertificate;
+            const signature = Certificate.rsa.PSSSignature.fromBytes(
+                modulus_len,
+                signature_bytes,
+            );
+            const separator = [_]u8{0};
+            Certificate.rsa.PSSSignature.concatVerify(
+                modulus_len,
+                signature,
+                &.{
+                    " " ** 64,
+                    certificateVerifyContext(role),
+                    &separator,
+                    transcript_hash,
+                },
+                public_key,
+                Hash,
+            ) catch return error.BadCertificateVerify;
+        },
+        else => return error.UnsupportedCertificateKey,
     }
 }
 
