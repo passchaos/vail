@@ -1,6 +1,7 @@
 const std = @import("std");
 const auth = @import("auth.zig");
 const client_auth = @import("client_auth.zig");
+const key_schedule = @import("key_schedule.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -111,6 +112,75 @@ test "client CertificateVerify uses the distinct TLS context" {
             .server,
         ),
     );
+}
+
+test "TLS 1.3 key schedule separates handshake application and PSK secrets" {
+    const shared = [_]u8{0x71} ** key_schedule.secret_len;
+    const transcript = [_]u8{0x72} ** key_schedule.secret_len;
+    const psk = [_]u8{0x73} ** key_schedule.secret_len;
+    const plain = key_schedule.deriveHandshake(shared, transcript, null);
+    const resumed = key_schedule.deriveHandshake(shared, transcript, psk);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &plain.handshake_secret,
+        &resumed.handshake_secret,
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &resumed.client_traffic_secret,
+        &resumed.server_traffic_secret,
+    ));
+
+    const application = key_schedule.deriveApplication(
+        resumed.handshake_secret,
+        transcript,
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &application.client_traffic_secret,
+        &application.server_traffic_secret,
+    ));
+    const finished = key_schedule.computeFinished(
+        resumed.client_traffic_secret,
+        transcript,
+    );
+    try key_schedule.verifyFinished(
+        resumed.client_traffic_secret,
+        transcript,
+        finished,
+    );
+    var wrong = finished;
+    wrong[0] ^= 1;
+    try std.testing.expectError(
+        error.BadFinished,
+        key_schedule.verifyFinished(
+            resumed.client_traffic_secret,
+            transcript,
+            wrong,
+        ),
+    );
+
+    const resumption_master = key_schedule.deriveResumptionMasterSecret(
+        application.master_secret,
+        transcript,
+    );
+    const first_psk = key_schedule.deriveResumptionPsk(
+        resumption_master,
+        "one",
+    );
+    const second_psk = key_schedule.deriveResumptionPsk(
+        resumption_master,
+        "two",
+    );
+    try std.testing.expect(!std.mem.eql(u8, &first_psk, &second_psk));
+    const updated = key_schedule.nextTrafficSecret(
+        application.client_traffic_secret,
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &updated,
+        &application.client_traffic_secret,
+    ));
 }
 
 fn checkCertificateAllocationFailure(allocator: std.mem.Allocator) !void {

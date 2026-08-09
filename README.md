@@ -11,6 +11,8 @@ The current foundation provides:
 - type-safe server identities and pinned-key client verification;
 - CertificateRequest codec and mTLS policy types;
 - X.509 chain, hostname, validity, custom-bundle, and system-CA verification.
+- TLS 1.3 SHA-256 early, handshake, application, resumption, PSK binder,
+  Finished, 0-RTT, and traffic-update key scheduling.
 
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.

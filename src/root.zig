@@ -10,5 +10,6 @@ pub const x509 = @import("x509/mod.zig");
 test {
     _ = tls.auth;
     _ = tls.client_auth;
+    _ = tls.key_schedule;
     _ = x509.trust;
 }
