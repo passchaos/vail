@@ -184,7 +184,7 @@ pub fn build(b: *std.Build) void {
             "sleep 0.2; " ++
             "timeout 3s openssl s_client -connect 127.0.0.1:24444 -tls1_3 -servername localhost -alpn h2 -msg -ign_eof < /dev/null > /tmp/vail-min-tls13-client.log 2>&1 || true; " ++
             "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
-            "grep -q 'New, TLSv1.3, Cipher is TLS_AES_128_GCM_SHA256' /tmp/vail-min-tls13-client.log",
+            "grep -q 'New, TLSv1.3, Cipher is TLS_AES_128_GCM_SHA256' /tmp/vail-min-tls13-client.log && grep -q '>>> TLS 1.3, Handshake .* Finished' /tmp/vail-min-tls13-client.log",
     );
     check_min_server.addArtifactArg(min_tls13_server);
     const interop_min_server_step = b.step(

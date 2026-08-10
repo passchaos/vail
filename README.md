@@ -90,10 +90,11 @@ and key-share extraction.
 
 `zig build interop-openssl-min-server` runs the experimental minimal TLS 1.3
 server harness against `openssl s_client` and verifies that OpenSSL reaches
-`New, TLSv1.3, Cipher is TLS_AES_128_GCM_SHA256` after parsing Vail's
-ServerHello, encrypted EncryptedExtensions, Certificate, CertificateVerify, and
-Finished. The harness still closes before application data/close_notify and is
-used to drive the remaining rustls/full-close interop work.
+`New, TLSv1.3, Cipher is TLS_AES_128_GCM_SHA256` and sends its encrypted client
+Finished after parsing Vail's ServerHello, encrypted EncryptedExtensions,
+Certificate, CertificateVerify, and Finished. The Vail harness decrypts and
+verifies that client Finished, then still closes before application
+data/close_notify; this drives the remaining rustls/full-close interop work.
 
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.

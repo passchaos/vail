@@ -43,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
     const key_pair = try EcdsaP256Sha256.KeyPair.fromSecretKey(signing_key);
     var flight: std.ArrayList(u8) = .empty;
     defer flight.deinit(std.heap.smp_allocator);
-    _ = try vail.tls.server_handshake.writeServerHandshakeFlight(&flight, std.heap.smp_allocator, .{
+    const handshake_result = try vail.tls.server_handshake.writeServerHandshakeFlight(&flight, std.heap.smp_allocator, .{
         .client_hello_bytes = client_hello_bytes,
         .parsed_client_hello = parsed,
         .policy = .{
@@ -64,6 +64,41 @@ pub fn main(init: std.process.Init) !void {
     try writeAll(client, &server_record_header);
     try writeAll(client, flight.items[0..server_hello_len]);
     try writeAll(client, flight.items[server_hello_len..]);
+
+    var client_record_header: [5]u8 = undefined;
+    try readExact(client, &client_record_header);
+    // OpenSSL may send a compatibility ChangeCipherSpec before client Finished.
+    if (client_record_header[0] == 0x14) {
+        const ccs_len = std.mem.readInt(u16, client_record_header[3..5], .big);
+        var ccs: [8]u8 = undefined;
+        if (ccs_len > ccs.len) return error.RecordTooLarge;
+        try readExact(client, ccs[0..ccs_len]);
+        try readExact(client, &client_record_header);
+    }
+    const client_record_len = std.mem.readInt(u16, client_record_header[3..5], .big);
+    if (client_record_len > 256) return error.RecordTooLarge;
+    var client_record: [5 + 256]u8 = undefined;
+    @memcpy(client_record[0..5], &client_record_header);
+    try readExact(client, client_record[5..][0..client_record_len]);
+
+    var client_keys = try vail.tls.record.Keys.derive(
+        handshake_result.selection.suite,
+        handshake_result.client_handshake_traffic_secret,
+    );
+    defer client_keys.deinit();
+    var opened: [128]u8 = undefined;
+    const opened_record = try client_keys.open(0, client_record[0 .. 5 + client_record_len], &opened);
+    if (opened_record.content_type != vail.tls.record.content_type_handshake) return error.ExpectedClientFinished;
+    if (opened_record.len < 4 or opened[0] != vail.tls.server_handshake.handshake_type_finished) return error.ExpectedClientFinished;
+    const finished_len = (@as(usize, opened[1]) << 16) | (@as(usize, opened[2]) << 8) | opened[3];
+    if (finished_len != opened_record.len - 4) return error.ExpectedClientFinished;
+    const verify_data = try vail.tls.key_schedule.computeFinishedFor(
+        handshake_result.client_handshake_traffic_secret,
+        handshake_result.transcript_after_server_finished,
+    );
+    if (!std.mem.eql(u8, verify_data.bytes(), opened[4..opened_record.len])) {
+        return error.BadClientFinished;
+    }
     _ = linux.shutdown(client, linux.SHUT.WR);
 }
 
