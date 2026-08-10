@@ -75,6 +75,20 @@ pub const Parsed = struct {
         if (key_exchange.len == 0) return error.InvalidClientHello;
         return .{ .group = group, .key_exchange = key_exchange };
     }
+
+    pub fn keyShareForGroup(self: Parsed, target_group: u16) Error!?KeyShare {
+        var pos: usize = 0;
+        if (self.key_shares.len == 0) return null;
+        const shares_len = try readU16VectorLen(self.key_shares, &pos);
+        if (shares_len != self.key_shares.len - pos) return error.InvalidClientHello;
+        while (pos < self.key_shares.len) {
+            const group = try readInt(u16, self.key_shares, &pos);
+            const key_exchange = try readU16Vector(self.key_shares, &pos);
+            if (key_exchange.len == 0) return error.InvalidClientHello;
+            if (group == target_group) return .{ .group = group, .key_exchange = key_exchange };
+        }
+        return null;
+    }
 };
 
 pub fn parse(bytes: []const u8) Error!Parsed {
@@ -278,4 +292,7 @@ test "ClientHello parser extracts a minimal TLS 1.3 offer" {
     const share = (try parsed.firstKeyShare()).?;
     try std.testing.expectEqual(@as(u16, 0x001d), share.group);
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6 }, share.key_exchange);
+    const same_share = (try parsed.keyShareForGroup(0x001d)).?;
+    try std.testing.expectEqualSlices(u8, share.key_exchange, same_share.key_exchange);
+    try std.testing.expectEqual(@as(?KeyShare, null), try parsed.keyShareForGroup(0x0020));
 }
