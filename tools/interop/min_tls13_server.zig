@@ -100,6 +100,24 @@ pub fn main(init: std.process.Init) !void {
         return error.BadClientFinished;
     }
     std.debug.print("client finished verified\n", .{});
+    const app = try vail.tls.key_schedule.deriveApplicationFor(
+        handshake_result.handshake_secret,
+        handshake_result.transcript_after_server_finished,
+    );
+    var app_keys = try vail.tls.record.Keys.derive(
+        handshake_result.selection.suite,
+        app.server_traffic_secret,
+    );
+    defer app_keys.deinit();
+    const close_notify = [_]u8{ 1, 0 };
+    var close_record: [64]u8 = undefined;
+    const close_len = try app_keys.seal(
+        0,
+        vail.tls.record.content_type_alert,
+        &close_notify,
+        &close_record,
+    );
+    try writeAll(client, close_record[0..close_len]);
     _ = linux.shutdown(client, linux.SHUT.WR);
 }
 

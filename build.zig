@@ -186,7 +186,7 @@ pub fn build(b: *std.Build) void {
             "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
             "grep -q 'New, TLSv1.3, Cipher is TLS_AES_128_GCM_SHA256' /tmp/vail-min-tls13-client.log && " ++
             "grep -q '>>> TLS 1.3, Handshake .* Finished' /tmp/vail-min-tls13-client.log && " ++
-            "grep -q 'client finished verified' /tmp/vail-min-tls13-server.log",
+            "grep -q 'client finished verified' /tmp/vail-min-tls13-server.log && grep -q 'warning close_notify' /tmp/vail-min-tls13-client.log",
     );
     check_min_server.addArg("sh");
     check_min_server.addArtifactArg(min_tls13_server);

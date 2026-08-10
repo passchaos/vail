@@ -24,6 +24,7 @@ pub const Error = std.mem.Allocator.Error || server_flight.Error ||
 
 pub const Result = struct {
     selection: server_flight.Selection,
+    handshake_secret: secret.Secret,
     client_handshake_traffic_secret: secret.Secret,
     server_handshake_traffic_secret: secret.Secret,
     transcript_after_server_finished: transcript.Digest,
@@ -169,6 +170,7 @@ pub fn writeServerHandshakeFlight(
 
     return .{
         .selection = selection,
+        .handshake_secret = handshake.handshake_secret,
         .client_handshake_traffic_secret = handshake.client_traffic_secret,
         .server_handshake_traffic_secret = handshake.server_traffic_secret,
         .transcript_after_server_finished = transcript_after_server_finished,
