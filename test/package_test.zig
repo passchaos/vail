@@ -3,6 +3,12 @@ const vail = @import("vail");
 
 test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail, "crypto"));
+    try std.testing.expect(@hasDecl(vail.crypto, "backend"));
+    try std.testing.expect(@hasDecl(vail.crypto.backend, "selected"));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.backend,
+        "shangmi_provider",
+    ));
     try std.testing.expect(@hasDecl(vail.crypto, "mac"));
     try std.testing.expect(@hasDecl(vail.crypto, "memory"));
     try std.testing.expect(@hasDecl(vail.crypto, "sha256"));

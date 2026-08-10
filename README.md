@@ -50,5 +50,16 @@ The current foundation provides:
   and `OPENSSL_NO_SM4`, so higher-level TLS/GMSSL work can proceed while an
   AWS-LC provider/backend is developed.
 
+## AWS-LC backend configuration
+
+Vail defaults to its pure-Zig primitives, including SM2/SM3/SM4. Builds can
+record an AWS-LC checkout with `-Daws-lc-path=/home/passchaos/Work/aws-lc`;
+`vail.crypto.backend` then reports `.aws_lc` and whether that checkout exposes
+ShangMi support. Passing `-Daws-lc-link=true` additionally links
+`<aws-lc-path>/build/crypto/libcrypto.a` and fails early if AWS-LC has not been
+built. The current local checkout defines `OPENSSL_NO_SM2`, `OPENSSL_NO_SM3`,
+and `OPENSSL_NO_SM4`, so SM2/SM3/SM4 continue to come from Vail's Zig modules
+until an AWS-LC provider/backend with those algorithms is available.
+
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.

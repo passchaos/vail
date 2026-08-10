@@ -10,6 +10,7 @@ pub const crypto = @import("crypto/mod.zig");
 pub const quic = @import("quic/mod.zig");
 
 test {
+    _ = crypto.backend;
     _ = crypto.mac;
     _ = crypto.memory;
     _ = crypto.sha256;
