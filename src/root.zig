@@ -27,6 +27,7 @@ test {
     _ = tls.psk;
     _ = tls.record;
     _ = tls.secret;
+    _ = tls.server_hello;
     _ = tls.ticket;
     _ = tls.ticket_keyring;
     _ = tls.transcript;
