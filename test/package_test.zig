@@ -6,6 +6,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.crypto, "mac"));
     try std.testing.expect(@hasDecl(vail.crypto, "memory"));
     try std.testing.expect(@hasDecl(vail.crypto, "sha256"));
+    try std.testing.expect(@hasDecl(vail.crypto, "sm2"));
     try std.testing.expect(@hasDecl(vail.crypto, "sm3"));
     try std.testing.expect(@hasDecl(vail.crypto, "sm4"));
     try std.testing.expect(@hasDecl(vail, "quic"));

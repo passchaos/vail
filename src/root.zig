@@ -13,6 +13,7 @@ test {
     _ = crypto.mac;
     _ = crypto.memory;
     _ = crypto.sha256;
+    _ = crypto.sm2;
     _ = crypto.sm3;
     _ = crypto.sm4;
     _ = quic.traffic_crypto;
