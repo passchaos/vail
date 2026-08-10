@@ -12,6 +12,7 @@ pub fn main(init: std.process.Init) !void {
     _ = init;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
+    try sysReuseAddr(fd);
     var addr = std.mem.zeroes(linux.sockaddr.in);
     addr.family = linux.AF.INET;
     addr.port = std.mem.nativeToBig(u16, 24444);
@@ -56,7 +57,13 @@ pub fn main(init: std.process.Init) !void {
         .certificate_chain = &.{&cert_der},
         .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
     });
-    try writeAll(client, flight.items);
+    const server_hello_len = 4 + ((@as(usize, flight.items[1]) << 16) |
+        (@as(usize, flight.items[2]) << 8) | flight.items[3]);
+    var server_record_header: [5]u8 = .{ 0x16, 0x03, 0x03, 0, 0 };
+    std.mem.writeInt(u16, server_record_header[3..5], @intCast(server_hello_len), .big);
+    try writeAll(client, &server_record_header);
+    try writeAll(client, flight.items[0..server_hello_len]);
+    try writeAll(client, flight.items[server_hello_len..]);
     _ = linux.shutdown(client, linux.SHUT.WR);
 }
 
@@ -65,6 +72,12 @@ fn sysSocket() !i32 {
     if (linux.errno(rc) != .SUCCESS) return error.SocketFailed;
     return @intCast(rc);
 }
+fn sysReuseAddr(fd: i32) !void {
+    var yes: i32 = 1;
+    const rc = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, @ptrCast(&yes), @sizeOf(i32));
+    if (linux.errno(rc) != .SUCCESS) return error.SetSockOptFailed;
+}
+
 fn sysBind(fd: i32, addr: *const linux.sockaddr, len: u32) !void {
     const rc = linux.bind(fd, addr, len);
     if (linux.errno(rc) != .SUCCESS) return error.BindFailed;

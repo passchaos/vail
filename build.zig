@@ -177,6 +177,21 @@ pub fn build(b: *std.Build) void {
         "Compile Vail's experimental minimal TLS 1.3 server harness",
     );
     interop_min_server_compile.dependOn(&min_tls13_server.step);
+
+    const check_min_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_min_server.addArg(
+        "$0 > /tmp/vail-min-tls13-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 3s openssl s_client -connect 127.0.0.1:24444 -tls1_3 -servername localhost -alpn h2 -msg -ign_eof < /dev/null > /tmp/vail-min-tls13-client.log 2>&1 || true; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'New, TLSv1.3, Cipher is TLS_AES_128_GCM_SHA256' /tmp/vail-min-tls13-client.log",
+    );
+    check_min_server.addArtifactArg(min_tls13_server);
+    const interop_min_server_step = b.step(
+        "interop-openssl-min-server",
+        "Exercise Vail's minimal TLS 1.3 server flight with openssl s_client",
+    );
+    interop_min_server_step.dependOn(&check_min_server.step);
 }
 
 fn awsLcHasShangMi(path: []const u8) bool {
