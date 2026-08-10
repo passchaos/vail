@@ -355,6 +355,61 @@ test "RSA-PSS/RSAE SHA-384 and SHA-512 CertificateVerify validate" {
     }
 }
 
+test "RSA-PSS/PSS CertificateVerify enforces the SPKI algorithm" {
+    const vector = @import("test_vectors/rsa_pss_pss.zig");
+    var certificate: [vector.certificate_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&certificate, vector.certificate_hex);
+    inline for (.{
+        .{
+            .scheme = auth.signature_scheme_rsa_pss_pss_sha256,
+            .signature_hex = vector.sha256_signature_hex,
+            .hash_len = 32,
+        },
+        .{
+            .scheme = auth.signature_scheme_rsa_pss_pss_sha384,
+            .signature_hex = vector.sha384_signature_hex,
+            .hash_len = 48,
+        },
+        .{
+            .scheme = auth.signature_scheme_rsa_pss_pss_sha512,
+            .signature_hex = vector.sha512_signature_hex,
+            .hash_len = 64,
+        },
+    }) |case| {
+        var signature: [case.signature_hex.len / 2]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&signature, case.signature_hex);
+        const transcript_hash = [_]u8{0x6b} ** case.hash_len;
+        try auth.verifyCertificateVerify(
+            &certificate,
+            .{
+                .scheme = case.scheme,
+                .signature = &signature,
+            },
+            &transcript_hash,
+        );
+    }
+
+    // rsa_pss_rsae requires rsaEncryption in SubjectPublicKeyInfo; accepting
+    // the same mathematical key under rsassaPss would violate TLS scheme/key
+    // compatibility and could bypass certificate policy.
+    var signature: [vector.sha256_signature_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(
+        &signature,
+        vector.sha256_signature_hex,
+    );
+    try std.testing.expectError(
+        error.UnsupportedCertificateKey,
+        auth.verifyCertificateVerify(
+            &certificate,
+            .{
+                .scheme = auth.signature_scheme_rsa_pss_rsae_sha256,
+                .signature = &signature,
+            },
+            &([_]u8{0x6b} ** 32),
+        ),
+    );
+}
+
 test "TLS 1.3 key schedule separates handshake application and PSK secrets" {
     const shared = [_]u8{0x71} ** key_schedule.secret_len;
     const transcript_hash = [_]u8{0x72} ** key_schedule.secret_len;

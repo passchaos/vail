@@ -21,6 +21,9 @@ pub const signature_scheme_rsa_pss_rsae_sha256: u16 = 0x0804;
 pub const signature_scheme_rsa_pss_rsae_sha384: u16 = 0x0805;
 pub const signature_scheme_rsa_pss_rsae_sha512: u16 = 0x0806;
 pub const signature_scheme_ed25519: u16 = 0x0807;
+pub const signature_scheme_rsa_pss_pss_sha256: u16 = 0x0809;
+pub const signature_scheme_rsa_pss_pss_sha384: u16 = 0x080a;
+pub const signature_scheme_rsa_pss_pss_sha512: u16 = 0x080b;
 pub const handshake_type_certificate: u8 = 0x0b;
 pub const handshake_type_certificate_verify: u8 = 0x0f;
 const server_certificate_verify_context =
@@ -415,7 +418,10 @@ pub fn parseCertificateVerify(
         scheme != signature_scheme_ecdsa_secp384r1_sha384 and
         scheme != signature_scheme_rsa_pss_rsae_sha256 and
         scheme != signature_scheme_rsa_pss_rsae_sha384 and
-        scheme != signature_scheme_rsa_pss_rsae_sha512)
+        scheme != signature_scheme_rsa_pss_rsae_sha512 and
+        scheme != signature_scheme_rsa_pss_pss_sha256 and
+        scheme != signature_scheme_rsa_pss_pss_sha384 and
+        scheme != signature_scheme_rsa_pss_pss_sha512)
     {
         return error.UnsupportedSignatureScheme;
     }
@@ -503,6 +509,7 @@ pub fn verifyCertificateVerifyForRole(
         },
         signature_scheme_rsa_pss_rsae_sha256 => try verifyRsaPss(
             Sha256,
+            .rsaEncryption,
             certificate,
             parsed.signature,
             transcript_hash,
@@ -510,6 +517,7 @@ pub fn verifyCertificateVerifyForRole(
         ),
         signature_scheme_rsa_pss_rsae_sha384 => try verifyRsaPss(
             Sha384,
+            .rsaEncryption,
             certificate,
             parsed.signature,
             transcript_hash,
@@ -517,6 +525,31 @@ pub fn verifyCertificateVerifyForRole(
         ),
         signature_scheme_rsa_pss_rsae_sha512 => try verifyRsaPss(
             Sha512,
+            .rsaEncryption,
+            certificate,
+            parsed.signature,
+            transcript_hash,
+            role,
+        ),
+        signature_scheme_rsa_pss_pss_sha256 => try verifyRsaPss(
+            Sha256,
+            .rsassa_pss,
+            certificate,
+            parsed.signature,
+            transcript_hash,
+            role,
+        ),
+        signature_scheme_rsa_pss_pss_sha384 => try verifyRsaPss(
+            Sha384,
+            .rsassa_pss,
+            certificate,
+            parsed.signature,
+            transcript_hash,
+            role,
+        ),
+        signature_scheme_rsa_pss_pss_sha512 => try verifyRsaPss(
+            Sha512,
+            .rsassa_pss,
             certificate,
             parsed.signature,
             transcript_hash,
@@ -528,12 +561,16 @@ pub fn verifyCertificateVerifyForRole(
 
 fn verifyRsaPss(
     comptime Hash: type,
+    comptime expected_key_algorithm: Certificate.AlgorithmCategory,
     certificate: []const u8,
     signature_bytes: []const u8,
     transcript_hash: []const u8,
     role: EndpointRole,
 ) Error!void {
-    const public_key_der = try rsaCertificatePublicKey(certificate);
+    const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
+        certificate,
+        expected_key_algorithm,
+    );
     const components = Certificate.rsa.PublicKey.parseDer(
         public_key_der,
     ) catch return error.InvalidCertificate;
@@ -661,8 +698,18 @@ fn p384CertificatePublicKey(
 }
 
 fn rsaCertificatePublicKey(certificate: []const u8) Error![]const u8 {
+    return rsaCertificatePublicKeyForAlgorithm(
+        certificate,
+        .rsaEncryption,
+    );
+}
+
+fn rsaCertificatePublicKeyForAlgorithm(
+    certificate: []const u8,
+    expected: Certificate.AlgorithmCategory,
+) Error![]const u8 {
     const parsed = try parseX509(certificate);
-    if (parsed.pub_key_algo != .rsaEncryption) {
+    if (std.meta.activeTag(parsed.pub_key_algo) != expected) {
         return error.UnsupportedCertificateKey;
     }
     const public_key = parsed.pubKey();
