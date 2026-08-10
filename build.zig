@@ -39,14 +39,26 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "aws_lc_link", aws_lc_link);
     build_options.addOption(bool, "aws_lc_sm_available", aws_lc_sm_available);
 
+    const aws_lc_translate = b.addTranslateC(.{
+        .root_source_file = b.path("src/crypto/aws_lc/sha256.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (aws_lc_path) |path| {
+        aws_lc_translate.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ path, "include" }) });
+    }
+
     const vail = b.addModule("vail", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{
+        .imports = &.{ .{
             .name = "vail_build_options",
             .module = build_options.createModule(),
-        }},
+        }, .{
+            .name = "aws_lc_c",
+            .module = aws_lc_translate.createModule(),
+        } },
     });
     if (aws_lc_path) |path| {
         vail.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ path, "include" }) });
