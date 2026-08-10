@@ -40,7 +40,8 @@ The current foundation provides:
 - Canonical TLS 1.3 cipher-suite identities and validated client/server
   preference selection, with stateless tickets bound to their issuing suite.
 - ShangMi coverage: SM2 verifies ZA-bound raw and DER signatures against
-  SEC1 public keys and is wired into TLS CertificateVerify for raw SM2 keys,
+  SEC1 public keys and SM2 X.509 SubjectPublicKeyInfo, and is wired into TLS
+  CertificateVerify for raw and X.509 SM2 keys,
   SM3 implements Zig Hash/HMAC-compatible one-shot and streaming hashing, SM4
   exposes allocation-free block and 96-bit-nonce GCM APIs, and TLS/QUIC can
   negotiate the RFC 8998 TLS_SM4_GCM_SM3 (`0x00c6`) suite with SM3

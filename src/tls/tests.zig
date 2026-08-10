@@ -347,6 +347,35 @@ test "SM2 CertificateVerify validates raw SEC1 identities" {
     );
 }
 
+test "SM2 pinned verifier extracts an X.509 SM2 SubjectPublicKeyInfo" {
+    const certificate_hex =
+        "3082018030820127a00302010202146b75ed48ff4c0f1be4db8da788d262d7a74f8ab1300a06082a811ccf5501837530163114301206035504030c0b736d322e6578616d706c65301e170d3236303831303039343432335a170d3236303831313039343432335a30163114301206035504030c0b736d322e6578616d706c653059301306072a8648ce3d020106082a811ccf5501822d03420004351c616c65550219aa9cb33a9a631d80197f2f87c313cbfd0095d783bbe8aa8cf86c355f04c31fc1b0084eeaf6cdc7c89a85335d13effa2ba8141920664f91daa3533051301d0603551d0e041604143ec5c9b72001b4884e04600da19b27f93dd82080301f0603551d230418301680143ec5c9b72001b4884e04600da19b27f93dd82080300f0603551d130101ff040530030101ff300a06082a811ccf55018375034700304402201142af0eee83c0d76118f95c581e765a06d1dafc31d24cf4bcf31751baa62cbe022021522fa7ecadb7d8cbdb0af464de41ce7e48c48b83c3975ddaffe189887a2fb8";
+    var certificate: [certificate_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&certificate, certificate_hex);
+    const public_key = [_]u8{
+        0x04, 0x35, 0x1c, 0x61, 0x6c, 0x65, 0x55, 0x02,
+        0x19, 0xaa, 0x9c, 0xb3, 0x3a, 0x9a, 0x63, 0x1d,
+        0x80, 0x19, 0x7f, 0x2f, 0x87, 0xc3, 0x13, 0xcb,
+        0xfd, 0x00, 0x95, 0xd7, 0x83, 0xbb, 0xe8, 0xaa,
+        0x8c, 0xf8, 0x6c, 0x35, 0x5f, 0x04, 0xc3, 0x1f,
+        0xc1, 0xb0, 0x08, 0x4e, 0xea, 0xf6, 0xcd, 0xc7,
+        0xc8, 0x9a, 0x85, 0x33, 0x5d, 0x13, 0xef, 0xfa,
+        0x2b, 0xa8, 0x14, 0x19, 0x20, 0x66, 0x4f, 0x91,
+        0xda,
+    };
+    const verifier = auth.ClientVerifier{
+        .pinned_sm2_public_key = public_key,
+    };
+    try verifier.verifyTrust(null, &.{&certificate});
+    var wrong_key = public_key;
+    wrong_key[64] ^= 1;
+    try std.testing.expectError(
+        error.CertificateUntrusted,
+        (auth.ClientVerifier{ .pinned_sm2_public_key = wrong_key })
+            .verifyTrust(null, &.{&certificate}),
+    );
+}
+
 test "RSA-PSS/RSAE SHA-256 CertificateVerify validates an X.509 leaf" {
     const vector = @import("test_vectors/rsa_pss_sha256.zig");
     var certificate: [vector.certificate_hex.len / 2]u8 = undefined;

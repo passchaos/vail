@@ -761,8 +761,97 @@ fn sm2CertificatePublicKey(
             return error.InvalidCertificate;
         return certificate[0..sm2.public_key_len].*;
     }
-    return error.UnsupportedCertificateKey;
+    return sm2X509PublicKey(certificate);
 }
+
+fn sm2X509PublicKey(certificate: []const u8) Error![sm2.public_key_len]u8 {
+    const cert = try DerElement.parse(certificate, 0);
+    if (cert.tag != 0x30 or cert.end != certificate.len) {
+        return error.InvalidCertificate;
+    }
+    var pos = cert.content_start;
+    const tbs = try DerElement.parse(certificate, pos);
+    if (tbs.tag != 0x30) return error.InvalidCertificate;
+    pos = tbs.content_start;
+    const first = try DerElement.parse(certificate, pos);
+    pos = first.end;
+    if (first.tag == 0xa0) {
+        const serial = try DerElement.parse(certificate, pos);
+        pos = serial.end;
+    }
+    inline for (0..4) |_| {
+        const elem = try DerElement.parse(certificate, pos);
+        pos = elem.end;
+    }
+    const spki = try DerElement.parse(certificate, pos);
+    if (spki.tag != 0x30) return error.InvalidCertificate;
+    var spki_pos = spki.content_start;
+    const algorithm = try DerElement.parse(certificate, spki_pos);
+    if (algorithm.tag != 0x30) return error.InvalidCertificate;
+    spki_pos = algorithm.end;
+    var alg_pos = algorithm.content_start;
+    const algorithm_oid = try DerElement.parse(certificate, alg_pos);
+    alg_pos = algorithm_oid.end;
+    const parameters_oid = try DerElement.parse(certificate, alg_pos);
+    if (!oidEquals(certificate, algorithm_oid, &oid_id_ec_public_key) or
+        !oidEquals(certificate, parameters_oid, &oid_sm2))
+    {
+        return error.UnsupportedCertificateKey;
+    }
+    const key_bits = try DerElement.parse(certificate, spki_pos);
+    if (key_bits.tag != 0x03 or
+        key_bits.content_start >= key_bits.end or
+        certificate[key_bits.content_start] != 0)
+    {
+        return error.InvalidCertificate;
+    }
+    const public_key = certificate[key_bits.content_start + 1 .. key_bits.end];
+    if (public_key.len != sm2.public_key_len) return error.InvalidCertificate;
+    _ = sm2.PublicKey.fromUncompressedSec1(public_key) catch
+        return error.InvalidCertificate;
+    return public_key[0..sm2.public_key_len].*;
+}
+
+const DerElement = struct {
+    tag: u8,
+    content_start: usize,
+    end: usize,
+
+    fn parse(bytes: []const u8, offset: usize) Error!DerElement {
+        if (offset + 2 > bytes.len) return error.InvalidCertificate;
+        const tag = bytes[offset];
+        var pos = offset + 1;
+        const first_len = bytes[pos];
+        pos += 1;
+        const len: usize = if (first_len < 0x80)
+            first_len
+        else blk: {
+            const len_len = first_len & 0x7f;
+            if (len_len == 0 or len_len > 4 or pos + len_len > bytes.len) {
+                return error.InvalidCertificate;
+            }
+            var value: usize = 0;
+            for (0..len_len) |_| {
+                value = (value << 8) | bytes[pos];
+                pos += 1;
+            }
+            if (value < 0x80) return error.InvalidCertificate;
+            break :blk value;
+        };
+        const end = std.math.add(usize, pos, len) catch
+            return error.InvalidCertificate;
+        if (end > bytes.len) return error.InvalidCertificate;
+        return .{ .tag = tag, .content_start = pos, .end = end };
+    }
+};
+
+fn oidEquals(bytes: []const u8, elem: DerElement, expected: []const u8) bool {
+    if (elem.tag != 0x06) return false;
+    return std.mem.eql(u8, bytes[elem.content_start..elem.end], expected);
+}
+
+const oid_id_ec_public_key = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01 };
+const oid_sm2 = [_]u8{ 0x2a, 0x81, 0x1c, 0xcf, 0x55, 0x01, 0x82, 0x2d };
 
 fn rsaCertificatePublicKey(certificate: []const u8) Error![]const u8 {
     return rsaCertificatePublicKeyForAlgorithm(
