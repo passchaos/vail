@@ -9,7 +9,7 @@ The current foundation provides:
 - domain-separated HMAC-SHA256 and constant-time tag verification;
 - fixed-size SHA-256 and SM3 digests, portable SM2 signing/verification,
   SM4 block/SM4-GCM primitives, and explicit secure-memory wiping;
-- TLS 1.3 Certificate and CertificateVerify codecs;
+- TLS 1.3 Certificate, CertificateVerify, and AEAD record-protection codecs;
 - Ed25519, ECDSA P-256, ECDSA P-384, and SM2/SM3 verifier
   implementations, plus RSA-PSS/RSAE SHA-256 X.509 CertificateVerify and DER
   RSAPublicKey pin verification;
@@ -31,8 +31,9 @@ The current foundation provides:
   early-data signaling, ticket-age validation, and NewSessionTicket codec.
 - Allocation-free AES-256-GCM stateless session tickets with origin/ALPN
   associated-data binding and bounded current/history key rotation.
-- Allocation-free QUIC traffic-secret protection for AES-128-GCM,
-  AES-256-GCM, and ChaCha20-Poly1305, including nonce derivation, header
+- TLS 1.3 record protection for AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305,
+  and SM4-GCM, plus allocation-free QUIC traffic-secret protection for
+  AES-128-GCM, AES-256-GCM, and ChaCha20-Poly1305, including nonce derivation, header
   protection, and suite confidentiality/integrity limits.
 - Compile-time-specialized SHA-256/SHA-384 TLS 1.3 schedules, runtime
   hash-bound secrets/transcripts, 32/48-byte PSK binders, CertificateVerify,
