@@ -11,6 +11,7 @@ const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const ChaCha20IETF = std.crypto.stream.chacha.ChaCha20IETF;
+const backend = @import("../crypto/backend.zig");
 const sm3 = @import("../crypto/sm3.zig");
 const sm4 = @import("../crypto/sm4.zig");
 const cipher_suite = @import("../tls/cipher_suite.zig");
@@ -197,22 +198,44 @@ pub const Keys = struct {
         }
         const nonce = packetNonce(self.iv, packet_number);
         switch (self.suite) {
-            .aes_128_gcm_sha256 => Aes128Gcm.encrypt(
-                ciphertext,
-                tag,
-                plaintext,
-                associated_data,
-                nonce,
-                self.key[0..Aes128Gcm.key_length].*,
-            ),
-            .aes_256_gcm_sha384 => Aes256Gcm.encrypt(
-                ciphertext,
-                tag,
-                plaintext,
-                associated_data,
-                nonce,
-                self.key,
-            ),
+            .aes_128_gcm_sha256 => {
+                if (protectAwsLcAesGcm(
+                    .aes_128_gcm,
+                    self.key[0..Aes128Gcm.key_length],
+                    nonce,
+                    associated_data,
+                    plaintext,
+                    ciphertext,
+                    tag,
+                )) return;
+                Aes128Gcm.encrypt(
+                    ciphertext,
+                    tag,
+                    plaintext,
+                    associated_data,
+                    nonce,
+                    self.key[0..Aes128Gcm.key_length].*,
+                );
+            },
+            .aes_256_gcm_sha384 => {
+                if (protectAwsLcAesGcm(
+                    .aes_256_gcm,
+                    &self.key,
+                    nonce,
+                    associated_data,
+                    plaintext,
+                    ciphertext,
+                    tag,
+                )) return;
+                Aes256Gcm.encrypt(
+                    ciphertext,
+                    tag,
+                    plaintext,
+                    associated_data,
+                    nonce,
+                    self.key,
+                );
+            },
             .sm4_gcm_sm3 => sm4.Gcm.encrypt(
                 ciphertext,
                 tag,
@@ -246,22 +269,44 @@ pub const Keys = struct {
         }
         const nonce = packetNonce(self.iv, packet_number);
         switch (self.suite) {
-            .aes_128_gcm_sha256 => try Aes128Gcm.decrypt(
-                plaintext,
-                ciphertext,
-                tag,
-                associated_data,
-                nonce,
-                self.key[0..Aes128Gcm.key_length].*,
-            ),
-            .aes_256_gcm_sha384 => try Aes256Gcm.decrypt(
-                plaintext,
-                ciphertext,
-                tag,
-                associated_data,
-                nonce,
-                self.key,
-            ),
+            .aes_128_gcm_sha256 => {
+                if (openAwsLcAesGcm(
+                    .aes_128_gcm,
+                    self.key[0..Aes128Gcm.key_length],
+                    nonce,
+                    associated_data,
+                    ciphertext,
+                    tag,
+                    plaintext,
+                )) return;
+                try Aes128Gcm.decrypt(
+                    plaintext,
+                    ciphertext,
+                    tag,
+                    associated_data,
+                    nonce,
+                    self.key[0..Aes128Gcm.key_length].*,
+                );
+            },
+            .aes_256_gcm_sha384 => {
+                if (openAwsLcAesGcm(
+                    .aes_256_gcm,
+                    &self.key,
+                    nonce,
+                    associated_data,
+                    ciphertext,
+                    tag,
+                    plaintext,
+                )) return;
+                try Aes256Gcm.decrypt(
+                    plaintext,
+                    ciphertext,
+                    tag,
+                    associated_data,
+                    nonce,
+                    self.key,
+                );
+            },
             .sm4_gcm_sm3 => try sm4.Gcm.decrypt(
                 plaintext,
                 ciphertext,
@@ -326,4 +371,32 @@ pub const Keys = struct {
 
 pub fn packetNonce(iv: [iv_len]u8, packet_number: u64) [iv_len]u8 {
     return common.packetNonce(iv, packet_number);
+}
+
+fn protectAwsLcAesGcm(
+    suite: backend.AesGcmSuite,
+    key: []const u8,
+    nonce: [iv_len]u8,
+    associated_data: []const u8,
+    plaintext: []const u8,
+    ciphertext: []u8,
+    tag: *[tag_len]u8,
+) bool {
+    var ctx = backend.AesGcmContext.init(suite, key) orelse return false;
+    defer ctx.deinit();
+    return ctx.seal(&nonce, associated_data, plaintext, ciphertext, tag);
+}
+
+fn openAwsLcAesGcm(
+    suite: backend.AesGcmSuite,
+    key: []const u8,
+    nonce: [iv_len]u8,
+    associated_data: []const u8,
+    ciphertext: []const u8,
+    tag: [tag_len]u8,
+    plaintext: []u8,
+) bool {
+    var ctx = backend.AesGcmContext.init(suite, key) orelse return false;
+    defer ctx.deinit();
+    return ctx.open(&nonce, associated_data, ciphertext, &tag, plaintext);
 }

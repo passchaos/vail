@@ -108,6 +108,53 @@ pub fn main(init: std.process.Init) !void {
             checksum,
         },
     );
+
+    const unified_aes256 = try traffic.Keys.deriveChecked(
+        .aes_256_gcm_sha384,
+        .fromSha384([_]u8{0x42} ** vail.tls.key_schedule.Sha384.secret_len),
+        .{},
+    );
+    const unified_seal_start = nowNs(init.io);
+    checksum = 0;
+    for (0..iterations) |packet_number| {
+        try unified_aes256.protect(
+            packet_number,
+            aad,
+            &plaintext,
+            &ciphertext,
+            &tag,
+        );
+        checksum +%= ciphertext[0];
+    }
+    const unified_seal_ns = nowNs(init.io) -| unified_seal_start;
+
+    const unified_open_start = nowNs(init.io);
+    for (0..iterations) |packet_number| {
+        try unified_aes256.protect(
+            packet_number,
+            aad,
+            &plaintext,
+            &ciphertext,
+            &tag,
+        );
+        try unified_aes256.open(
+            packet_number,
+            aad,
+            &ciphertext,
+            tag,
+            &opened,
+        );
+        checksum +%= opened[0];
+    }
+    const unified_open_ns = nowNs(init.io) -| unified_open_start;
+    std.debug.print(
+        "aes_256_gcm_sha384_unified: seal={d} ns/op open+seal={d} ns/op checksum={d}\n",
+        .{
+            unified_seal_ns / iterations,
+            unified_open_ns / iterations,
+            checksum,
+        },
+    );
 }
 
 fn nowNs(io: std.Io) u64 {

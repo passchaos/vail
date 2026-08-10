@@ -65,5 +65,15 @@ The current local checkout defines `OPENSSL_NO_SM2`, `OPENSSL_NO_SM3`, and
 `OPENSSL_NO_SM4`, so SM2/SM3/SM4 continue to come from Vail's Zig modules
 until an AWS-LC provider/backend with those algorithms is available.
 
+### Current AWS-LC performance evidence
+
+On this host, `zig build -Doptimize=ReleaseFast bench-quic-traffic-crypto` versus
+`zig build -Doptimize=ReleaseFast -Daws-lc-path=/home/passchaos/Work/aws-lc
+-Daws-lc-link=true bench-quic-traffic-crypto` showed the AWS-LC-routed unified
+QUIC AES paths improving AES-128-GCM seal from about 439 ns/op to 369 ns/op and
+AES-256-GCM-SHA384 unified seal from about 492 ns/op to 396 ns/op for 1200-byte
+packets. ChaCha20-Poly1305 and the legacy standalone AES-256 SHA-384 helper are
+reported as controls and remain on their existing implementations.
+
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.
