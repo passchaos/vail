@@ -10,9 +10,9 @@ The current foundation provides:
 - fixed-size SHA-256 and SM3 digests, portable SM2 signature verification,
   SM4 block/SM4-GCM primitives, and explicit secure-memory wiping;
 - TLS 1.3 Certificate and CertificateVerify codecs;
-- Ed25519, ECDSA P-256, and ECDSA P-384 signer/verifier implementations, plus
-  RSA-PSS/RSAE SHA-256 X.509 CertificateVerify and DER RSAPublicKey pin
-  verification;
+- Ed25519, ECDSA P-256, ECDSA P-384, and SM2/SM3 verifier
+  implementations, plus RSA-PSS/RSAE SHA-256 X.509 CertificateVerify and DER
+  RSAPublicKey pin verification;
 - type-safe server identities and pinned-key client verification;
 - CertificateRequest codec and mTLS policy types;
 - X.509 chain, hostname, validity, custom-bundle, and system-CA verification.
@@ -40,12 +40,12 @@ The current foundation provides:
 - Canonical TLS 1.3 cipher-suite identities and validated client/server
   preference selection, with stateless tickets bound to their issuing suite.
 - ShangMi coverage: SM2 verifies ZA-bound raw and DER signatures against
-  SEC1 public keys, SM3 implements Zig Hash/HMAC-compatible one-shot and
-  streaming hashing, SM4 exposes allocation-free block and 96-bit-nonce GCM
-  APIs, and TLS/QUIC can negotiate the RFC 8998 TLS_SM4_GCM_SM3 (`0x00c6`)
-  suite with SM3 HKDF/transcripts, PSK binders, tickets, packet protection,
-  and SM4 header protection. These are intentionally present even though the
-  local
+  SEC1 public keys and is wired into TLS CertificateVerify for raw SM2 keys,
+  SM3 implements Zig Hash/HMAC-compatible one-shot and streaming hashing, SM4
+  exposes allocation-free block and 96-bit-nonce GCM APIs, and TLS/QUIC can
+  negotiate the RFC 8998 TLS_SM4_GCM_SM3 (`0x00c6`) suite with SM3
+  HKDF/transcripts, PSK binders, tickets, packet protection, and SM4 header
+  protection. These are intentionally present even though the local
   `~/Work/aws-lc` checkout currently defines `OPENSSL_NO_SM2`, `OPENSSL_NO_SM3`,
   and `OPENSSL_NO_SM4`, so higher-level TLS/GMSSL work can proceed while an
   AWS-LC provider/backend is developed.

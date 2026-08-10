@@ -151,6 +151,7 @@ test "CertificateRequest advertises built-in signature schemes" {
     try std.testing.expect(parsed.supports_ed25519);
     try std.testing.expect(parsed.supports_ecdsa_p256_sha256);
     try std.testing.expect(parsed.supports_ecdsa_p384_sha384);
+    try std.testing.expect(parsed.supports_sm2sig_sm3);
 }
 
 test "client CertificateVerify uses the distinct TLS context" {
@@ -216,6 +217,132 @@ test "CertificateVerify signs a SHA-384 transcript without truncation" {
             &public_key,
             parsed,
             &truncated,
+        ),
+    );
+}
+
+test "SM2 CertificateVerify validates raw SEC1 identities" {
+    const public_key = [_]u8{
+        0x04,
+        0xac,
+        0x48,
+        0x0a,
+        0x72,
+        0xad,
+        0x1b,
+        0xeb,
+        0x6f,
+        0xa9,
+        0x88,
+        0xd7,
+        0x0d,
+        0x44,
+        0xac,
+        0x07,
+        0x48,
+        0xe8,
+        0x11,
+        0xbf,
+        0xbf,
+        0xed,
+        0xd6,
+        0x8e,
+        0x99,
+        0x17,
+        0xf9,
+        0x99,
+        0xe6,
+        0x1c,
+        0xd3,
+        0xc1,
+        0xc8,
+        0x39,
+        0xf7,
+        0x7d,
+        0x94,
+        0xb9,
+        0xd0,
+        0x8d,
+        0x2c,
+        0x38,
+        0x01,
+        0x3d,
+        0xae,
+        0x20,
+        0x7e,
+        0xc9,
+        0x0d,
+        0xbd,
+        0xb1,
+        0x31,
+        0xc3,
+        0x7e,
+        0xb9,
+        0x90,
+        0xad,
+        0xd0,
+        0xc3,
+        0xc0,
+        0xa0,
+        0xe1,
+        0x8e,
+        0x0a,
+        0x69,
+    };
+    const signature = [_]u8{
+        0x30, 0x45, 0x02, 0x21, 0x00, 0xf9, 0x09, 0xd5,
+        0x25, 0x7b, 0x09, 0x6e, 0xd6, 0xab, 0x34, 0x3a,
+        0x8e, 0x2e, 0x16, 0xb2, 0x99, 0x37, 0xbd, 0x6e,
+        0xc0, 0x43, 0x20, 0x82, 0x30, 0x04, 0x13, 0xea,
+        0x8d, 0xc9, 0xb7, 0x12, 0x06, 0x02, 0x20, 0x09,
+        0xfb, 0x22, 0x70, 0xf4, 0xd8, 0xab, 0x0b, 0xbc,
+        0x35, 0x2b, 0xdf, 0x32, 0x53, 0xb0, 0x78, 0x51,
+        0xe1, 0x91, 0x3a, 0xa8, 0xb1, 0xfb, 0xa1, 0xaa,
+        0xd7, 0xc3, 0x25, 0xd2, 0xe7, 0xde, 0x7b,
+    };
+    const transcript_hash = [_]u8{0x5a} ** 32;
+    var verify_message: std.ArrayList(u8) = .empty;
+    defer verify_message.deinit(std.testing.allocator);
+    try verify_message.append(
+        std.testing.allocator,
+        auth.handshake_type_certificate_verify,
+    );
+    const body_len = 2 + 2 + signature.len;
+    try verify_message.appendSlice(std.testing.allocator, &.{
+        @truncate(body_len >> 16),
+        @truncate(body_len >> 8),
+        @truncate(body_len),
+        @truncate(auth.signature_scheme_sm2sig_sm3 >> 8),
+        @truncate(auth.signature_scheme_sm2sig_sm3),
+        @truncate(signature.len >> 8),
+        @truncate(signature.len),
+    });
+    try verify_message.appendSlice(std.testing.allocator, &signature);
+    const parsed = try auth.parseCertificateVerify(verify_message.items);
+    try auth.verifyCertificateVerify(
+        &public_key,
+        parsed,
+        &transcript_hash,
+    );
+    const verifier = auth.ClientVerifier{
+        .pinned_sm2_public_key = public_key,
+    };
+    try verifier.verifyTrust(null, &.{&public_key});
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        auth.verifyCertificateVerifyForRole(
+            &public_key,
+            parsed,
+            &transcript_hash,
+            .client,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidCertificateVerify,
+        auth.verifyCertificateVerify(
+            &public_key,
+            parsed,
+            &([_]u8{0x5a} ** 48),
         ),
     );
 }

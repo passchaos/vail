@@ -7,6 +7,7 @@
 
 const std = @import("std");
 
+const sm2 = @import("../crypto/sm2.zig");
 const Certificate = std.crypto.Certificate;
 const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -24,6 +25,7 @@ pub const signature_scheme_ed25519: u16 = 0x0807;
 pub const signature_scheme_rsa_pss_pss_sha256: u16 = 0x0809;
 pub const signature_scheme_rsa_pss_pss_sha384: u16 = 0x080a;
 pub const signature_scheme_rsa_pss_pss_sha512: u16 = 0x080b;
+pub const signature_scheme_sm2sig_sm3: u16 = 0x0708;
 pub const handshake_type_certificate: u8 = 0x0b;
 pub const handshake_type_certificate_verify: u8 = 0x0f;
 const server_certificate_verify_context =
@@ -137,6 +139,7 @@ pub const ClientVerifier = struct {
     pinned_ed25519_public_key: ?[Ed25519.PublicKey.encoded_length]u8 = null,
     pinned_ecdsa_p256_public_key: ?[EcdsaP256Sha256.PublicKey.uncompressed_sec1_encoded_length]u8 = null,
     pinned_ecdsa_p384_public_key: ?[EcdsaP384Sha384.PublicKey.uncompressed_sec1_encoded_length]u8 = null,
+    pinned_sm2_public_key: ?[sm2.public_key_len]u8 = null,
     /// DER RSAPublicKey bytes from X.509 SubjectPublicKeyInfo's BIT STRING
     /// payload (not the complete SubjectPublicKeyInfo). The caller retains
     /// ownership.
@@ -184,6 +187,17 @@ pub const ClientVerifier = struct {
                     EcdsaP384Sha384.PublicKey
                         .uncompressed_sec1_encoded_length
                 ]u8,
+                actual,
+                pinned,
+            )) {
+                return error.CertificateUntrusted;
+            }
+            return;
+        }
+        if (self.pinned_sm2_public_key) |pinned| {
+            const actual = try sm2CertificatePublicKey(chain[0]);
+            if (!std.crypto.timing_safe.eql(
+                [sm2.public_key_len]u8,
                 actual,
                 pinned,
             )) {
@@ -421,7 +435,8 @@ pub fn parseCertificateVerify(
         scheme != signature_scheme_rsa_pss_rsae_sha512 and
         scheme != signature_scheme_rsa_pss_pss_sha256 and
         scheme != signature_scheme_rsa_pss_pss_sha384 and
-        scheme != signature_scheme_rsa_pss_pss_sha512)
+        scheme != signature_scheme_rsa_pss_pss_sha512 and
+        scheme != signature_scheme_sm2sig_sm3)
     {
         return error.UnsupportedSignatureScheme;
     }
@@ -555,8 +570,49 @@ pub fn verifyCertificateVerifyForRole(
             transcript_hash,
             role,
         ),
+        signature_scheme_sm2sig_sm3 => try verifySm2(
+            certificate,
+            parsed.signature,
+            transcript_hash,
+            role,
+        ),
         else => return error.UnsupportedSignatureScheme,
     }
+}
+
+fn verifySm2(
+    certificate: []const u8,
+    signature_bytes: []const u8,
+    transcript_hash: []const u8,
+    role: EndpointRole,
+) Error!void {
+    if (transcript_hash.len != sm3DigestLen()) {
+        return error.InvalidCertificateVerify;
+    }
+    const public_key = sm2.PublicKey.fromUncompressedSec1(
+        &try sm2CertificatePublicKey(certificate),
+    ) catch return error.InvalidCertificate;
+    const signature = sm2.Signature.fromDer(signature_bytes) catch
+        return error.InvalidCertificateVerify;
+    const separator = [_]u8{0};
+    var message: [
+        64 + client_certificate_verify_context.len + 1 +
+            sm3DigestLen()
+    ]u8 = undefined;
+    @memset(message[0..64], 0x20);
+    const context = certificateVerifyContext(role);
+    @memcpy(message[64 .. 64 + context.len], context);
+    message[64 + context.len] = separator[0];
+    @memcpy(
+        message[64 + context.len + 1 ..][0..transcript_hash.len],
+        transcript_hash,
+    );
+    sm2.verify(
+        sm2.default_user_id,
+        public_key,
+        message[0 .. 64 + context.len + 1 + transcript_hash.len],
+        signature,
+    ) catch return error.BadCertificateVerify;
 }
 
 fn verifyRsaPss(
@@ -697,11 +753,26 @@ fn p384CertificatePublicKey(
         .uncompressed_sec1_encoded_length].*;
 }
 
+fn sm2CertificatePublicKey(
+    certificate: []const u8,
+) Error![sm2.public_key_len]u8 {
+    if (certificate.len == sm2.public_key_len) {
+        _ = sm2.PublicKey.fromUncompressedSec1(certificate) catch
+            return error.InvalidCertificate;
+        return certificate[0..sm2.public_key_len].*;
+    }
+    return error.UnsupportedCertificateKey;
+}
+
 fn rsaCertificatePublicKey(certificate: []const u8) Error![]const u8 {
     return rsaCertificatePublicKeyForAlgorithm(
         certificate,
         .rsaEncryption,
     );
+}
+
+fn sm3DigestLen() usize {
+    return @import("../crypto/sm3.zig").digest_len;
 }
 
 fn rsaCertificatePublicKeyForAlgorithm(
