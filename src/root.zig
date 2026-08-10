@@ -28,6 +28,7 @@ test {
     _ = tls.record;
     _ = tls.secret;
     _ = tls.server_hello;
+    _ = tls.server_flight;
     _ = tls.ticket;
     _ = tls.ticket_keyring;
     _ = tls.transcript;

@@ -9,8 +9,9 @@ The current foundation provides:
 - domain-separated HMAC-SHA256 and constant-time tag verification;
 - fixed-size SHA-256 and SM3 digests, portable SM2 signing/verification,
   SM4 block/SM4-GCM primitives, and explicit secure-memory wiping;
-- TLS 1.3 ClientHello parsing, ServerHello/EncryptedExtensions, Certificate,
-  CertificateVerify, and AEAD record-protection codecs;
+- TLS 1.3 ClientHello parsing, server first-flight planning,
+  ServerHello/EncryptedExtensions, Certificate, CertificateVerify, and AEAD
+  record-protection codecs;
 - Ed25519, ECDSA P-256, ECDSA P-384, and SM2/SM3 verifier
   implementations, plus RSA-PSS/RSAE SHA-256 X.509 CertificateVerify and DER
   RSAPublicKey pin verification;
