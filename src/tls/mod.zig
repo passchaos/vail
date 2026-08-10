@@ -10,6 +10,7 @@ pub const psk = @import("psk.zig");
 pub const record = @import("record.zig");
 pub const secret = @import("secret.zig");
 pub const server_hello = @import("server_hello.zig");
+pub const server_handshake = @import("server_handshake.zig");
 pub const server_flight = @import("server_flight.zig");
 pub const ticket = @import("ticket.zig");
 pub const ticket_keyring = @import("ticket_keyring.zig");
@@ -20,5 +21,6 @@ test {
     _ = client_hello;
     _ = record;
     _ = server_hello;
+    _ = server_handshake;
     _ = server_flight;
 }
