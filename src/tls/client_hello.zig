@@ -11,6 +11,7 @@ pub const ext_server_name: u16 = 0x0000;
 pub const ext_supported_groups: u16 = 0x000a;
 pub const ext_signature_algorithms: u16 = 0x000d;
 pub const ext_application_layer_protocol_negotiation: u16 = 0x0010;
+pub const ext_quic_transport_parameters: u16 = 0x0039;
 pub const ext_supported_versions: u16 = 0x002b;
 pub const ext_psk_key_exchange_modes: u16 = 0x002d;
 pub const ext_key_share: u16 = 0x0033;
@@ -37,6 +38,7 @@ pub const Parsed = struct {
     supported_groups: []const u8 = &.{},
     signature_algorithms: []const u8 = &.{},
     alpn_protocols: []const u8 = &.{},
+    quic_transport_parameters: ?[]const u8 = null,
     supported_versions: []const u8 = &.{},
     psk_key_exchange_modes: []const u8 = &.{},
     key_shares: []const u8 = &.{},
@@ -129,6 +131,7 @@ pub fn parse(bytes: []const u8) Error!Parsed {
             ext_supported_groups => parsed.supported_groups = payload,
             ext_signature_algorithms => parsed.signature_algorithms = payload,
             ext_application_layer_protocol_negotiation => parsed.alpn_protocols = payload,
+            ext_quic_transport_parameters => parsed.quic_transport_parameters = payload,
             ext_supported_versions => parsed.supported_versions = try parseSupportedVersions(payload),
             ext_psk_key_exchange_modes => parsed.psk_key_exchange_modes = try parseU8List(payload),
             ext_key_share => parsed.key_shares = payload,
@@ -295,4 +298,33 @@ test "ClientHello parser extracts a minimal TLS 1.3 offer" {
     const same_share = (try parsed.keyShareForGroup(0x001d)).?;
     try std.testing.expectEqualSlices(u8, share.key_exchange, same_share.key_exchange);
     try std.testing.expectEqual(@as(?KeyShare, null), try parsed.keyShareForGroup(0x0020));
+}
+
+test "ClientHello parser exposes QUIC transport parameters extension" {
+    const hello = [_]u8{
+        0x01, 0x00, 0x00, 0x32, 0x03, 0x03,
+    } ++ ([_]u8{0x22} ** 32) ++ [_]u8{
+        0x00, // empty legacy_session_id
+        0x00,
+        0x02,
+        0x13,
+        0x01,
+        0x01,
+        0x00,
+        0x00,
+        0x07,
+        0x00,
+        0x39,
+        0x00,
+        0x03,
+        1,
+        2,
+        3,
+    };
+    const parsed = try parse(&hello);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 1, 2, 3 },
+        parsed.quic_transport_parameters.?,
+    );
 }

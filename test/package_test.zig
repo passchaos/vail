@@ -16,11 +16,21 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.crypto, "sm3"));
     try std.testing.expect(@hasDecl(vail.crypto, "sm4"));
     try std.testing.expect(@hasDecl(vail, "quic"));
+    try std.testing.expect(@hasDecl(vail.quic, "initial"));
+    try std.testing.expect(@hasDecl(vail.quic.initial, "deriveKeysForVersion"));
+    try std.testing.expect(@hasDecl(vail.quic, "retry"));
+    try std.testing.expect(@hasDecl(vail.quic.retry, "computeIntegrityTagForVersion"));
+    try std.testing.expect(@hasDecl(vail.quic, "tls_handshake"));
+    try std.testing.expect(@hasDecl(vail.quic.tls_handshake, "writeServerCryptoFlight"));
+    try std.testing.expect(@hasDecl(vail.quic, "tls_secrets"));
+    try std.testing.expect(@hasDecl(vail.quic.tls_secrets, "applicationKeys"));
     try std.testing.expect(@hasDecl(vail.quic, "traffic_crypto"));
     try std.testing.expect(@hasDecl(
         vail.quic.traffic_crypto,
         "aes256_sha384",
     ));
+    try std.testing.expect(@hasDecl(vail.quic.traffic_crypto, "nextTrafficSecret"));
+    try std.testing.expect(@hasDecl(vail.quic, "transport_parameters"));
     try std.testing.expect(@hasDecl(vail, "tls"));
     try std.testing.expect(@hasDecl(vail.tls, "auth"));
     try std.testing.expect(@hasDecl(vail.tls, "client_auth"));

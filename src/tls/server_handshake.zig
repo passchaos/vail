@@ -83,6 +83,7 @@ pub fn writeServerHandshakeFlight(
     defer encrypted_extensions.deinit(allocator);
     try server_hello.writeEncryptedExtensions(&encrypted_extensions, allocator, .{
         .alpn_protocol = selection.alpn_protocol,
+        .quic_transport_parameters = options.policy.quic_transport_parameters,
     });
     try appendEncryptedHandshake(
         out,

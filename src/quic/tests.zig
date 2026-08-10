@@ -1,5 +1,202 @@
 const std = @import("std");
+const initial = @import("initial.zig");
+const retry = @import("retry.zig");
+const key_schedule = @import("../tls/key_schedule.zig");
+const tls_secret = @import("../tls/secret.zig");
+const tls_transcript = @import("../tls/transcript.zig");
+const tls_secrets = @import("tls_secrets.zig");
 const traffic = @import("traffic_crypto.zig");
+const transport_parameters = @import("transport_parameters.zig");
+
+test "QUIC v1 Initial secrets match RFC 9001 vectors" {
+    const dcid = [_]u8{
+        0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08,
+    };
+    const secrets = try initial.deriveSecretsForVersion(
+        initial.version_1,
+        &dcid,
+    );
+    try expectHex(
+        "7db5df06e7a69e432496adedb00851923595221596ae2ae9fb8115c1e9ed0a44",
+        &secrets.initial_secret,
+    );
+    try expectHex(
+        "c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea",
+        secrets.client.bytes(),
+    );
+    try expectHex(
+        "3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b",
+        secrets.server.bytes(),
+    );
+
+    const keys = try initial.deriveKeysForVersion(initial.version_1, &dcid);
+    try expectHex("1f369613dd76d5467730efcbe3b1a22d", keys.client.key[0..16]);
+    try expectHex("fa044b2f42a3fd3b46fb255c", &keys.client.iv);
+    try expectHex("9f50449e04a0e810283a1e9933adedd2", keys.client.hp[0..16]);
+    try expectHex("cf3a5331653c364c88f0f379b6067e37", keys.server.key[0..16]);
+    try expectHex("0ac1493ca1905853b0bba03e", &keys.server.iv);
+    try expectHex("c206b8d9b9f0f37644430b490eeaa314", keys.server.hp[0..16]);
+}
+
+test "QUIC v2 Initial secrets use version-specific labels" {
+    const dcid = [_]u8{
+        0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08,
+    };
+    const secrets = try initial.deriveSecretsForVersion(
+        initial.version_2,
+        &dcid,
+    );
+    try expectHex(
+        "2062e8b3cd8d52092614b8071d0aa1fb7c2e3ac193f78b280e72d8f5751f6aba",
+        &secrets.initial_secret,
+    );
+    try expectHex(
+        "14ec9d6eb9fd7af83bf5a668bc17a7e283766aade7ecd0891f70f9ff7f4bf47b",
+        secrets.client.bytes(),
+    );
+
+    const keys = try initial.deriveKeysForVersion(initial.version_2, &dcid);
+    try expectHex("8b1a0bc121284290a29e0971b5cd045d", keys.client.key[0..16]);
+    try expectHex("91f73e2351d8fa91660e909f", &keys.client.iv);
+    try expectHex("45b95e15235d6f45a6b19cbcb0294ba9", keys.client.hp[0..16]);
+    try expectHex("82db637861d55e1d011f19ea71d5d2a7", keys.server.key[0..16]);
+    try expectHex("dd13c276499c0249d3310652", &keys.server.iv);
+    try expectHex("edf6d05c83121201b436e16877593c3a", keys.server.hp[0..16]);
+}
+
+test "QUIC Retry integrity tags match v1 and v2 vectors" {
+    const odcid = [_]u8{
+        0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08,
+    };
+    const retry_v1_without_tag = [_]u8{
+        0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0xf0,
+        0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5, 0x74,
+        0x6f, 0x6b, 0x65, 0x6e,
+    };
+    const retry_v2_without_tag = [_]u8{
+        0xcf, 0x6b, 0x33, 0x43, 0xcf, 0x00, 0x08, 0xf0,
+        0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5, 0x74,
+        0x6f, 0x6b, 0x65, 0x6e,
+    };
+    var pseudo: [64]u8 = undefined;
+    const tag_v1 = try retry.computeIntegrityTagForVersion(
+        initial.version_1,
+        &odcid,
+        &retry_v1_without_tag,
+        &pseudo,
+    );
+    try expectHex("04a265ba2eff4d829058fb3f0f2496ba", &tag_v1);
+    const tag_v2 = try retry.computeIntegrityTagForVersion(
+        initial.version_2,
+        &odcid,
+        &retry_v2_without_tag,
+        &pseudo,
+    );
+    try expectHex("c8646ce8bfe33952d955543665dcc7b6", &tag_v2);
+
+    var full_retry_v1: [retry_v1_without_tag.len + retry.tag_len]u8 =
+        undefined;
+    @memcpy(full_retry_v1[0..retry_v1_without_tag.len], &retry_v1_without_tag);
+    @memcpy(full_retry_v1[retry_v1_without_tag.len..], &tag_v1);
+    try retry.verifyIntegrityTagForVersion(
+        initial.version_1,
+        &odcid,
+        &full_retry_v1,
+        &pseudo,
+    );
+    full_retry_v1[full_retry_v1.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.RetryIntegrityTagMismatch,
+        retry.verifyIntegrityTagForVersion(
+            initial.version_1,
+            &odcid,
+            &full_retry_v1,
+            &pseudo,
+        ),
+    );
+}
+
+test "QUIC transport parameters extension exposes opaque payloads" {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try transport_parameters.appendExtension(
+        &out,
+        std.testing.allocator,
+        &.{ 0x40, 0x75, 0x01 },
+    );
+    const found = (try transport_parameters.findExtension(out.items)).?;
+    try std.testing.expectEqualSlices(u8, &.{ 0x40, 0x75, 0x01 }, found);
+}
+
+test "TLS runtime secrets install QUIC handshake and application keys" {
+    const shared = [_]u8{0x71} ** key_schedule.secret_len;
+    const transcript_hash = tls_transcript.Digest{
+        .hash = .sha256,
+        .storage = ([_]u8{0x72} ** 32) ++ ([_]u8{0} ** 16),
+    };
+    const handshake = try key_schedule.deriveHandshakeFor(
+        .sha256,
+        &shared,
+        transcript_hash,
+        null,
+    );
+    const handshake_keys = try tls_secrets.handshakeKeys(
+        .aes_128_gcm_sha256,
+        handshake,
+        traffic.labels_v1,
+    );
+    try expectHex(
+        "2091977ff09711cb6ecb10a8efcb4a7f",
+        handshake_keys.client.key[0..16],
+    );
+    try expectHex(
+        "387f496db9c68aaeae7c480e87e21e27",
+        handshake_keys.server.key[0..16],
+    );
+
+    const application = try key_schedule.deriveApplicationFor(
+        handshake.handshake_secret,
+        transcript_hash,
+    );
+    const application_keys = try tls_secrets.applicationKeys(
+        .aes_128_gcm_sha256,
+        application,
+        traffic.labels_v1,
+    );
+    try expectHex(
+        "1015f929303993a072958f5a60c2b6c6",
+        application_keys.client.key[0..16],
+    );
+    try expectHex(
+        "6dedad711b485ffeb67c374e11a8638a",
+        application_keys.server.key[0..16],
+    );
+    try std.testing.expectError(
+        error.HashMismatch,
+        tls_secrets.keysForSecret(
+            .aes_256_gcm_sha384,
+            tls_secret.Secret.fromSha256([_]u8{0} ** 32),
+            traffic.labels_v1,
+        ),
+    );
+}
+
+test "TLS runtime PSKs install QUIC 0-RTT client keys" {
+    const psk = tls_secret.Secret.fromSha256([_]u8{0x73} ** 32);
+    const client_hello_hash = tls_transcript.Digest{
+        .hash = .sha256,
+        .storage = ([_]u8{0x72} ** 32) ++ ([_]u8{0} ** 16),
+    };
+    const early_keys = try tls_secrets.clientEarlyKeys(
+        .aes_128_gcm_sha256,
+        psk,
+        client_hello_hash,
+        traffic.labels_v1,
+    );
+    try expectHex("8a42265aaa292e0e3fb6b73745bb04f4", early_keys.key[0..16]);
+    try expectHex("5219bf25ede695ea90f0f858", &early_keys.iv);
+    try expectHex("a1868326687403f478922e352b42a7d3", early_keys.hp[0..16]);
+}
 
 test "AES and ChaCha traffic suites round-trip without allocation" {
     const secret = [_]u8{0x42} ** traffic.secret_len;
@@ -206,4 +403,49 @@ test "SM4-GCM SM3 traffic keys match independent vectors" {
             .{},
         ),
     );
+}
+
+test "QUIC key update keeps header protection key stable" {
+    const secret = [_]u8{
+        0x9a, 0xc3, 0x12, 0xa7, 0xf8, 0x77, 0x46, 0x8e,
+        0xbe, 0x69, 0x42, 0x27, 0x48, 0xad, 0x00, 0xa1,
+        0x54, 0x43, 0xf1, 0x82, 0x03, 0xa0, 0x7d, 0x60,
+        0x60, 0xf6, 0x88, 0xf3, 0x0f, 0x21, 0x63, 0x2b,
+    };
+    const keys = try traffic.Keys.deriveChecked(
+        .chacha20_poly1305_sha256,
+        .fromSha256(secret),
+        traffic.labels_v1,
+    );
+    const next_secret = try traffic.nextTrafficSecret(
+        .chacha20_poly1305_sha256,
+        .fromSha256(secret),
+        traffic.labels_v1,
+    );
+    try expectHex(
+        "1223504755036d556342ee9361d253421a826c9ecdf3c7148684b36b714881f9",
+        next_secret.bytes(),
+    );
+    const next = try keys.nextKeyPhase(traffic.labels_v1);
+    try std.testing.expectEqualSlices(u8, &keys.hp, &next.hp);
+    try std.testing.expect(!std.mem.eql(u8, &keys.key, &next.key));
+
+    const next_v2 = try traffic.nextTrafficSecret(
+        .chacha20_poly1305_sha256,
+        .fromSha256(secret),
+        traffic.labels_v2,
+    );
+    try expectHex(
+        "c69374c49e3d2a9466fa689e49d476db5d0dfbc87d32ceeaa6343fd0ae4c7d88",
+        next_v2.bytes(),
+    );
+}
+
+fn expectHex(expected_hex: []const u8, actual: []const u8) !void {
+    var expected: [64]u8 = undefined;
+    const decoded = try std.fmt.hexToBytes(
+        expected[0 .. expected_hex.len / 2],
+        expected_hex,
+    );
+    try std.testing.expectEqualSlices(u8, decoded, actual);
 }

@@ -17,7 +17,12 @@ test {
     _ = crypto.sm2;
     _ = crypto.sm3;
     _ = crypto.sm4;
+    _ = quic.initial;
+    _ = quic.retry;
+    _ = quic.tls_handshake;
+    _ = quic.tls_secrets;
     _ = quic.traffic_crypto;
+    _ = quic.transport_parameters;
     _ = tls.auth;
     _ = tls.cipher_suite;
     _ = tls.client_auth;

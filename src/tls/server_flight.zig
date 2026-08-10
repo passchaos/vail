@@ -13,6 +13,7 @@ pub const Error = std.mem.Allocator.Error || error{
     NoTls13,
     NoSharedCipherSuite,
     NoSupportedKeyShare,
+    MissingQuicTransportParameters,
     InvalidClientHello,
     InvalidAlpn,
     InvalidServerHello,
@@ -29,10 +30,16 @@ pub const Policy = struct {
     cipher_suites: []const cipher_suite.Suite = &cipher_suite.default_preference,
     groups: []const u16 = &.{ 0x001d, 0x0017 },
     alpn_protocols: []const []const u8 = &.{},
+    quic_transport_parameters: ?[]const u8 = null,
 };
 
 pub fn select(client: client_hello.Parsed, policy: Policy) Error!Selection {
     if (!client.offersTls13()) return error.NoTls13;
+    if (policy.quic_transport_parameters != null and
+        client.quic_transport_parameters == null)
+    {
+        return error.MissingQuicTransportParameters;
+    }
     const suite = for (policy.cipher_suites) |candidate| {
         if (client.hasCipherSuite(candidate.wireValue())) break candidate;
     } else return error.NoSharedCipherSuite;
@@ -63,6 +70,7 @@ pub fn writeFirstFlight(
     });
     try server_hello.writeEncryptedExtensions(out, allocator, .{
         .alpn_protocol = chosen.alpn_protocol,
+        .quic_transport_parameters = policy.quic_transport_parameters,
     });
     return chosen;
 }

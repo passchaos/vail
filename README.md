@@ -34,14 +34,22 @@ The current foundation provides:
 - Allocation-free AES-256-GCM stateless session tickets with origin/ALPN
   associated-data binding and bounded current/history key rotation.
 - TLS 1.3 record protection for AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305,
-  and SM4-GCM, plus allocation-free QUIC traffic-secret protection for
-  AES-128-GCM, AES-256-GCM, and ChaCha20-Poly1305, including nonce derivation, header
-  protection, and suite confidentiality/integrity limits.
+  and SM4-GCM, plus allocation-free QUIC Initial, Handshake, 0-RTT, 1-RTT,
+  Retry integrity, traffic-secret, and key-update crypto helpers, including
+  version-specific QUIC v1/v2 labels, nonce derivation, header protection, and
+  suite confidentiality/integrity limits.
 - Compile-time-specialized SHA-256/SHA-384 TLS 1.3 schedules, runtime
   hash-bound secrets/transcripts, 32/48-byte PSK binders, CertificateVerify,
   Finished, resumption PSKs, and stateless tickets.
 - Canonical TLS 1.3 cipher-suite identities and validated client/server
   preference selection, with stateless tickets bound to their issuing suite.
+- QUIC transport-parameter TLS extension plumbing: ClientHello extraction,
+  EncryptedExtensions emission, and opaque extension helpers so transport
+  libraries can own parameter semantics while Vail owns TLS framing.
+- A TLS-over-QUIC server-flight adapter that emits plaintext CRYPTO-stream
+  handshake bytes by encryption level and returns Handshake/1-RTT QUIC packet
+  keys, leaving packetization, retransmission, packet-number spaces, and
+  congestion/recovery state to the transport.
 - ShangMi coverage: SM2 signs and verifies ZA-bound raw/DER signatures against
   SEC1 public keys and SM2 X.509 SubjectPublicKeyInfo, and is wired into TLS
   CertificateVerify generation/verification for raw and X.509 SM2 keys,

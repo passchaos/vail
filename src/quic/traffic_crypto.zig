@@ -7,6 +7,8 @@
 const std = @import("std");
 
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
+const HmacSha384 = std.crypto.auth.hmac.sha2.HmacSha384;
+const HkdfSha384 = std.crypto.kdf.hkdf.Hkdf(HmacSha384);
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
@@ -48,6 +50,8 @@ comptime {
 pub const Suite = cipher_suite.Suite;
 
 pub const Labels = common.Labels;
+pub const labels_v1 = common.labels_v1;
+pub const labels_v2 = common.labels_v2;
 
 pub const Keys = struct {
     suite: Suite,
@@ -183,6 +187,26 @@ pub const Keys = struct {
             },
         }
         return keys;
+    }
+
+    /// Derive the next QUIC 1-RTT key phase.
+    ///
+    /// RFC 9001 updates the packet-protection secret, key, and IV, but keeps
+    /// the header-protection key stable for the connection. Transport code
+    /// should prefer this helper over a raw `deriveChecked(next_secret, ...)`
+    /// during key updates so it cannot accidentally rotate `hp`.
+    pub fn nextKeyPhase(
+        self: Keys,
+        labels: Labels,
+    ) error{HashMismatch}!Keys {
+        const next_secret = try nextTrafficSecret(
+            self.suite,
+            self.traffic_secret,
+            labels,
+        );
+        var next = try deriveChecked(self.suite, next_secret, labels);
+        next.hp = self.hp;
+        return next;
     }
 
     pub fn protect(
@@ -368,6 +392,45 @@ pub const Keys = struct {
         }
     }
 };
+
+/// RFC 9001 §6.1 QUIC key update secret derivation.
+///
+/// QUIC replaces TLS KeyUpdate with the packet-layer Key Phase bit. The
+/// transport owns the phase transition rules and packet-number bookkeeping;
+/// Vail owns only the version-specific HKDF label and hash-bound secret
+/// derivation used to install the next 1-RTT packet-protection keys.
+pub fn nextTrafficSecret(
+    suite: Suite,
+    traffic_secret: tls_secret.Secret,
+    labels: Labels,
+) error{HashMismatch}!tls_secret.Secret {
+    if (traffic_secret.hash != suite.hash()) return error.HashMismatch;
+    return switch (suite) {
+        .aes_128_gcm_sha256,
+        .chacha20_poly1305_sha256,
+        => .fromSha256(std.crypto.tls.hkdfExpandLabel(
+            HkdfSha256,
+            traffic_secret.sha256() catch unreachable,
+            labels.ku,
+            "",
+            tls_secret.Hash.sha256.len(),
+        )),
+        .aes_256_gcm_sha384 => .fromSha384(std.crypto.tls.hkdfExpandLabel(
+            HkdfSha384,
+            traffic_secret.sha384() catch unreachable,
+            labels.ku,
+            "",
+            tls_secret.Hash.sha384.len(),
+        )),
+        .sm4_gcm_sm3 => .fromSm3(std.crypto.tls.hkdfExpandLabel(
+            HkdfSm3,
+            traffic_secret.sm3() catch unreachable,
+            labels.ku,
+            "",
+            tls_secret.Hash.sm3.len(),
+        )),
+    };
+}
 
 pub const PreparedKeys = struct {
     keys: Keys,

@@ -163,6 +163,27 @@ pub fn deriveApplicationFor(
     };
 }
 
+pub fn deriveClientEarlyTrafficSecretFor(
+    psk: secret.Secret,
+    client_hello_hash: transcript.Digest,
+) Error!secret.Secret {
+    if (psk.hash != client_hello_hash.hash) return error.HashMismatch;
+    return switch (psk.hash) {
+        .sha256 => .fromSha256(Sha256.deriveClientEarlyTrafficSecret(
+            try psk.sha256(),
+            try client_hello_hash.sha256(),
+        )),
+        .sha384 => .fromSha384(Sha384.deriveClientEarlyTrafficSecret(
+            try psk.sha384(),
+            try client_hello_hash.sha384(),
+        )),
+        .sm3 => .fromSm3(Sm3.deriveClientEarlyTrafficSecret(
+            try psk.sm3(),
+            try client_hello_hash.sm3(),
+        )),
+    };
+}
+
 pub fn computeFinishedFor(
     base_key: secret.Secret,
     transcript_hash: transcript.Digest,

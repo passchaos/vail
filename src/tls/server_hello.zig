@@ -13,6 +13,7 @@ pub const legacy_version = [_]u8{ 0x03, 0x03 };
 pub const ext_supported_versions: u16 = 0x002b;
 pub const ext_key_share: u16 = 0x0033;
 pub const ext_application_layer_protocol_negotiation: u16 = 0x0010;
+pub const ext_quic_transport_parameters: u16 = 0x0039;
 pub const tls13: u16 = 0x0304;
 
 pub const Error = std.mem.Allocator.Error || error{
@@ -67,6 +68,7 @@ pub fn writeServerHello(
 
 pub const EncryptedExtensions = struct {
     alpn_protocol: ?[]const u8 = null,
+    quic_transport_parameters: ?[]const u8 = null,
 };
 
 pub fn writeEncryptedExtensions(
@@ -90,6 +92,18 @@ pub fn writeEncryptedExtensions(
         try appendInt(&extension_bytes, allocator, u16, 1 + protocol.len);
         try extension_bytes.append(allocator, @intCast(protocol.len));
         try extension_bytes.appendSlice(allocator, protocol);
+    }
+    if (extensions.quic_transport_parameters) |parameters| {
+        if (parameters.len > std.math.maxInt(u16)) {
+            return error.InvalidEncryptedExtensions;
+        }
+        try appendExtensionHeader(
+            &extension_bytes,
+            allocator,
+            ext_quic_transport_parameters,
+            parameters.len,
+        );
+        try extension_bytes.appendSlice(allocator, parameters);
     }
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
@@ -162,7 +176,9 @@ test "ServerHello and EncryptedExtensions encode TLS 1.3 extensions" {
     out.clearRetainingCapacity();
     try writeEncryptedExtensions(&out, std.testing.allocator, .{
         .alpn_protocol = "h2",
+        .quic_transport_parameters = &.{ 0x00, 0x01, 0x00 },
     });
     try std.testing.expectEqual(handshake_type_encrypted_extensions, out.items[0]);
     try std.testing.expect(std.mem.indexOf(u8, out.items, &.{ 0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, 'h', '2' }) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, &.{ 0x00, 0x39, 0x00, 0x03, 0x00, 0x01, 0x00 }) != null);
 }

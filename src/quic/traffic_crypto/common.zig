@@ -14,6 +14,15 @@ pub const Labels = struct {
     key: []const u8 = "quic key",
     iv: []const u8 = "quic iv",
     hp: []const u8 = "quic hp",
+    ku: []const u8 = "quic ku",
+};
+
+pub const labels_v1 = Labels{};
+pub const labels_v2 = Labels{
+    .key = "quicv2 key",
+    .iv = "quicv2 iv",
+    .hp = "quicv2 hp",
+    .ku = "quicv2 ku",
 };
 
 /// RFC 9001 §5.3 packet nonce construction.
