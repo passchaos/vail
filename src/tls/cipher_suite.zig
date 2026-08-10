@@ -11,6 +11,7 @@ pub const Suite = enum(u16) {
     aes_128_gcm_sha256 = 0x1301,
     aes_256_gcm_sha384 = 0x1302,
     chacha20_poly1305_sha256 = 0x1303,
+    sm4_gcm_sm3 = 0x00c6,
 
     pub fn wireValue(self: Suite) u16 {
         return @intFromEnum(self);
@@ -18,6 +19,7 @@ pub const Suite = enum(u16) {
 
     pub fn fromWire(value: u16) ?Suite {
         return switch (value) {
+            @intFromEnum(Suite.sm4_gcm_sm3) => .sm4_gcm_sm3,
             @intFromEnum(Suite.aes_128_gcm_sha256) => .aes_128_gcm_sha256,
             @intFromEnum(Suite.aes_256_gcm_sha384) => .aes_256_gcm_sha384,
             @intFromEnum(Suite.chacha20_poly1305_sha256) => .chacha20_poly1305_sha256,
@@ -27,7 +29,9 @@ pub const Suite = enum(u16) {
 
     pub fn keyLen(self: Suite) usize {
         return switch (self) {
-            .aes_128_gcm_sha256 => 16,
+            .aes_128_gcm_sha256,
+            .sm4_gcm_sm3,
+            => 16,
             .aes_256_gcm_sha384, .chacha20_poly1305_sha256 => 32,
         };
     }
@@ -38,6 +42,7 @@ pub const Suite = enum(u16) {
             .chacha20_poly1305_sha256,
             => .sha256,
             .aes_256_gcm_sha384 => .sha384,
+            .sm4_gcm_sm3 => .sm3,
         };
     }
 
@@ -46,6 +51,7 @@ pub const Suite = enum(u16) {
         return switch (self) {
             .aes_128_gcm_sha256,
             .aes_256_gcm_sha384,
+            .sm4_gcm_sm3,
             => @as(u64, 1) << 23,
             .chacha20_poly1305_sha256 => @as(u64, 1) << 62,
         };
@@ -56,6 +62,7 @@ pub const Suite = enum(u16) {
         return switch (self) {
             .aes_128_gcm_sha256,
             .aes_256_gcm_sha384,
+            .sm4_gcm_sm3,
             => @as(u64, 1) << 52,
             .chacha20_poly1305_sha256 => @as(u64, 1) << 36,
         };
@@ -68,6 +75,13 @@ pub const default_preference = [_]Suite{
     .aes_128_gcm_sha256,
     .aes_256_gcm_sha384,
     .chacha20_poly1305_sha256,
+};
+
+/// RFC 8998 deployments need the ShangMi suite enabled deliberately because
+/// ordinary WebPKI TLS clients generally neither offer the SM2/SM3/SM4
+/// algorithm set nor accept the GM/T certificate profile.
+pub const shangmi_preference = [_]Suite{
+    .sm4_gcm_sm3,
 };
 
 pub const SelectionPolicy = enum {
@@ -188,6 +202,10 @@ test "TLS 1.3 cipher-suite selection supports both preference policies" {
     try std.testing.expectEqual(
         secret.Hash.sha384,
         Suite.aes_256_gcm_sha384.hash(),
+    );
+    try std.testing.expectEqual(
+        secret.Hash.sm3,
+        Suite.fromWire(0x00c6).?.hash(),
     );
 }
 

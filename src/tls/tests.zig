@@ -27,6 +27,14 @@ test "TLS cipher suites expose protocol limits from one canonical type" {
             cipher_suite.Suite.aes_128_gcm_sha256
                 .confidentialityLimit(),
     );
+    try std.testing.expectEqual(
+        @as(u16, 0x00c6),
+        cipher_suite.Suite.sm4_gcm_sm3.wireValue(),
+    );
+    try std.testing.expectEqual(
+        secret.Hash.sm3,
+        cipher_suite.Suite.sm4_gcm_sm3.hash(),
+    );
 }
 
 test "Certificate and Ed25519 CertificateVerify round-trip" {
@@ -578,6 +586,85 @@ test "runtime TLS key schedule dispatch preserves SHA-384 secret identity" {
     );
 }
 
+test "TLS 1.3 SM3 schedule matches independent HKDF/HMAC vectors" {
+    const Schedule = key_schedule.Sm3;
+    const shared = [_]u8{0xa1} ** Schedule.secret_len;
+    const transcript_hash = [_]u8{0xa2} ** Schedule.secret_len;
+    const pre_shared_key = [_]u8{0xa3} ** Schedule.secret_len;
+    const handshake = Schedule.deriveHandshake(
+        &shared,
+        transcript_hash,
+        pre_shared_key,
+    );
+    try expectHex(
+        "6b6dd537c27cda9f89fc794b72c7fe68a82911f62c6038e073b12096f527570e",
+        &handshake.handshake_secret,
+    );
+    try expectHex(
+        "b22e419148ec08217e6a278aad1fef71339ea12165f7ad7cbfe35176c9dd9370",
+        &handshake.client_traffic_secret,
+    );
+    try expectHex(
+        "28444e8d916999098f337193ee2b67a7fbd77d9771bd58f86d2ca973c9cd3862",
+        &handshake.server_traffic_secret,
+    );
+    const application = Schedule.deriveApplication(
+        handshake.handshake_secret,
+        transcript_hash,
+    );
+    try expectHex(
+        "9ce50556da429235a8f402db078ff677cc491448b487a0e324dbfdf19b498d62",
+        &application.master_secret,
+    );
+    try expectHex(
+        "c2a7ed0b6d95d1a2263503656ef79c585cd8071f473e1ea072f4e445628a6d41",
+        &application.client_traffic_secret,
+    );
+    const finished = Schedule.computeFinished(
+        application.client_traffic_secret,
+        transcript_hash,
+    );
+    try expectHex(
+        "6c0b1f0e0bceba777a43fd5020de844628df64feef2df180ceab72e7991d70c0",
+        &finished,
+    );
+}
+
+test "runtime TLS key schedule dispatch preserves SM3 secret identity" {
+    const shared = [_]u8{0x93} ** 32;
+    const handshake_hash = transcript.hashFor(
+        .sm3,
+        &.{ "client hello", "server hello" },
+    );
+    const handshake = try key_schedule.deriveHandshakeFor(
+        .sm3,
+        &shared,
+        handshake_hash,
+        null,
+    );
+    try std.testing.expectEqual(
+        secret.Hash.sm3,
+        handshake.handshake_secret.hash,
+    );
+    const application_hash = transcript.hashFor(
+        .sm3,
+        &.{ "client hello", "server flight" },
+    );
+    const application = try key_schedule.deriveApplicationFor(
+        handshake.handshake_secret,
+        application_hash,
+    );
+    const finished = try key_schedule.computeFinishedFor(
+        application.client_traffic_secret,
+        application_hash,
+    );
+    try key_schedule.verifyFinishedFor(
+        application.client_traffic_secret,
+        application_hash,
+        finished,
+    );
+}
+
 fn expectHex(expected_hex: []const u8, actual: []const u8) !void {
     var expected: [64]u8 = undefined;
     const decoded = try std.fmt.hexToBytes(&expected, expected_hex);
@@ -659,6 +746,36 @@ test "stateless ticket keyring preserves a SHA-384 PSK" {
             2500,
         ),
     );
+}
+
+test "stateless ticket keyring preserves an SM3 PSK" {
+    var keyring = try ticket_keyring.Keyring.init(.{
+        .id = 8,
+        .secret = [_]u8{0x81} ** ticket_keyring.key_len,
+    });
+    defer keyring.deinit();
+    const expected = secret.Secret.fromSm3([_]u8{0x82} ** 32);
+    const identity = try keyring.sealSecret(
+        [_]u8{0x83} ** ticket_keyring.nonce_len,
+        "sm3.example:443",
+        "h3",
+        .{
+            .secret = expected,
+            .age_add = 22,
+            .issued_at_ms = 3000,
+            .lifetime_seconds = 60,
+            .cipher_suite_wire = 0x00c6,
+        },
+    );
+    const opened = try keyring.openSecret(
+        &identity,
+        "sm3.example:443",
+        "h3",
+        3500,
+    );
+    try std.testing.expectEqual(secret.Hash.sm3, opened.secret.hash);
+    try std.testing.expect(expected.eql(&opened.secret));
+    try std.testing.expectEqual(@as(u16, 0x00c6), opened.cipher_suite_wire);
 }
 
 test "X25519 exchange and transcript hashing agree on both roles" {

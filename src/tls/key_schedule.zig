@@ -2,10 +2,12 @@
 //!
 //! `Sha256` remains the source-compatible default used by the existing netz
 //! adapter. `Sha384` carries the 48-byte secrets required by
-//! TLS_AES_256_GCM_SHA384. Both are compile-time specializations with no
+//! TLS_AES_256_GCM_SHA384, while `Sm3` provides the RFC 8998
+//! TLS_SM4_GCM_SM3 schedule. All are compile-time specializations with no
 //! allocation or runtime crypto dispatch.
 
 const std = @import("std");
+const sm3 = @import("../crypto/sm3.zig");
 const schedule = @import("key_schedule/schedule.zig");
 const secret = @import("secret.zig");
 const transcript = @import("transcript.zig");
@@ -13,6 +15,7 @@ const transcript = @import("transcript.zig");
 pub const Schedule = schedule.Schedule;
 pub const Sha256 = Schedule(std.crypto.hash.sha2.Sha256);
 pub const Sha384 = Schedule(std.crypto.hash.sha2.Sha384);
+pub const Sm3 = Schedule(sm3.Hash);
 
 pub const secret_len = Sha256.secret_len;
 pub const HandshakeSecrets = Sha256.HandshakeSecrets;
@@ -99,6 +102,20 @@ pub fn deriveHandshakeFor(
                 .server_traffic_secret = .fromSha384(derived.server_traffic_secret),
             };
         },
+        .sm3 => blk: {
+            const hash = try transcript_hash.sm3();
+            const derived = Sm3.deriveHandshake(
+                shared_secret,
+                hash,
+                if (psk) |value| try value.sm3() else null,
+            );
+            break :blk .{
+                .early_secret = .fromSm3(derived.early_secret),
+                .handshake_secret = .fromSm3(derived.handshake_secret),
+                .client_traffic_secret = .fromSm3(derived.client_traffic_secret),
+                .server_traffic_secret = .fromSm3(derived.server_traffic_secret),
+            };
+        },
     };
 }
 
@@ -132,6 +149,17 @@ pub fn deriveApplicationFor(
                 .server_traffic_secret = .fromSha384(derived.server_traffic_secret),
             };
         },
+        .sm3 => blk: {
+            const derived = Sm3.deriveApplication(
+                try handshake_secret.sm3(),
+                try transcript_hash.sm3(),
+            );
+            break :blk .{
+                .master_secret = .fromSm3(derived.master_secret),
+                .client_traffic_secret = .fromSm3(derived.client_traffic_secret),
+                .server_traffic_secret = .fromSm3(derived.server_traffic_secret),
+            };
+        },
     };
 }
 
@@ -150,6 +178,10 @@ pub fn computeFinishedFor(
         .sha384 => .fromSha384(Sha384.computeFinished(
             try base_key.sha384(),
             try transcript_hash.sha384(),
+        )),
+        .sm3 => .fromSm3(Sm3.computeFinished(
+            try base_key.sm3(),
+            try transcript_hash.sm3(),
         )),
     };
 }
@@ -180,6 +212,10 @@ pub fn deriveResumptionMasterSecretFor(
             try master_secret.sha384(),
             try transcript_hash.sha384(),
         )),
+        .sm3 => .fromSm3(Sm3.deriveResumptionMasterSecret(
+            try master_secret.sm3(),
+            try transcript_hash.sm3(),
+        )),
     };
 }
 
@@ -194,6 +230,10 @@ pub fn deriveResumptionPskFor(
         )),
         .sha384 => .fromSha384(Sha384.deriveResumptionPsk(
             try resumption_master_secret.sha384(),
+            ticket_nonce,
+        )),
+        .sm3 => .fromSm3(Sm3.deriveResumptionPsk(
+            try resumption_master_secret.sm3(),
             ticket_nonce,
         )),
     };

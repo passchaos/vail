@@ -233,11 +233,9 @@ pub const Keyring = struct {
             .big,
         );
         const encoded_secret_len = plaintext[secret_len_offset];
-        const hash: secret.Hash = switch (encoded_secret_len) {
-            32 => .sha256,
-            48 => .sha384,
-            else => return error.InvalidTicket,
-        };
+        const hash = expectedHashForSuite(suite_wire) catch
+            return error.InvalidTicket;
+        if (encoded_secret_len != hash.len()) return error.InvalidTicket;
         const opened = OpenedSecret{
             .issued_at_ms = std.mem.readInt(u64, plaintext[0..8], .big),
             .lifetime_seconds = std.mem.readInt(u32, plaintext[8..12], .big),
@@ -284,12 +282,17 @@ fn validateOpenedFields(
     {
         return error.InvalidTicketLifetime;
     }
-    const expected_hash: secret.Hash = switch (suite_wire) {
+    const expected_hash = try expectedHashForSuite(suite_wire);
+    if (expected_hash != hash) return error.InvalidTicket;
+}
+
+fn expectedHashForSuite(suite_wire: u16) Error!secret.Hash {
+    return switch (suite_wire) {
         0x1301, 0x1303 => .sha256,
         0x1302 => .sha384,
-        else => return error.InvalidTicket,
+        0x00c6 => .sm3,
+        else => error.InvalidTicket,
     };
-    if (expected_hash != hash) return error.InvalidTicket;
 }
 
 fn validateContext(server_id: []const u8, alpn: []const u8) Error!void {

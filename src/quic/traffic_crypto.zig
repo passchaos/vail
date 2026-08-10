@@ -11,6 +11,8 @@ const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const ChaCha20IETF = std.crypto.stream.chacha.ChaCha20IETF;
+const sm3 = @import("../crypto/sm3.zig");
+const sm4 = @import("../crypto/sm4.zig");
 const cipher_suite = @import("../tls/cipher_suite.zig");
 const common = @import("traffic_crypto/common.zig");
 const tls_secret = @import("../tls/secret.zig");
@@ -19,6 +21,9 @@ const tls_secret = @import("../tls/secret.zig");
 /// key schedule can carry both 32-byte and 48-byte traffic secrets.
 pub const aes256_sha384 =
     @import("traffic_crypto/aes256_sha384.zig");
+
+const HmacSm3 = std.crypto.auth.hmac.Hmac(sm3.Hash);
+const HkdfSm3 = std.crypto.kdf.hkdf.Hkdf(HmacSm3);
 
 pub const secret_len = HkdfSha256.prk_length;
 pub const max_key_len = common.max_key_len;
@@ -31,6 +36,9 @@ comptime {
     std.debug.assert(ChaCha20Poly1305.key_length == max_key_len);
     std.debug.assert(Aes128Gcm.nonce_length == iv_len);
     std.debug.assert(Aes128Gcm.tag_length == tag_len);
+    std.debug.assert(sm4.Gcm.key_length <= max_key_len);
+    std.debug.assert(sm4.Gcm.nonce_length == iv_len);
+    std.debug.assert(sm4.Gcm.tag_length == tag_len);
 }
 
 /// QUIC uses the TLS-negotiated suite identity directly.  Keeping one enum in
@@ -120,6 +128,33 @@ pub const Keys = struct {
                 keys.key = derived.key;
                 keys.hp = derived.hp;
             },
+            .sm4_gcm_sm3 => {
+                const sm3_secret =
+                    traffic_secret.sm3() catch unreachable;
+                keys.iv = std.crypto.tls.hkdfExpandLabel(
+                    HkdfSm3,
+                    sm3_secret,
+                    labels.iv,
+                    "",
+                    iv_len,
+                );
+                keys.key[0..sm4.key_len].* =
+                    std.crypto.tls.hkdfExpandLabel(
+                        HkdfSm3,
+                        sm3_secret,
+                        labels.key,
+                        "",
+                        sm4.key_len,
+                    );
+                keys.hp[0..sm4.key_len].* =
+                    std.crypto.tls.hkdfExpandLabel(
+                        HkdfSm3,
+                        sm3_secret,
+                        labels.hp,
+                        "",
+                        sm4.key_len,
+                    );
+            },
             .chacha20_poly1305_sha256 => {
                 const sha256_secret =
                     traffic_secret.sha256() catch unreachable;
@@ -178,6 +213,14 @@ pub const Keys = struct {
                 nonce,
                 self.key,
             ),
+            .sm4_gcm_sm3 => sm4.Gcm.encrypt(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                nonce,
+                self.key[0..sm4.key_len].*,
+            ),
             .chacha20_poly1305_sha256 => ChaCha20Poly1305.encrypt(
                 ciphertext,
                 tag,
@@ -219,6 +262,14 @@ pub const Keys = struct {
                 nonce,
                 self.key,
             ),
+            .sm4_gcm_sm3 => try sm4.Gcm.decrypt(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                nonce,
+                self.key[0..sm4.key_len].*,
+            ),
             .chacha20_poly1305_sha256 => try ChaCha20Poly1305.decrypt(
                 plaintext,
                 ciphertext,
@@ -249,6 +300,13 @@ pub const Keys = struct {
                 );
                 var encrypted: [sample_len]u8 = undefined;
                 aes.encrypt(&encrypted, &sample);
+                return encrypted[0..mask_len].*;
+            },
+            .sm4_gcm_sm3 => {
+                const schedule = sm4.KeySchedule.init(
+                    self.hp[0..sm4.key_len].*,
+                );
+                const encrypted = schedule.encryptBlock(sample);
                 return encrypted[0..mask_len].*;
             },
             .chacha20_poly1305_sha256 => {

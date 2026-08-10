@@ -1,10 +1,12 @@
 //! Incremental TLS 1.3 transcript hashing.
 
 const std = @import("std");
+const sm3 = @import("../crypto/sm3.zig");
 const secret = @import("secret.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Sha384Hash = std.crypto.hash.sha2.Sha384;
+const Sm3Hash = sm3.Hash;
 pub const digest_len = Sha256.digest_length;
 
 pub fn Hasher(comptime Hash: type) type {
@@ -36,6 +38,7 @@ pub fn Hasher(comptime Hash: type) type {
 
 pub const Sha256Transcript = Hasher(Sha256);
 pub const Sha384 = Hasher(Sha384Hash);
+pub const Sm3 = Hasher(Sm3Hash);
 pub const Transcript = Sha256Transcript;
 
 /// Source-compatible SHA-256 one-shot transcript hashing.
@@ -58,6 +61,11 @@ pub const Digest = struct {
         if (self.hash != .sha384) return error.HashMismatch;
         return self.storage;
     }
+
+    pub fn sm3(self: Digest) error{HashMismatch}![32]u8 {
+        if (self.hash != .sm3) return error.HashMismatch;
+        return self.storage[0..32].*;
+    }
 };
 
 pub fn hashFor(
@@ -73,6 +81,8 @@ pub fn hashFor(
             Sha256Transcript.hash(parts),
         .sha384 => result.storage =
             Sha384.hash(parts),
+        .sm3 => result.storage[0..32].* =
+            Sm3.hash(parts),
     }
     return result;
 }

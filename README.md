@@ -39,9 +39,12 @@ The current foundation provides:
   Finished, resumption PSKs, and stateless tickets.
 - Canonical TLS 1.3 cipher-suite identities and validated client/server
   preference selection, with stateless tickets bound to their issuing suite.
-- Initial ShangMi primitive coverage: SM3 implements Zig Hash/HMAC-compatible
-  one-shot and streaming hashing, and SM4 exposes allocation-free block and
-  96-bit-nonce GCM APIs. These are intentionally present even though the local
+- ShangMi coverage: SM3 implements Zig Hash/HMAC-compatible
+  one-shot and streaming hashing, SM4 exposes allocation-free block and
+  96-bit-nonce GCM APIs, and TLS/QUIC can negotiate the RFC 8998
+  TLS_SM4_GCM_SM3 (`0x00c6`) suite with SM3 HKDF/transcripts, PSK binders,
+  tickets, packet protection, and SM4 header protection. These are intentionally
+  present even though the local
   `~/Work/aws-lc` checkout currently defines `OPENSSL_NO_SM2`, `OPENSSL_NO_SM3`,
   and `OPENSSL_NO_SM4`, so higher-level TLS/GMSSL work can proceed while an
   AWS-LC provider/backend is developed.

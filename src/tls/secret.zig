@@ -7,17 +7,20 @@
 //! unused capacity so stale key material cannot leak through copies.
 
 const std = @import("std");
+const sm3 = @import("../crypto/sm3.zig");
 
 pub const max_len: usize = std.crypto.hash.sha2.Sha384.digest_length;
 
 pub const Hash = enum(u8) {
     sha256,
     sha384,
+    sm3,
 
     pub fn len(self: Hash) usize {
         return switch (self) {
             .sha256 => std.crypto.hash.sha2.Sha256.digest_length,
             .sha384 => std.crypto.hash.sha2.Sha384.digest_length,
+            .sm3 => sm3.Hash.digest_length,
         };
     }
 };
@@ -37,6 +40,10 @@ pub const Secret = struct {
 
     pub fn fromSha384(value: [48]u8) Secret {
         return initUnchecked(.sha384, &value);
+    }
+
+    pub fn fromSm3(value: [32]u8) Secret {
+        return initUnchecked(.sm3, &value);
     }
 
     pub fn init(hash: Hash, value: []const u8) Error!Secret {
@@ -62,6 +69,11 @@ pub const Secret = struct {
         return self.storage;
     }
 
+    pub fn sm3(self: Secret) Error![32]u8 {
+        if (self.hash != .sm3) return error.HashMismatch;
+        return self.storage[0..32].*;
+    }
+
     pub fn eql(self: *const Secret, other: *const Secret) bool {
         if (self.hash != other.hash) return false;
         // The length is public suite metadata, while all secret bytes are
@@ -76,6 +88,11 @@ pub const Secret = struct {
                 [48]u8,
                 self.storage,
                 other.storage,
+            ),
+            .sm3 => std.crypto.timing_safe.eql(
+                [32]u8,
+                self.storage[0..32].*,
+                other.storage[0..32].*,
             ),
         };
     }
@@ -98,16 +115,23 @@ pub const Secret = struct {
 test "runtime TLS secrets enforce hash-bound lengths" {
     const sha256 = Secret.fromSha256([_]u8{0x21} ** 32);
     const sha384 = Secret.fromSha384([_]u8{0x38} ** 48);
+    const sm3_secret = Secret.fromSm3([_]u8{0x53} ** 32);
     try std.testing.expectEqual(Hash.sha256, sha256.hash);
     try std.testing.expectEqual(@as(usize, 32), sha256.bytes().len);
     try std.testing.expectEqual(@as(usize, 48), sha384.bytes().len);
+    try std.testing.expectEqual(@as(usize, 32), sm3_secret.bytes().len);
     try std.testing.expectError(
         error.HashMismatch,
         sha256.sha384(),
+    );
+    try std.testing.expectError(
+        error.HashMismatch,
+        sm3_secret.sha256(),
     );
     try std.testing.expectError(
         error.InvalidSecretLength,
         Secret.init(.sha384, &([_]u8{0} ** 32)),
     );
     try std.testing.expect(!sha256.eql(&sha384));
+    try std.testing.expect(!sha256.eql(&sm3_secret));
 }

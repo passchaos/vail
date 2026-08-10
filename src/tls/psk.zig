@@ -8,6 +8,7 @@ const std = @import("std");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Sha384 = std.crypto.hash.sha2.Sha384;
+const Sm3 = @import("../crypto/sm3.zig").Hash;
 const key_schedule = @import("key_schedule.zig");
 const secret = @import("secret.zig");
 
@@ -109,6 +110,42 @@ pub fn appendClientOfferWithEarlyDataSha384(
 ) Error!void {
     return appendClientOfferForSchedule(
         key_schedule.Sha384,
+        client_hello,
+        allocator,
+        identity,
+        obfuscated_ticket_age,
+        psk,
+        offer_early_data,
+    );
+}
+
+pub fn appendClientOfferSm3(
+    client_hello: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    identity: []const u8,
+    obfuscated_ticket_age: u32,
+    psk: [Sm3.digest_length]u8,
+) Error!void {
+    return appendClientOfferWithEarlyDataSm3(
+        client_hello,
+        allocator,
+        identity,
+        obfuscated_ticket_age,
+        psk,
+        false,
+    );
+}
+
+pub fn appendClientOfferWithEarlyDataSm3(
+    client_hello: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    identity: []const u8,
+    obfuscated_ticket_age: u32,
+    psk: [Sm3.digest_length]u8,
+    offer_early_data: bool,
+) Error!void {
+    return appendClientOfferForSchedule(
+        key_schedule.Sm3,
         client_hello,
         allocator,
         identity,
@@ -250,6 +287,23 @@ fn rejectExistingPskExtensions(
 }
 
 pub fn parseClientOffer(client_hello: []const u8) Error!Offer {
+    return parseClientOfferForExpectedHash(client_hello, null);
+}
+
+/// Parse a ClientHello PSK extension when the selected suite's binder hash is
+/// already known. This is required for RFC 8998 SM3 because its 32-byte binder
+/// length is intentionally indistinguishable from SHA-256 on the wire.
+pub fn parseClientOfferForHash(
+    client_hello: []const u8,
+    expected_hash: secret.Hash,
+) Error!Offer {
+    return parseClientOfferForExpectedHash(client_hello, expected_hash);
+}
+
+fn parseClientOfferForExpectedHash(
+    client_hello: []const u8,
+    expected_hash: ?secret.Hash,
+) Error!Offer {
     const offsets = try clientHelloOffsets(client_hello);
     var pos = offsets.extensions_offset;
     const extensions_end = offsets.extensions_offset + offsets.extensions_len;
@@ -282,6 +336,7 @@ pub fn parseClientOffer(client_hello: []const u8) Error!Offer {
                 client_hello,
                 payload_start,
                 payload_end,
+                expected_hash,
             );
         }
         pos = payload_end;
@@ -314,6 +369,22 @@ pub fn verifyClientOfferSha384(
     return verifyClientOfferForSchedule(
         key_schedule.Sha384,
         .sha384,
+        client_hello,
+        offer,
+        expected_identity,
+        psk,
+    );
+}
+
+pub fn verifyClientOfferSm3(
+    client_hello: []const u8,
+    offer: Offer,
+    expected_identity: []const u8,
+    psk: [Sm3.digest_length]u8,
+) Error!void {
+    return verifyClientOfferForSchedule(
+        key_schedule.Sm3,
+        .sm3,
         client_hello,
         offer,
         expected_identity,
@@ -480,6 +551,7 @@ fn parseOfferPayload(
     client_hello: []const u8,
     payload_start: usize,
     payload_end: usize,
+    expected_hash: ?secret.Hash,
 ) Error!Offer {
     var pos = payload_start;
     if (payload_end - pos < 2) return error.InvalidClientHello;
@@ -522,7 +594,13 @@ fn parseOfferPayload(
     const binder_truncated_len = pos;
     pos += 2;
     const binder_len = client_hello[pos];
-    const binder_hash: secret.Hash = switch (binder_len) {
+    const binder_hash: secret.Hash = if (expected_hash) |hash| blk: {
+        if (binder_len != hash.len()) return error.InvalidPskBinder;
+        break :blk hash;
+    } else switch (binder_len) {
+        // 32 bytes can be SHA-256 or SM3. The legacy parser keeps its
+        // historical SHA-256 interpretation; RFC 8998 callers should use
+        // parseClientOfferForHash(..., .sm3).
         Sha256.digest_length => .sha256,
         Sha384.digest_length => .sha384,
         else => return error.InvalidPskBinder,
@@ -599,6 +677,8 @@ fn transcriptHash(
         Sha256
     else if (Schedule == key_schedule.Sha384)
         Sha384
+    else if (Schedule == key_schedule.Sm3)
+        Sm3
     else
         @compileError("unsupported TLS key schedule");
     var out: [Schedule.secret_len]u8 = undefined;
@@ -687,6 +767,41 @@ test "TLS PSK SHA-384 binder uses 48 wire bytes and rejects SHA-256 verification
             "sha384-ticket",
             psk[0..Sha256.digest_length].*,
         ),
+    );
+}
+
+test "TLS PSK SM3 binder requires hash-aware parsing" {
+    const allocator = std.testing.allocator;
+    var hello = try baseClientHello(allocator);
+    defer hello.deinit(allocator);
+    const psk = [_]u8{0xc3} ** Sm3.digest_length;
+    try appendClientOfferSm3(
+        &hello,
+        allocator,
+        "sm3-ticket",
+        0x01020304,
+        psk,
+    );
+
+    const legacy_offer = try parseClientOffer(hello.items);
+    try std.testing.expectEqual(secret.Hash.sha256, legacy_offer.binder_hash);
+    try std.testing.expectError(
+        error.InvalidPskBinder,
+        verifyClientOfferSm3(
+            hello.items,
+            legacy_offer,
+            "sm3-ticket",
+            psk,
+        ),
+    );
+
+    const offer = try parseClientOfferForHash(hello.items, .sm3);
+    try std.testing.expectEqual(secret.Hash.sm3, offer.binder_hash);
+    try verifyClientOfferSm3(
+        hello.items,
+        offer,
+        "sm3-ticket",
+        psk,
     );
 }
 
