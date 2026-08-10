@@ -21,6 +21,7 @@ test {
     _ = tls.auth;
     _ = tls.cipher_suite;
     _ = tls.client_auth;
+    _ = tls.client_hello;
     _ = tls.key_exchange;
     _ = tls.key_schedule;
     _ = tls.psk;

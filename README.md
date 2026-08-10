@@ -81,5 +81,10 @@ open+seal on both AES suites in this run, while AES-256 seal alone is comparable
 ChaCha20-Poly1305 and the legacy standalone AES-256 SHA-384 helper remain
 reported as controls.
 
+ClientHello interop checks are available with `zig build interop-openssl-clienthello`
+and `zig build interop-rustls-clienthello`; both feed real OpenSSL/rustls
+ClientHello wire bytes into Vail's parser and verify TLS 1.3, SNI, cipher-suite,
+and key-share extraction.
+
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.

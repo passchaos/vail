@@ -122,6 +122,46 @@ pub fn build(b: *std.Build) void {
         "Benchmark aws-lc-rs AES-GCM for comparison",
     );
     aws_lc_rs_bench_step.dependOn(&aws_lc_rs_bench.step);
+
+    const client_hello_check = b.addExecutable(.{
+        .name = "vail-clienthello-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/client_hello_check.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+
+    const openssl_ch = b.addSystemCommand(&.{"tools/interop/openssl_client_hello.sh"});
+    const openssl_ch_hex = openssl_ch.addOutputFileArg("openssl-clienthello.hex");
+    const check_openssl_ch = b.addRunArtifact(client_hello_check);
+    check_openssl_ch.addFileArg(openssl_ch_hex);
+    check_openssl_ch.addArg("example.com");
+    check_openssl_ch.addArg("1301");
+    const interop_openssl_step = b.step(
+        "interop-openssl-clienthello",
+        "Parse a real OpenSSL TLS 1.3 ClientHello",
+    );
+    interop_openssl_step.dependOn(&check_openssl_ch.step);
+
+    const rustls_ch = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--manifest-path",
+        "bench/rustls_client_hello/Cargo.toml",
+    });
+    const rustls_ch_hex = rustls_ch.captureStdOut(.{});
+    const check_rustls_ch = b.addRunArtifact(client_hello_check);
+    check_rustls_ch.addFileArg(rustls_ch_hex);
+    check_rustls_ch.addArg("example.com");
+    check_rustls_ch.addArg("1301");
+    const interop_rustls_step = b.step(
+        "interop-rustls-clienthello",
+        "Parse a real rustls TLS 1.3 ClientHello",
+    );
+    interop_rustls_step.dependOn(&check_rustls_ch.step);
 }
 
 fn awsLcHasShangMi(path: []const u8) bool {
