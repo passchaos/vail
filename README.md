@@ -94,7 +94,9 @@ server harness against `openssl s_client` and verifies that OpenSSL reaches
 Finished after parsing Vail's ServerHello, encrypted EncryptedExtensions,
 Certificate, CertificateVerify, and Finished. The Vail harness decrypts and
 verifies that client Finished, then still closes before application
-data/close_notify; this drives the remaining rustls/full-close interop work.
+data/close_notify; this drives the remaining full-close interop work. `zig build
+interop-rustls-min-server` performs the same minimal-server check with rustls and
+requires both rustls connected state and Vail-side client Finished verification.
 
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.

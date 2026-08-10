@@ -99,6 +99,7 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, verify_data.bytes(), opened[4..opened_record.len])) {
         return error.BadClientFinished;
     }
+    std.debug.print("client finished verified\n", .{});
     _ = linux.shutdown(client, linux.SHUT.WR);
 }
 
