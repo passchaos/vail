@@ -162,6 +162,21 @@ pub fn build(b: *std.Build) void {
         "Parse a real rustls TLS 1.3 ClientHello",
     );
     interop_rustls_step.dependOn(&check_rustls_ch.step);
+
+    const min_tls13_server = b.addExecutable(.{
+        .name = "vail-min-tls13-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/min_tls13_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const interop_min_server_compile = b.step(
+        "interop-min-server-compile",
+        "Compile Vail's experimental minimal TLS 1.3 server harness",
+    );
+    interop_min_server_compile.dependOn(&min_tls13_server.step);
 }
 
 fn awsLcHasShangMi(path: []const u8) bool {

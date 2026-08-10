@@ -88,5 +88,9 @@ and `zig build interop-rustls-clienthello`; both feed real OpenSSL/rustls
 ClientHello wire bytes into Vail's parser and verify TLS 1.3, SNI, cipher-suite,
 and key-share extraction.
 
+`zig build interop-min-server-compile` also compiles an experimental minimal TLS
+1.3 server harness used for ongoing OpenSSL/rustls full-handshake work; it is
+not yet a required completed-handshake interop check.
+
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.
