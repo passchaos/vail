@@ -1,0 +1,8 @@
+[package]
+name = "vail-aws-lc-rs-aead-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+aws-lc-rs = "1"

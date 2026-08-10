@@ -369,6 +369,117 @@ pub const Keys = struct {
     }
 };
 
+pub const PreparedKeys = struct {
+    keys: Keys,
+    aes_128_gcm: ?backend.AesGcmContext = null,
+    aes_256_gcm: ?backend.AesGcmContext = null,
+
+    /// Prepare packet-protection state for repeated operations with one key.
+    /// In AWS-LC linked builds this caches EVP_AEAD_CTX precomputation so the
+    /// hot packet path avoids per-packet context initialization. Non-AES suites
+    /// and non-linked builds retain the allocation-free Zig implementation.
+    pub fn init(keys: Keys) PreparedKeys {
+        return .{
+            .keys = keys,
+            .aes_128_gcm = if (keys.suite == .aes_128_gcm_sha256)
+                backend.AesGcmContext.init(
+                    .aes_128_gcm,
+                    keys.key[0..Aes128Gcm.key_length],
+                )
+            else
+                null,
+            .aes_256_gcm = if (keys.suite == .aes_256_gcm_sha384)
+                backend.AesGcmContext.init(.aes_256_gcm, &keys.key)
+            else
+                null,
+        };
+    }
+
+    pub fn deinit(self: *PreparedKeys) void {
+        if (self.aes_128_gcm) |*ctx| ctx.deinit();
+        if (self.aes_256_gcm) |*ctx| ctx.deinit();
+        self.* = undefined;
+    }
+
+    pub fn protect(
+        self: *const PreparedKeys,
+        packet_number: u64,
+        associated_data: []const u8,
+        plaintext: []const u8,
+        ciphertext: []u8,
+        tag: *[tag_len]u8,
+    ) error{InvalidPayloadLength}!void {
+        if (ciphertext.len != plaintext.len) {
+            return error.InvalidPayloadLength;
+        }
+        const nonce = packetNonce(self.keys.iv, packet_number);
+        switch (self.keys.suite) {
+            .aes_128_gcm_sha256 => if (self.aes_128_gcm) |*ctx| {
+                if (ctx.seal(&nonce, associated_data, plaintext, ciphertext, tag)) {
+                    return;
+                }
+            },
+            .aes_256_gcm_sha384 => if (self.aes_256_gcm) |*ctx| {
+                if (ctx.seal(&nonce, associated_data, plaintext, ciphertext, tag)) {
+                    return;
+                }
+            },
+            else => {},
+        }
+        try self.keys.protect(
+            packet_number,
+            associated_data,
+            plaintext,
+            ciphertext,
+            tag,
+        );
+    }
+
+    pub fn open(
+        self: *const PreparedKeys,
+        packet_number: u64,
+        associated_data: []const u8,
+        ciphertext: []const u8,
+        tag: [tag_len]u8,
+        plaintext: []u8,
+    ) (error{InvalidPayloadLength} ||
+        std.crypto.errors.AuthenticationError)!void {
+        if (plaintext.len != ciphertext.len) {
+            return error.InvalidPayloadLength;
+        }
+        const nonce = packetNonce(self.keys.iv, packet_number);
+        switch (self.keys.suite) {
+            .aes_128_gcm_sha256 => if (self.aes_128_gcm) |*ctx| {
+                if (ctx.open(&nonce, associated_data, ciphertext, &tag, plaintext)) {
+                    return;
+                }
+                return error.AuthenticationFailed;
+            },
+            .aes_256_gcm_sha384 => if (self.aes_256_gcm) |*ctx| {
+                if (ctx.open(&nonce, associated_data, ciphertext, &tag, plaintext)) {
+                    return;
+                }
+                return error.AuthenticationFailed;
+            },
+            else => {},
+        }
+        try self.keys.open(
+            packet_number,
+            associated_data,
+            ciphertext,
+            tag,
+            plaintext,
+        );
+    }
+
+    pub fn headerProtectionMask(
+        self: *const PreparedKeys,
+        sample: [sample_len]u8,
+    ) [mask_len]u8 {
+        return self.keys.headerProtectionMask(sample);
+    }
+};
+
 pub fn packetNonce(iv: [iv_len]u8, packet_number: u64) [iv_len]u8 {
     return common.packetNonce(iv, packet_number);
 }

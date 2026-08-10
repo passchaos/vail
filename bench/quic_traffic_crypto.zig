@@ -17,10 +17,12 @@ pub fn main(init: std.process.Init) !void {
         traffic.Suite.chacha20_poly1305_sha256,
     }) |suite| {
         const keys = traffic.Keys.derive(suite, secret, .{});
+        var prepared = traffic.PreparedKeys.init(keys);
+        defer prepared.deinit();
         const seal_start = nowNs(init.io);
         var checksum: u64 = 0;
         for (0..iterations) |packet_number| {
-            try keys.protect(
+            try prepared.protect(
                 packet_number,
                 aad,
                 &plaintext,
@@ -33,14 +35,14 @@ pub fn main(init: std.process.Init) !void {
 
         const open_start = nowNs(init.io);
         for (0..iterations) |packet_number| {
-            try keys.protect(
+            try prepared.protect(
                 packet_number,
                 aad,
                 &plaintext,
                 &ciphertext,
                 &tag,
             );
-            try keys.open(
+            try prepared.open(
                 packet_number,
                 aad,
                 &ciphertext,
@@ -114,10 +116,12 @@ pub fn main(init: std.process.Init) !void {
         .fromSha384([_]u8{0x42} ** vail.tls.key_schedule.Sha384.secret_len),
         .{},
     );
+    var prepared_unified_aes256 = traffic.PreparedKeys.init(unified_aes256);
+    defer prepared_unified_aes256.deinit();
     const unified_seal_start = nowNs(init.io);
     checksum = 0;
     for (0..iterations) |packet_number| {
-        try unified_aes256.protect(
+        try prepared_unified_aes256.protect(
             packet_number,
             aad,
             &plaintext,
@@ -130,14 +134,14 @@ pub fn main(init: std.process.Init) !void {
 
     const unified_open_start = nowNs(init.io);
     for (0..iterations) |packet_number| {
-        try unified_aes256.protect(
+        try prepared_unified_aes256.protect(
             packet_number,
             aad,
             &plaintext,
             &ciphertext,
             &tag,
         );
-        try unified_aes256.open(
+        try prepared_unified_aes256.open(
             packet_number,
             aad,
             &ciphertext,

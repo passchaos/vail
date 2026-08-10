@@ -1,2 +1,3 @@
 /.zig-cache/
 /zig-out/
+/bench/rustls_aws_lc_rs_aead/target/

@@ -69,11 +69,16 @@ until an AWS-LC provider/backend with those algorithms is available.
 
 On this host, `zig build -Doptimize=ReleaseFast bench-quic-traffic-crypto` versus
 `zig build -Doptimize=ReleaseFast -Daws-lc-path=/home/passchaos/Work/aws-lc
--Daws-lc-link=true bench-quic-traffic-crypto` showed the AWS-LC-routed unified
-QUIC AES paths improving AES-128-GCM seal from about 439 ns/op to 369 ns/op and
-AES-256-GCM-SHA384 unified seal from about 492 ns/op to 396 ns/op for 1200-byte
-packets. ChaCha20-Poly1305 and the legacy standalone AES-256 SHA-384 helper are
-reported as controls and remain on their existing implementations.
+-Daws-lc-link=true bench-quic-traffic-crypto` showed prepared AWS-LC QUIC AES
+keys improving AES-128-GCM from about 462 ns/op seal and 847 ns/op open+seal to
+241 ns/op and 478 ns/op. The unified AES-256-GCM-SHA384 path improved from about
+491 ns/op seal and 1000 ns/op open+seal to 272 ns/op and 545 ns/op. The
+`bench-aws-lc-rs-aead` Rust comparison harness measured aws-lc-rs on the same
+1200-byte shape at about 269/506 ns/op for AES-128-GCM and 289/570 ns/op for
+AES-256-GCM, so the prepared Vail AWS-LC path is faster for AES-128-GCM and for
+open+seal on both AES suites in this run, while AES-256 seal alone is comparable.
+ChaCha20-Poly1305 and the legacy standalone AES-256 SHA-384 helper remain
+reported as controls.
 
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.

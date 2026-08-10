@@ -109,6 +109,19 @@ pub fn build(b: *std.Build) void {
         "Benchmark QUIC AES-GCM and ChaCha20 traffic protection",
     );
     bench_step.dependOn(&run_traffic_bench.step);
+
+    const aws_lc_rs_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--manifest-path",
+        "bench/rustls_aws_lc_rs_aead/Cargo.toml",
+    });
+    const aws_lc_rs_bench_step = b.step(
+        "bench-aws-lc-rs-aead",
+        "Benchmark aws-lc-rs AES-GCM for comparison",
+    );
+    aws_lc_rs_bench_step.dependOn(&aws_lc_rs_bench.step);
 }
 
 fn awsLcHasShangMi(path: []const u8) bool {
