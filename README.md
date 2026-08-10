@@ -7,7 +7,8 @@ performance exceed mature stacks such as s2n-tls and rustls.
 The current foundation provides:
 
 - domain-separated HMAC-SHA256 and constant-time tag verification;
-- fixed-size SHA-256 digests and explicit secure-memory wiping;
+- fixed-size SHA-256 and SM3 digests, portable SM4 block/SM4-GCM primitives,
+  and explicit secure-memory wiping;
 - TLS 1.3 Certificate and CertificateVerify codecs;
 - Ed25519, ECDSA P-256, and ECDSA P-384 signer/verifier implementations, plus
   RSA-PSS/RSAE SHA-256 X.509 CertificateVerify and DER RSAPublicKey pin
@@ -38,6 +39,12 @@ The current foundation provides:
   Finished, resumption PSKs, and stateless tickets.
 - Canonical TLS 1.3 cipher-suite identities and validated client/server
   preference selection, with stateless tickets bound to their issuing suite.
+- Initial ShangMi primitive coverage: SM3 implements Zig Hash/HMAC-compatible
+  one-shot and streaming hashing, and SM4 exposes allocation-free block and
+  96-bit-nonce GCM APIs. These are intentionally present even though the local
+  `~/Work/aws-lc` checkout currently defines `OPENSSL_NO_SM2`, `OPENSSL_NO_SM3`,
+  and `OPENSSL_NO_SM4`, so higher-level TLS/GMSSL work can proceed while an
+  AWS-LC provider/backend is developed.
 
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.
