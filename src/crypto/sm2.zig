@@ -20,6 +20,24 @@ pub const Error = error{
     SignatureVerificationFailed,
 };
 
+pub const SecretKey = struct {
+    bytes: [scalar_len]u8,
+
+    pub fn fromBytes(bytes: [scalar_len]u8) Error!SecretKey {
+        const value = std.mem.readInt(u256, &bytes, .big);
+        // SM2 signatures require (1 + d)^-1 modulo n, so d = n - 1 is
+        // unusable even though ordinary scalar multiplication could encode it.
+        if (value == 0 or value >= order_n - 1) {
+            return error.InvalidSignature;
+        }
+        return .{ .bytes = bytes };
+    }
+
+    fn scalar(self: SecretKey) u256 {
+        return std.mem.readInt(u256, &self.bytes, .big);
+    }
+};
+
 pub const PublicKey = struct {
     point: Point,
 
@@ -44,7 +62,38 @@ pub const PublicKey = struct {
     }
 };
 
+pub const KeyPair = struct {
+    secret_key: SecretKey,
+    public_key: PublicKey,
+
+    pub fn fromSecretKey(secret_key: SecretKey) Error!KeyPair {
+        const public_point = scalarMult(secret_key.scalar(), base_point);
+        if (public_point.infinity or !public_point.isOnCurve()) {
+            return error.InvalidPublicKey;
+        }
+        return .{
+            .secret_key = secret_key,
+            .public_key = .{ .point = public_point },
+        };
+    }
+
+    pub fn sign(
+        self: KeyPair,
+        user_id: []const u8,
+        message: []const u8,
+        nonce: [scalar_len]u8,
+    ) Error!Signature {
+        return signDigest(
+            self.secret_key,
+            try digest(user_id, self.public_key, message),
+            nonce,
+        );
+    }
+};
+
 pub const Signature = struct {
+    pub const der_encoded_length_max = 72;
+
     r: u256,
     s: u256,
 
@@ -73,6 +122,15 @@ pub const Signature = struct {
         return out;
     }
 
+    pub fn toDer(self: Signature, buffer: *[der_encoded_length_max]u8) []const u8 {
+        var offset: usize = 2;
+        offset = writeDerInt(buffer, offset, self.r);
+        offset = writeDerInt(buffer, offset, self.s);
+        buffer[0] = 0x30;
+        buffer[1] = @intCast(offset - 2);
+        return buffer[0..offset];
+    }
+
     fn init(r: u256, s: u256) Error!Signature {
         if (r == 0 or r >= order_n or s == 0 or s >= order_n) {
             return error.InvalidSignature;
@@ -80,6 +138,30 @@ pub const Signature = struct {
         return .{ .r = r, .s = s };
     }
 };
+
+pub fn signDigest(
+    secret_key: SecretKey,
+    message_digest: sm3.Digest,
+    nonce: [scalar_len]u8,
+) Error!Signature {
+    const d = secret_key.scalar();
+    const k = std.mem.readInt(u256, &nonce, .big);
+    if (k == 0 or k >= order_n) return error.InvalidSignature;
+
+    const point = scalarMult(k, base_point);
+    if (point.infinity) return error.InvalidSignature;
+    const e = std.mem.readInt(u256, &message_digest, .big) % order_n;
+    const r = addMod(e, point.x % order_n, order_n);
+    if (r == 0 or addMod(r, k, order_n) == 0) {
+        return error.InvalidSignature;
+    }
+
+    const rd = mulMod(r, d, order_n);
+    const numerator = subMod(k, rd, order_n);
+    const denominator = addMod(1, d, order_n);
+    const s = mulMod(invMod(denominator, order_n), numerator, order_n);
+    return Signature.init(r, s);
+}
 
 pub fn za(user_id: []const u8, public_key: PublicKey) Error!sm3.Digest {
     if (user_id.len > std.math.maxInt(u16) / 8) return error.InvalidUserId;
@@ -278,6 +360,25 @@ fn readDerInt(bytes: []const u8, pos: *usize) Error!u256 {
     return std.mem.readInt(u256, &padded, .big);
 }
 
+fn writeDerInt(buffer: *[Signature.der_encoded_length_max]u8, offset: usize, value: u256) usize {
+    var raw: [32]u8 = undefined;
+    std.mem.writeInt(u256, &raw, value, .big);
+    const trimmed = std.mem.trimStart(u8, &raw, &.{0});
+    const integer_bytes = if (trimmed.len == 0) raw[31..32] else trimmed;
+    var pos = offset;
+    buffer[pos] = 0x02;
+    pos += 1;
+    const needs_sign_pad = (integer_bytes[0] & 0x80) != 0;
+    buffer[pos] = @intCast(integer_bytes.len + @intFromBool(needs_sign_pad));
+    pos += 1;
+    if (needs_sign_pad) {
+        buffer[pos] = 0;
+        pos += 1;
+    }
+    @memcpy(buffer[pos..][0..integer_bytes.len], integer_bytes);
+    return pos + integer_bytes.len;
+}
+
 const field_p: u256 = 0xfffffffeffffffffffffffffffffffffffffffff00000000ffffffffffffffff;
 const curve_a: u256 = 0xfffffffeffffffffffffffffffffffffffffffff00000000fffffffffffffffc;
 const curve_b: u256 = 0x28e9fa9e9d9f5e344d5a9e4bcf6509a7f39789f515ab8f92ddbcbd414d940e93;
@@ -317,6 +418,43 @@ test "SM2 verifies the official raw signature example" {
             "b1b6aa29df212fd8763182bc0d421ca1bb9038fd1f7f42d4840b69c485bbc1aa",
     ));
     try verify(default_user_id, public, "message digest", signature);
+}
+
+test "SM2 signs the official raw signature example with a fixed nonce" {
+    const secret = try SecretKey.fromBytes(decodeHex(
+        "3945208f7b2133b13f36e38ac6d39f95889393692860b51a42fb81ef4df7c5b8",
+    ));
+    const key_pair = try KeyPair.fromSecretKey(secret);
+    try std.testing.expectEqualSlices(
+        u8,
+        &decodeHex(
+            "04" ++
+                "7b61ca523b80c6ac4ba89becb46a68a991aebe115aa108c68bb0214f187309e0" ++
+                "20cd660da7edcbb94f160966c5a9dd041787d2d75df00a2a3686816059cf2849",
+        ),
+        &key_pair.public_key.toUncompressedSec1(),
+    );
+    const signature = try key_pair.sign(
+        default_user_id,
+        "message digest",
+        decodeHex(
+            "59276e27d506861a16680f3ad9c02dccccef3cc1fa3cdbe4ce6d54b80deac1bc",
+        ),
+    );
+    try verify(default_user_id, key_pair.public_key, "message digest", signature);
+    try std.testing.expectError(
+        error.SignatureVerificationFailed,
+        verify(default_user_id, key_pair.public_key, "tampered", signature),
+    );
+    var der: [Signature.der_encoded_length_max]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        &decodeHex(
+            "3046022100ea5abdb2ccd97b89605c4d8b906b4cea264f400928b8df331fc9258fae5ad83d" ++
+                "022100942a37ee941c502dc5a69665b0d430702a67dbc2566307772b92b86bfc909638",
+        ),
+        signature.toDer(&der),
+    );
 }
 
 test "SM2 verifies an OpenSSL-generated DER signature" {

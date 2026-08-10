@@ -7,6 +7,7 @@ const key_exchange = @import("key_exchange.zig");
 const secret = @import("secret.zig");
 const ticket_keyring = @import("ticket_keyring.zig");
 const transcript = @import("transcript.zig");
+const sm2 = @import("../crypto/sm2.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -343,6 +344,46 @@ test "SM2 CertificateVerify validates raw SEC1 identities" {
             &public_key,
             parsed,
             &([_]u8{0x5a} ** 48),
+        ),
+    );
+}
+
+test "SM2 CertificateVerify signs and verifies raw SEC1 identities" {
+    const sm2_secret = try sm2.SecretKey.fromBytes(.{
+        0x39, 0x45, 0x20, 0x8f, 0x7b, 0x21, 0x33, 0xb1,
+        0x3f, 0x36, 0xe3, 0x8a, 0xc6, 0xd3, 0x9f, 0x95,
+        0x88, 0x93, 0x93, 0x69, 0x28, 0x60, 0xb5, 0x1a,
+        0x42, 0xfb, 0x81, 0xef, 0x4d, 0xf7, 0xc5, 0xb8,
+    });
+    const key_pair = try sm2.KeyPair.fromSecretKey(sm2_secret);
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const transcript_hash = [_]u8{0x71} ** 32;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    try auth.writeCertificateVerify(
+        &encoded,
+        std.testing.allocator,
+        .{ .sm2sig_sm3 = .{
+            .key_pair = key_pair,
+            .nonce = .{
+                0x59, 0x27, 0x6e, 0x27, 0xd5, 0x06, 0x86, 0x1a,
+                0x16, 0x68, 0x0f, 0x3a, 0xd9, 0xc0, 0x2d, 0xcc,
+                0xcc, 0xef, 0x3c, 0xc1, 0xfa, 0x3c, 0xdb, 0xe4,
+                0xce, 0x6d, 0x54, 0xb8, 0x0d, 0xea, 0xc1, 0xbc,
+            },
+        } },
+        &transcript_hash,
+    );
+    const parsed = try auth.parseCertificateVerify(encoded.items);
+    try std.testing.expectEqual(auth.signature_scheme_sm2sig_sm3, parsed.scheme);
+    try auth.verifyCertificateVerify(&public_key, parsed, &transcript_hash);
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        auth.verifyCertificateVerifyForRole(
+            &public_key,
+            parsed,
+            &transcript_hash,
+            .client,
         ),
     );
 }

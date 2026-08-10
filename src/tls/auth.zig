@@ -79,12 +79,18 @@ pub const Signer = union(enum) {
         /// Must be fresh per signature when non-null.
         noise: ?[EcdsaP384Sha384.noise_length]u8 = null,
     },
+    sm2sig_sm3: struct {
+        key_pair: sm2.KeyPair,
+        /// Must be fresh for each SM2 signature.
+        nonce: [sm2.scalar_len]u8,
+    },
 
     pub fn scheme(self: Signer) u16 {
         return switch (self) {
             .ed25519 => signature_scheme_ed25519,
             .ecdsa_p256_sha256 => signature_scheme_ecdsa_secp256r1_sha256,
             .ecdsa_p384_sha384 => signature_scheme_ecdsa_secp384r1_sha384,
+            .sm2sig_sm3 => signature_scheme_sm2sig_sm3,
         };
     }
 
@@ -111,6 +117,14 @@ pub const Signer = union(enum) {
             },
             .ecdsa_p384_sha384 => |signer| {
                 const leaf_key = try p384CertificatePublicKey(certificate);
+                const signing_key =
+                    signer.key_pair.public_key.toUncompressedSec1();
+                if (!std.mem.eql(u8, &leaf_key, &signing_key)) {
+                    return error.InvalidCertificate;
+                }
+            },
+            .sm2sig_sm3 => |signer| {
+                const leaf_key = try sm2CertificatePublicKey(certificate);
                 const signing_key =
                     signer.key_pair.public_key.toUncompressedSec1();
                 if (!std.mem.eql(u8, &leaf_key, &signing_key)) {
@@ -369,8 +383,11 @@ pub fn writeCertificateVerifyForRole(
         transcript_hash.len];
     var signature_storage: [
         @max(
-            EcdsaP256Sha256.Signature.der_encoded_length_max,
             EcdsaP384Sha384.Signature.der_encoded_length_max,
+            @max(
+                EcdsaP256Sha256.Signature.der_encoded_length_max,
+                sm2.Signature.der_encoded_length_max,
+            ),
         )
     ]u8 = undefined;
     const signature_bytes: []const u8 = switch (signer) {
@@ -400,6 +417,21 @@ pub fn writeCertificateVerifyForRole(
                 ecdsa.noise,
             ) catch return error.InvalidCertificateVerify;
             var der: [EcdsaP384Sha384.Signature.der_encoded_length_max]u8 =
+                undefined;
+            const encoded = signature.toDer(&der);
+            @memcpy(signature_storage[0..encoded.len], encoded);
+            break :blk signature_storage[0..encoded.len];
+        },
+        .sm2sig_sm3 => |sm2_signer| blk: {
+            if (transcript_hash.len != sm3DigestLen()) {
+                return error.InvalidCertificateVerify;
+            }
+            const signature = sm2_signer.key_pair.sign(
+                sm2.default_user_id,
+                content,
+                sm2_signer.nonce,
+            ) catch return error.InvalidCertificateVerify;
+            var der: [sm2.Signature.der_encoded_length_max]u8 =
                 undefined;
             const encoded = signature.toDer(&der);
             @memcpy(signature_storage[0..encoded.len], encoded);

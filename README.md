@@ -7,7 +7,7 @@ performance exceed mature stacks such as s2n-tls and rustls.
 The current foundation provides:
 
 - domain-separated HMAC-SHA256 and constant-time tag verification;
-- fixed-size SHA-256 and SM3 digests, portable SM2 signature verification,
+- fixed-size SHA-256 and SM3 digests, portable SM2 signing/verification,
   SM4 block/SM4-GCM primitives, and explicit secure-memory wiping;
 - TLS 1.3 Certificate and CertificateVerify codecs;
 - Ed25519, ECDSA P-256, ECDSA P-384, and SM2/SM3 verifier
@@ -39,9 +39,9 @@ The current foundation provides:
   Finished, resumption PSKs, and stateless tickets.
 - Canonical TLS 1.3 cipher-suite identities and validated client/server
   preference selection, with stateless tickets bound to their issuing suite.
-- ShangMi coverage: SM2 verifies ZA-bound raw and DER signatures against
+- ShangMi coverage: SM2 signs and verifies ZA-bound raw/DER signatures against
   SEC1 public keys and SM2 X.509 SubjectPublicKeyInfo, and is wired into TLS
-  CertificateVerify for raw and X.509 SM2 keys,
+  CertificateVerify generation/verification for raw and X.509 SM2 keys,
   SM3 implements Zig Hash/HMAC-compatible one-shot and streaming hashing, SM4
   exposes allocation-free block and 96-bit-nonce GCM APIs, and TLS/QUIC can
   negotiate the RFC 8998 TLS_SM4_GCM_SM3 (`0x00c6`) suite with SM3
