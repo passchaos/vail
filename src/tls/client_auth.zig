@@ -2,12 +2,18 @@
 
 const std = @import("std");
 const auth = @import("auth.zig");
+const key_schedule = @import("key_schedule.zig");
+const secret = @import("secret.zig");
+const transcript = @import("transcript.zig");
 
 pub const handshake_type_certificate_request: u8 = 0x0d;
 const ext_signature_algorithms: u16 = 0x000d;
 const ext_certificate_authorities: u16 = 0x002f;
 
-pub const Error = std.mem.Allocator.Error || error{
+pub const Error = std.mem.Allocator.Error || auth.Error ||
+    key_schedule.Error || secret.Error || error{
+    BadClientFinished,
+    InvalidClientFlight,
     InvalidCertificateRequest,
     UnsupportedSignatureScheme,
     ClientCertificateRequired,
@@ -15,9 +21,18 @@ pub const Error = std.mem.Allocator.Error || error{
 
 pub const ClientIdentity = auth.ServerIdentity;
 
+pub const Requirement = enum {
+    /// Abort the handshake when the client returns an empty Certificate list.
+    required,
+    /// Request a certificate, but allow an anonymous client to return the
+    /// TLS 1.3 empty Certificate message and continue with Finished.
+    optional,
+};
+
 pub const ServerPolicy = struct {
     verifier: auth.ClientVerifier,
     certificate_authorities: []const []const u8 = &.{},
+    requirement: Requirement = .required,
 };
 
 pub const ParsedRequest = struct {
@@ -27,6 +42,112 @@ pub const ParsedRequest = struct {
     supports_ecdsa_p384_sha384: bool,
     supports_sm2sig_sm3: bool,
 };
+
+pub const Verification = struct {
+    certificate: auth.ParsedCertificate,
+    transcript_after_client_finished: transcript.Digest,
+
+    pub fn deinit(
+        self: *Verification,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.certificate.deinit(allocator);
+        self.* = undefined;
+    }
+
+    pub fn authenticated(self: Verification) bool {
+        return self.certificate.entries.len != 0;
+    }
+};
+
+/// Verify the client's response to a handshake-time CertificateRequest.
+///
+/// The caller supplies exact encoded handshake messages because every byte is
+/// transcript-bound. Certificate entries borrow their DER bytes from
+/// `certificate_bytes`; only the entry index is allocated and owned by the
+/// returned value.
+pub fn verifyClientFlight(
+    allocator: std.mem.Allocator,
+    policy: ServerPolicy,
+    request_context: []const u8,
+    transcript_after_server_finished: transcript.State,
+    client_handshake_traffic_secret: secret.Secret,
+    certificate_bytes: []const u8,
+    certificate_verify_bytes: ?[]const u8,
+    finished_bytes: []const u8,
+) Error!Verification {
+    var certificate = try auth.parseClientCertificateWithContext(
+        allocator,
+        certificate_bytes,
+        request_context,
+    );
+    errdefer certificate.deinit(allocator);
+
+    var state = transcript_after_server_finished;
+    state.update(certificate_bytes);
+    if (certificate.entries.len == 0) {
+        if (policy.requirement == .required) {
+            return error.ClientCertificateRequired;
+        }
+        if (certificate_verify_bytes != null) {
+            return error.InvalidClientFlight;
+        }
+    } else {
+        try policy.verifier.verifyTrust(null, certificate.entries);
+        const verify_bytes = certificate_verify_bytes orelse
+            return error.InvalidClientFlight;
+        const parsed_verify = try auth.parseCertificateVerify(
+            verify_bytes,
+        );
+        const verify_hash = state.digest();
+        try auth.verifyCertificateVerifyForRole(
+            certificate.entries[0],
+            parsed_verify,
+            verify_hash.bytes(),
+            .client,
+        );
+        state.update(verify_bytes);
+    }
+
+    const verify_data = try parseFinished(
+        finished_bytes,
+        client_handshake_traffic_secret.hash,
+    );
+    var expected = try key_schedule.computeFinishedFor(
+        client_handshake_traffic_secret,
+        state.digest(),
+    );
+    defer expected.deinit();
+    var actual = try secret.Secret.init(
+        expected.hash,
+        verify_data,
+    );
+    defer actual.deinit();
+    if (!expected.eql(&actual)) return error.BadClientFinished;
+    state.update(finished_bytes);
+
+    return .{
+        .certificate = certificate,
+        .transcript_after_client_finished = state.digest(),
+    };
+}
+
+fn parseFinished(
+    bytes: []const u8,
+    hash: secret.Hash,
+) Error![]const u8 {
+    if (bytes.len < 4 or bytes[0] != 0x14) {
+        return error.InvalidClientFlight;
+    }
+    const body_len =
+        (@as(usize, bytes[1]) << 16) |
+        (@as(usize, bytes[2]) << 8) |
+        bytes[3];
+    if (body_len != hash.len() or body_len != bytes.len - 4) {
+        return error.InvalidClientFlight;
+    }
+    return bytes[4..];
+}
 
 pub fn writeRequest(
     list: *std.ArrayList(u8),

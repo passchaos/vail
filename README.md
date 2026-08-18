@@ -106,5 +106,11 @@ OpenSSL to observe warning `close_notify`. `zig build interop-rustls-min-server`
 performs the same minimal-server check with rustls and requires both rustls
 connected state and Vail-side client Finished verification.
 
+TLS 1.3 server flights can also emit CertificateRequest and retain an
+incremental negotiated-hash transcript. `tls.client_auth.verifyClientFlight`
+verifies required or optional client Certificate, CertificateVerify
+possession, trust policy, and Finished messages; stream/QUIC adapters remain
+responsible for record reassembly and alert policy.
+
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.

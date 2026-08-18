@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const auth = @import("auth.zig");
+const client_auth = @import("client_auth.zig");
 const client_hello = @import("client_hello.zig");
 const key_schedule = @import("key_schedule.zig");
 const record = @import("record.zig");
@@ -18,7 +19,8 @@ const transcript = @import("transcript.zig");
 pub const handshake_type_finished: u8 = 0x14;
 
 pub const Error = std.mem.Allocator.Error || server_flight.Error ||
-    key_schedule.Error || record.Error || auth.Error || error{
+    key_schedule.Error || record.Error || auth.Error ||
+    client_auth.Error || error{
     InvalidFinished,
 };
 
@@ -28,6 +30,9 @@ pub const Result = struct {
     client_handshake_traffic_secret: secret.Secret,
     server_handshake_traffic_secret: secret.Secret,
     transcript_after_server_finished: transcript.Digest,
+    /// Cloneable state retained at the server Finished boundary. Stream and
+    /// QUIC transports extend it with the client's authentication flight.
+    transcript_state_after_server_finished: transcript.State,
 };
 
 pub const Options = struct {
@@ -39,6 +44,13 @@ pub const Options = struct {
     shared_secret: []const u8,
     certificate_chain: []const []const u8,
     signer: auth.Signer,
+    /// Emit CertificateRequest immediately after EncryptedExtensions.
+    client_auth: ?ClientAuthOptions = null,
+};
+
+pub const ClientAuthOptions = struct {
+    request_context: []const u8 = &.{},
+    certificate_authorities: []const []const u8 = &.{},
 };
 
 pub fn writeServerHandshakeFlight(
@@ -93,6 +105,24 @@ pub fn writeServerHandshakeFlight(
         encrypted_extensions.items,
     );
 
+    var certificate_request: std.ArrayList(u8) = .empty;
+    defer certificate_request.deinit(allocator);
+    if (options.client_auth) |client_auth_options| {
+        try client_auth.writeRequest(
+            &certificate_request,
+            allocator,
+            client_auth_options.request_context,
+            client_auth_options.certificate_authorities,
+        );
+        try appendEncryptedHandshake(
+            out,
+            allocator,
+            &record_keys,
+            &sequence_number,
+            certificate_request.items,
+        );
+    }
+
     var certificate: std.ArrayList(u8) = .empty;
     defer certificate.deinit(allocator);
     try auth.writeCertificate(
@@ -114,6 +144,7 @@ pub fn writeServerHandshakeFlight(
             options.client_hello_bytes,
             server_hello_msg.items,
             encrypted_extensions.items,
+            certificate_request.items,
             certificate.items,
         },
     );
@@ -139,6 +170,7 @@ pub fn writeServerHandshakeFlight(
             options.client_hello_bytes,
             server_hello_msg.items,
             encrypted_extensions.items,
+            certificate_request.items,
             certificate.items,
             certificate_verify.items,
         },
@@ -157,17 +189,18 @@ pub fn writeServerHandshakeFlight(
         &sequence_number,
         finished.items,
     );
-    const transcript_after_server_finished = transcript.hashFor(
-        selection.suite.hash(),
-        &.{
-            options.client_hello_bytes,
-            server_hello_msg.items,
-            encrypted_extensions.items,
-            certificate.items,
-            certificate_verify.items,
-            finished.items,
-        },
-    );
+    var transcript_state =
+        transcript.State.init(selection.suite.hash());
+    for ([_][]const u8{
+        options.client_hello_bytes,
+        server_hello_msg.items,
+        encrypted_extensions.items,
+        certificate_request.items,
+        certificate.items,
+        certificate_verify.items,
+        finished.items,
+    }) |message| transcript_state.update(message);
+    const transcript_after_server_finished = transcript_state.digest();
 
     return .{
         .selection = selection,
@@ -175,6 +208,7 @@ pub fn writeServerHandshakeFlight(
         .client_handshake_traffic_secret = handshake.client_traffic_secret,
         .server_handshake_traffic_secret = handshake.server_traffic_secret,
         .transcript_after_server_finished = transcript_after_server_finished,
+        .transcript_state_after_server_finished = transcript_state,
     };
 }
 
@@ -268,4 +302,126 @@ test "server handshake flight encrypts messages after ServerHello" {
     const first = try keys.open(0, first_record, &opened);
     try std.testing.expectEqual(@as(u8, server_hello.handshake_type_encrypted_extensions), opened[0]);
     try std.testing.expectEqual(record.content_type_handshake, first.content_type);
+}
+
+test "server handshake flight inserts encrypted CertificateRequest" {
+    const hello = [_]u8{
+        0x01, 0x00, 0x00, 0x6c, 0x03, 0x03,
+    } ++ ([_]u8{0x11} ** 32) ++ [_]u8{
+        0x03, 1,    2,    3,
+        0x00, 0x04, 0x13, 0x01,
+        0x13, 0x03, 0x01, 0x00,
+        0x00, 0x3c, 0x00, 0x2b,
+        0x00, 0x03, 0x02, 0x03,
+        0x04, 0x00, 0x10, 0x00,
+        0x05, 0x00, 0x03, 0x02,
+        'h',  '2',  0x00, 0x33,
+        0x00, 0x0c, 0x00, 0x0a,
+        0x00, 0x1d, 0x00, 0x06,
+        1,    2,    3,    4,
+        5,    6,    0x00, 0x00,
+        0x00, 0x10, 0x00, 0x0e,
+        0x00, 0x00, 0x0b, 'e',
+        'x',  'a',  'm',  'p',
+        'l',  'e',  '.',  'c',
+        'o',  'm',  0x00, 0x0a,
+        0x00, 0x04, 0x00, 0x02,
+        0x00, 0x1d,
+    };
+    const parsed = try client_hello.parse(&hello);
+    const key_pair = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0x65} **
+            std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const cert = key_pair.public_key.toBytes();
+    var flight: std.ArrayList(u8) = .empty;
+    defer flight.deinit(std.testing.allocator);
+    var result = try writeServerHandshakeFlight(
+        &flight,
+        std.testing.allocator,
+        .{
+            .client_hello_bytes = &hello,
+            .parsed_client_hello = parsed,
+            .policy = .{},
+            .server_random = [_]u8{0x66} ** 32,
+            .server_key_share = &.{ 9, 8, 7, 6 },
+            .shared_secret = &([_]u8{0x67} ** 32),
+            .certificate_chain = &.{&cert},
+            .signer = .{ .ed25519 = .{ .key_pair = key_pair } },
+            .client_auth = .{
+                .request_context = "client-auth",
+                .certificate_authorities = &.{"test-ca"},
+            },
+        },
+    );
+    defer result.handshake_secret.deinit();
+    defer result.client_handshake_traffic_secret.deinit();
+    defer result.server_handshake_traffic_secret.deinit();
+
+    const server_hello_len = 4 +
+        ((@as(usize, flight.items[1]) << 16) |
+            (@as(usize, flight.items[2]) << 8) |
+            flight.items[3]);
+    var keys = try record.Keys.derive(
+        result.selection.suite,
+        result.server_handshake_traffic_secret,
+    );
+    defer keys.deinit();
+    var offset = server_hello_len;
+    var plaintext: [1024]u8 = undefined;
+    const encrypted_extensions = try openRecordAt(
+        flight.items,
+        &offset,
+        &keys,
+        0,
+        &plaintext,
+    );
+    try std.testing.expectEqual(
+        server_hello.handshake_type_encrypted_extensions,
+        encrypted_extensions[0],
+    );
+    const request = try openRecordAt(
+        flight.items,
+        &offset,
+        &keys,
+        1,
+        &plaintext,
+    );
+    const parsed_request = try client_auth.parseRequest(request);
+    try std.testing.expectEqualStrings(
+        "client-auth",
+        parsed_request.request_context,
+    );
+}
+
+fn openRecordAt(
+    flight: []const u8,
+    offset: *usize,
+    keys: *const record.Keys,
+    sequence: u64,
+    plaintext: []u8,
+) ![]const u8 {
+    if (flight.len - offset.* < record.header_len) {
+        return error.InvalidServerFlight;
+    }
+    const encrypted_len = std.mem.readInt(
+        u16,
+        flight[offset.* + 3 ..][0..2],
+        .big,
+    );
+    const record_len = record.header_len + encrypted_len;
+    if (record_len > flight.len - offset.*) {
+        return error.InvalidServerFlight;
+    }
+    const opened = try keys.open(
+        sequence,
+        flight[offset.* .. offset.* + record_len],
+        plaintext,
+    );
+    offset.* += record_len;
+    if (opened.content_type != record.content_type_handshake) {
+        return error.InvalidServerFlight;
+    }
+    return plaintext[0..opened.len];
 }

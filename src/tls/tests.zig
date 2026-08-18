@@ -155,6 +155,33 @@ test "CertificateRequest advertises built-in signature schemes" {
     try std.testing.expect(parsed.supports_sm2sig_sm3);
 }
 
+test "optional client Certificate supports an empty chain" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try auth.writeClientCertificateWithContext(
+        &encoded,
+        allocator,
+        &.{},
+        "optional",
+    );
+    var parsed = try auth.parseClientCertificateWithContext(
+        allocator,
+        encoded.items,
+        "optional",
+    );
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), parsed.entries.len);
+    try std.testing.expectError(
+        error.EmptyCertificateChain,
+        auth.parseCertificateWithContext(
+            allocator,
+            encoded.items,
+            "optional",
+        ),
+    );
+}
+
 test "client CertificateVerify uses the distinct TLS context" {
     const allocator = std.testing.allocator;
     const key_pair = try Ed25519.KeyPair.generateDeterministic(
@@ -187,6 +214,136 @@ test "client CertificateVerify uses the distinct TLS context" {
             .server,
         ),
     );
+}
+
+test "client-auth flight verifies required and optional identities" {
+    const allocator = std.testing.allocator;
+    const key_pair = try Ed25519.KeyPair.generateDeterministic(
+        [_]u8{0x68} ** Ed25519.KeyPair.seed_length,
+    );
+    const public_key = key_pair.public_key.toBytes();
+    const request_context = "mtls";
+    const handshake_secret =
+        secret.Secret.fromSha256([_]u8{0x69} ** 32);
+    var base = transcript.State.init(.sha256);
+    base.update("server-flight");
+
+    var certificate: std.ArrayList(u8) = .empty;
+    defer certificate.deinit(allocator);
+    try auth.writeClientCertificateWithContext(
+        &certificate,
+        allocator,
+        &.{&public_key},
+        request_context,
+    );
+    var with_certificate = base;
+    with_certificate.update(certificate.items);
+    var certificate_verify: std.ArrayList(u8) = .empty;
+    defer certificate_verify.deinit(allocator);
+    const certificate_hash = with_certificate.digest();
+    try auth.writeCertificateVerifyForRole(
+        &certificate_verify,
+        allocator,
+        .{ .ed25519 = .{ .key_pair = key_pair } },
+        certificate_hash.bytes(),
+        .client,
+    );
+    var before_finished = with_certificate;
+    before_finished.update(certificate_verify.items);
+    var finished: std.ArrayList(u8) = .empty;
+    defer finished.deinit(allocator);
+    var finished_data = try key_schedule.computeFinishedFor(
+        handshake_secret,
+        before_finished.digest(),
+    );
+    defer finished_data.deinit();
+    try writeTestFinished(
+        &finished,
+        allocator,
+        finished_data.bytes(),
+    );
+
+    var verified = try client_auth.verifyClientFlight(
+        allocator,
+        .{
+            .verifier = .{
+                .pinned_ed25519_public_key = public_key,
+            },
+        },
+        request_context,
+        base,
+        handshake_secret,
+        certificate.items,
+        certificate_verify.items,
+        finished.items,
+    );
+    defer verified.deinit(allocator);
+    try std.testing.expect(verified.authenticated());
+
+    var empty_certificate: std.ArrayList(u8) = .empty;
+    defer empty_certificate.deinit(allocator);
+    try auth.writeClientCertificateWithContext(
+        &empty_certificate,
+        allocator,
+        &.{},
+        request_context,
+    );
+    var anonymous_before_finished = base;
+    anonymous_before_finished.update(empty_certificate.items);
+    var anonymous_finished: std.ArrayList(u8) = .empty;
+    defer anonymous_finished.deinit(allocator);
+    var anonymous_data = try key_schedule.computeFinishedFor(
+        handshake_secret,
+        anonymous_before_finished.digest(),
+    );
+    defer anonymous_data.deinit();
+    try writeTestFinished(
+        &anonymous_finished,
+        allocator,
+        anonymous_data.bytes(),
+    );
+    try std.testing.expectError(
+        error.ClientCertificateRequired,
+        client_auth.verifyClientFlight(
+            allocator,
+            .{ .verifier = .{} },
+            request_context,
+            base,
+            handshake_secret,
+            empty_certificate.items,
+            null,
+            anonymous_finished.items,
+        ),
+    );
+    var anonymous = try client_auth.verifyClientFlight(
+        allocator,
+        .{
+            .verifier = .{},
+            .requirement = .optional,
+        },
+        request_context,
+        base,
+        handshake_secret,
+        empty_certificate.items,
+        null,
+        anonymous_finished.items,
+    );
+    defer anonymous.deinit(allocator);
+    try std.testing.expect(!anonymous.authenticated());
+}
+
+fn writeTestFinished(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    verify_data: []const u8,
+) !void {
+    try list.append(allocator, 0x14);
+    try list.appendSlice(allocator, &.{
+        @truncate(verify_data.len >> 16),
+        @truncate(verify_data.len >> 8),
+        @truncate(verify_data.len),
+    });
+    try list.appendSlice(allocator, verify_data);
 }
 
 test "CertificateVerify signs a SHA-384 transcript without truncation" {

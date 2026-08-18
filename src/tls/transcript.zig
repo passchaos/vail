@@ -44,6 +44,51 @@ pub const Transcript = Sha256Transcript;
 /// Source-compatible SHA-256 one-shot transcript hashing.
 pub const hash = Sha256Transcript.hash;
 
+/// Runtime-selected incremental transcript state.
+///
+/// TLS 1.3 chooses its transcript hash with the cipher suite. Keeping the
+/// concrete hash state, rather than only its digest, allows a server to extend
+/// the transcript with a client's Certificate/CertificateVerify/Finished
+/// flight after its own Finished has already been emitted.
+pub const State = union(secret.Hash) {
+    sha256: Sha256Transcript,
+    sha384: Sha384,
+    sm3: Sm3,
+
+    pub fn init(algorithm: secret.Hash) State {
+        return switch (algorithm) {
+            .sha256 => .{ .sha256 = .{} },
+            .sha384 => .{ .sha384 = .{} },
+            .sm3 => .{ .sm3 = .{} },
+        };
+    }
+
+    pub fn update(self: *State, bytes: []const u8) void {
+        switch (self.*) {
+            inline else => |*state| state.update(bytes),
+        }
+    }
+
+    pub fn digest(self: State) Digest {
+        var result = Digest{
+            .hash = std.meta.activeTag(self),
+            .storage = [_]u8{0} ** secret.max_len,
+        };
+        switch (self) {
+            .sha256 => |state| {
+                result.storage[0..32].* = state.digest();
+            },
+            .sha384 => |state| {
+                result.storage = state.digest();
+            },
+            .sm3 => |state| {
+                result.storage[0..32].* = state.digest();
+            },
+        }
+        return result;
+    }
+};
+
 pub const Digest = struct {
     hash: secret.Hash,
     storage: [secret.max_len]u8,
@@ -72,17 +117,27 @@ pub fn hashFor(
     algorithm: secret.Hash,
     parts: []const []const u8,
 ) Digest {
-    var result = Digest{
-        .hash = algorithm,
-        .storage = [_]u8{0} ** secret.max_len,
-    };
-    switch (algorithm) {
-        .sha256 => result.storage[0..32].* =
-            Sha256Transcript.hash(parts),
-        .sha384 => result.storage =
-            Sha384.hash(parts),
-        .sm3 => result.storage[0..32].* =
-            Sm3.hash(parts),
+    var state = State.init(algorithm);
+    for (parts) |part| state.update(part);
+    return state.digest();
+}
+
+test "runtime transcript state extends a negotiated hash" {
+    inline for ([_]secret.Hash{ .sha256, .sha384, .sm3 }) |algorithm| {
+        var state = State.init(algorithm);
+        state.update("client");
+        const before = state.digest();
+        state.update("server");
+        const after = state.digest();
+        try std.testing.expectEqualSlices(
+            u8,
+            hashFor(algorithm, &.{"client"}).bytes(),
+            before.bytes(),
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            hashFor(algorithm, &.{ "client", "server" }).bytes(),
+            after.bytes(),
+        );
     }
-    return result;
 }

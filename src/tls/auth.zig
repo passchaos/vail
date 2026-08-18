@@ -259,6 +259,38 @@ pub fn writeCertificateWithContext(
     request_context: []const u8,
 ) Error!void {
     if (chain.len == 0) return error.EmptyCertificateChain;
+    return writeCertificateEntriesWithContext(
+        list,
+        allocator,
+        chain,
+        request_context,
+    );
+}
+
+/// Encode a TLS 1.3 client Certificate response.
+///
+/// Unlike a server Certificate, a client response may carry an empty chain
+/// when the server requested but did not require authentication.
+pub fn writeClientCertificateWithContext(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    chain: []const []const u8,
+    request_context: []const u8,
+) Error!void {
+    return writeCertificateEntriesWithContext(
+        list,
+        allocator,
+        chain,
+        request_context,
+    );
+}
+
+fn writeCertificateEntriesWithContext(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    chain: []const []const u8,
+    request_context: []const u8,
+) Error!void {
     if (request_context.len > std.math.maxInt(u8)) {
         return error.InvalidCertificate;
     }
@@ -308,6 +340,35 @@ pub fn parseCertificateWithContext(
     bytes: []const u8,
     expected_context: []const u8,
 ) Error!ParsedCertificate {
+    return parseCertificateEntriesWithContext(
+        allocator,
+        bytes,
+        expected_context,
+        false,
+    );
+}
+
+/// Parse a client Certificate response, including the RFC 8446 empty-list
+/// representation used when client authentication is optional.
+pub fn parseClientCertificateWithContext(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    expected_context: []const u8,
+) Error!ParsedCertificate {
+    return parseCertificateEntriesWithContext(
+        allocator,
+        bytes,
+        expected_context,
+        true,
+    );
+}
+
+fn parseCertificateEntriesWithContext(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    expected_context: []const u8,
+    allow_empty: bool,
+) Error!ParsedCertificate {
     var pos: usize = 0;
     if (try readByte(bytes, &pos) != handshake_type_certificate) {
         return error.InvalidCertificate;
@@ -334,7 +395,9 @@ pub fn parseCertificateWithContext(
         _ = try readSlice(bytes, &pos, extensions_len);
         try entries.append(allocator, cert);
     }
-    if (entries.items.len == 0) return error.EmptyCertificateChain;
+    if (!allow_empty and entries.items.len == 0) {
+        return error.EmptyCertificateChain;
+    }
     return .{ .entries = try entries.toOwnedSlice(allocator) };
 }
 
