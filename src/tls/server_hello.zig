@@ -12,6 +12,7 @@ pub const handshake_type_encrypted_extensions: u8 = 0x08;
 pub const legacy_version = [_]u8{ 0x03, 0x03 };
 pub const ext_supported_versions: u16 = 0x002b;
 pub const ext_key_share: u16 = 0x0033;
+pub const ext_server_name: u16 = 0x0000;
 pub const ext_application_layer_protocol_negotiation: u16 = 0x0010;
 pub const ext_quic_transport_parameters: u16 = 0x0039;
 pub const tls13: u16 = 0x0304;
@@ -56,6 +57,7 @@ pub fn parseServerHello(
         &pos,
         session_id_len,
     );
+    if (session_id_echo.len > 32) return error.InvalidServerHello;
     const suite = cipher_suite.Suite.fromWire(
         try readInt(u16, bytes, &pos),
     ) orelse return error.InvalidServerHello;
@@ -201,6 +203,10 @@ pub fn parseEncryptedExtensions(
             if (result.alpn_protocol.?.len == 0 or
                 alpn_pos != payload.len)
             {
+                return error.InvalidEncryptedExtensions;
+            }
+        } else if (typ == ext_server_name) {
+            if (payload.len != 0) {
                 return error.InvalidEncryptedExtensions;
             }
         } else {

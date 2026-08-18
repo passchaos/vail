@@ -57,9 +57,7 @@ pub fn write(
     defer extensions.deinit(allocator);
 
     if (options.server_name) |server_name| {
-        if (server_name.len == 0 or
-            server_name.len > std.math.maxInt(u16) - 3)
-        {
+        if (server_name.len == 0) {
             return error.InvalidClientHello;
         }
         var sni: std.ArrayList(u8) = .empty;
@@ -390,7 +388,10 @@ fn appendExtension(
     allocator: std.mem.Allocator,
     typ: u16,
     payload: []const u8,
-) std.mem.Allocator.Error!void {
+) (std.mem.Allocator.Error || Error)!void {
+    if (payload.len > std.math.maxInt(u16)) {
+        return error.InvalidClientHello;
+    }
     try appendInt(out, allocator, u16, typ);
     try appendInt(out, allocator, u16, payload.len);
     try out.appendSlice(allocator, payload);
