@@ -152,6 +152,12 @@ test "CertificateRequest advertises built-in signature schemes" {
     try std.testing.expect(parsed.supports_ed25519);
     try std.testing.expect(parsed.supports_ecdsa_p256_sha256);
     try std.testing.expect(parsed.supports_ecdsa_p384_sha384);
+    try std.testing.expect(parsed.supports_rsa_pss_rsae_sha256);
+    try std.testing.expect(parsed.supports_rsa_pss_rsae_sha384);
+    try std.testing.expect(parsed.supports_rsa_pss_rsae_sha512);
+    try std.testing.expect(parsed.supports_rsa_pss_pss_sha256);
+    try std.testing.expect(parsed.supports_rsa_pss_pss_sha384);
+    try std.testing.expect(parsed.supports_rsa_pss_pss_sha512);
     try std.testing.expect(parsed.supports_sm2sig_sm3);
 }
 
