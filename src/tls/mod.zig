@@ -3,6 +3,7 @@
 pub const auth = @import("auth.zig");
 pub const cipher_suite = @import("cipher_suite.zig");
 pub const client_auth = @import("client_auth.zig");
+pub const client_handshake = @import("client_handshake.zig");
 pub const client_hello = @import("client_hello.zig");
 pub const key_exchange = @import("key_exchange.zig");
 pub const key_schedule = @import("key_schedule.zig");
@@ -19,6 +20,7 @@ pub const transcript = @import("transcript.zig");
 test {
     _ = @import("tests.zig");
     _ = client_hello;
+    _ = client_handshake;
     _ = record;
     _ = server_hello;
     _ = server_handshake;

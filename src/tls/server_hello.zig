@@ -29,6 +29,91 @@ pub const ServerHello = struct {
     key_share: []const u8,
 };
 
+pub const ParsedServerHello = struct {
+    random: [32]u8,
+    session_id_echo: []const u8,
+    cipher_suite: cipher_suite.Suite,
+    key_share_group: u16,
+    key_share: []const u8,
+};
+
+pub fn parseServerHello(
+    bytes: []const u8,
+) Error!ParsedServerHello {
+    var pos: usize = 0;
+    if (try readByte(bytes, &pos) != handshake_type_server_hello) {
+        return error.InvalidServerHello;
+    }
+    const body_len = try readU24(bytes, &pos);
+    if (body_len != bytes.len - pos) return error.InvalidServerHello;
+    if (try readInt(u16, bytes, &pos) != 0x0303) {
+        return error.InvalidServerHello;
+    }
+    const random = (try readSlice(bytes, &pos, 32))[0..32].*;
+    const session_id_len = try readByte(bytes, &pos);
+    const session_id_echo = try readSlice(
+        bytes,
+        &pos,
+        session_id_len,
+    );
+    const suite = cipher_suite.Suite.fromWire(
+        try readInt(u16, bytes, &pos),
+    ) orelse return error.InvalidServerHello;
+    if (try readByte(bytes, &pos) != 0) {
+        return error.InvalidServerHello;
+    }
+    const extensions_len = try readInt(u16, bytes, &pos);
+    const extensions = try readSlice(bytes, &pos, extensions_len);
+    if (pos != bytes.len) return error.InvalidServerHello;
+
+    var saw_version = false;
+    var key_share_group: ?u16 = null;
+    var key_share: ?[]const u8 = null;
+    var seen = std.StaticBitSet(65536).initEmpty();
+    var ext_pos: usize = 0;
+    while (ext_pos < extensions.len) {
+        const typ = try readInt(u16, extensions, &ext_pos);
+        const payload_len = try readInt(u16, extensions, &ext_pos);
+        const payload = try readSlice(
+            extensions,
+            &ext_pos,
+            payload_len,
+        );
+        if (seen.isSet(typ)) return error.InvalidServerHello;
+        seen.set(typ);
+        switch (typ) {
+            ext_supported_versions => {
+                if (payload.len != 2 or
+                    std.mem.readInt(u16, payload[0..2], .big) != tls13)
+                {
+                    return error.InvalidServerHello;
+                }
+                saw_version = true;
+            },
+            ext_key_share => {
+                var share_pos: usize = 0;
+                key_share_group = try readInt(u16, payload, &share_pos);
+                const len = try readInt(u16, payload, &share_pos);
+                key_share = try readSlice(payload, &share_pos, len);
+                if (key_share.?.len == 0 or share_pos != payload.len) {
+                    return error.InvalidServerHello;
+                }
+            },
+            else => return error.InvalidServerHello,
+        }
+    }
+    if (!saw_version or key_share == null) {
+        return error.InvalidServerHello;
+    }
+    return .{
+        .random = random,
+        .session_id_echo = session_id_echo,
+        .cipher_suite = suite,
+        .key_share_group = key_share_group.?,
+        .key_share = key_share.?,
+    };
+}
+
 pub fn writeServerHello(
     out: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -70,6 +155,63 @@ pub const EncryptedExtensions = struct {
     alpn_protocol: ?[]const u8 = null,
     quic_transport_parameters: ?[]const u8 = null,
 };
+
+pub const ParsedEncryptedExtensions = struct {
+    alpn_protocol: ?[]const u8 = null,
+};
+
+pub fn parseEncryptedExtensions(
+    bytes: []const u8,
+) Error!ParsedEncryptedExtensions {
+    var pos: usize = 0;
+    if (try readByte(bytes, &pos) !=
+        handshake_type_encrypted_extensions)
+    {
+        return error.InvalidEncryptedExtensions;
+    }
+    const body_len = try readU24(bytes, &pos);
+    if (body_len != bytes.len - pos) {
+        return error.InvalidEncryptedExtensions;
+    }
+    const extensions_len = try readInt(u16, bytes, &pos);
+    const extensions = try readSlice(bytes, &pos, extensions_len);
+    if (pos != bytes.len) return error.InvalidEncryptedExtensions;
+
+    var result = ParsedEncryptedExtensions{};
+    var seen = std.StaticBitSet(65536).initEmpty();
+    var ext_pos: usize = 0;
+    while (ext_pos < extensions.len) {
+        const typ = try readInt(u16, extensions, &ext_pos);
+        const len = try readInt(u16, extensions, &ext_pos);
+        const payload = try readSlice(extensions, &ext_pos, len);
+        if (seen.isSet(typ)) return error.InvalidEncryptedExtensions;
+        seen.set(typ);
+        if (typ == ext_application_layer_protocol_negotiation) {
+            var alpn_pos: usize = 0;
+            const names_len = try readInt(u16, payload, &alpn_pos);
+            if (names_len != payload.len - alpn_pos) {
+                return error.InvalidEncryptedExtensions;
+            }
+            const protocol_len = try readByte(payload, &alpn_pos);
+            result.alpn_protocol = try readSlice(
+                payload,
+                &alpn_pos,
+                protocol_len,
+            );
+            if (result.alpn_protocol.?.len == 0 or
+                alpn_pos != payload.len)
+            {
+                return error.InvalidEncryptedExtensions;
+            }
+        } else {
+            // A stream TLS adapter does not understand QUIC extensions or
+            // early-data acceptance and must fail closed rather than silently
+            // extending an unsupported handshake mode.
+            return error.InvalidEncryptedExtensions;
+        }
+    }
+    return result;
+}
 
 pub fn writeEncryptedExtensions(
     out: *std.ArrayList(u8),
@@ -156,6 +298,40 @@ fn appendU24(
         @truncate(value >> 8),
         @truncate(value),
     });
+}
+
+fn readByte(bytes: []const u8, pos: *usize) Error!u8 {
+    const slice = try readSlice(bytes, pos, 1);
+    return slice[0];
+}
+
+fn readInt(
+    comptime T: type,
+    bytes: []const u8,
+    pos: *usize,
+) Error!T {
+    const slice = try readSlice(bytes, pos, @sizeOf(T));
+    return std.mem.readInt(T, slice[0..@sizeOf(T)], .big);
+}
+
+fn readU24(bytes: []const u8, pos: *usize) Error!usize {
+    const slice = try readSlice(bytes, pos, 3);
+    return (@as(usize, slice[0]) << 16) |
+        (@as(usize, slice[1]) << 8) |
+        slice[2];
+}
+
+fn readSlice(
+    bytes: []const u8,
+    pos: *usize,
+    len: usize,
+) Error![]const u8 {
+    const end = std.math.add(usize, pos.*, len) catch
+        return error.InvalidServerHello;
+    if (end > bytes.len) return error.InvalidServerHello;
+    const result = bytes[pos.*..end];
+    pos.* = end;
+    return result;
 }
 
 test "ServerHello and EncryptedExtensions encode TLS 1.3 extensions" {

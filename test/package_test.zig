@@ -34,6 +34,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail, "tls"));
     try std.testing.expect(@hasDecl(vail.tls, "auth"));
     try std.testing.expect(@hasDecl(vail.tls, "client_auth"));
+    try std.testing.expect(@hasDecl(vail.tls, "client_handshake"));
     try std.testing.expect(@hasDecl(vail.tls, "client_hello"));
     try std.testing.expect(@hasDecl(vail.tls, "key_schedule"));
     try std.testing.expect(@hasDecl(vail.tls, "key_exchange"));
@@ -61,6 +62,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         vail.tls.client_auth,
         "verifyClientFlight",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.client_hello,
+        "write",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.server_hello,
+        "parseServerHello",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.server_hello,
+        "parseEncryptedExtensions",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.client_handshake,
+        "verifyServerAndWriteClientFlight",
     ));
     try std.testing.expect(@hasField(
         vail.tls.client_auth.ServerPolicy,

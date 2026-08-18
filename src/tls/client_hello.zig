@@ -5,6 +5,8 @@
 //! lengths and extracts the extensions Vail negotiates today.
 
 const std = @import("std");
+const auth = @import("auth.zig");
+const cipher_suite = @import("cipher_suite.zig");
 
 pub const handshake_type_client_hello: u8 = 0x01;
 pub const ext_server_name: u16 = 0x0000;
@@ -27,6 +29,180 @@ pub const KeyShare = struct {
     group: u16,
     key_exchange: []const u8,
 };
+
+pub const WriteOptions = struct {
+    random: [32]u8,
+    session_id: []const u8 = &.{},
+    server_name: ?[]const u8 = null,
+    x25519_public_key: [32]u8,
+    cipher_suites: []const cipher_suite.Suite =
+        &cipher_suite.default_preference,
+    alpn_protocols: []const []const u8 = &.{},
+};
+
+/// Write a standards-focused TLS 1.3 ClientHello for stream transports.
+///
+/// This intentionally advertises one X25519 key share. QUIC adapters can keep
+/// their larger hybrid/group offer while MQTT/HTTP-style stream clients avoid
+/// carrying QUIC-only transport parameters.
+pub fn write(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    options: WriteOptions,
+) (std.mem.Allocator.Error || Error)!void {
+    if (options.session_id.len > 32 or options.cipher_suites.len == 0) {
+        return error.InvalidClientHello;
+    }
+    var extensions: std.ArrayList(u8) = .empty;
+    defer extensions.deinit(allocator);
+
+    if (options.server_name) |server_name| {
+        if (server_name.len == 0 or
+            server_name.len > std.math.maxInt(u16) - 3)
+        {
+            return error.InvalidClientHello;
+        }
+        var sni: std.ArrayList(u8) = .empty;
+        defer sni.deinit(allocator);
+        try appendInt(&sni, allocator, u16, 3 + server_name.len);
+        try sni.append(allocator, 0);
+        try appendInt(&sni, allocator, u16, server_name.len);
+        try sni.appendSlice(allocator, server_name);
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_server_name,
+            sni.items,
+        );
+    }
+
+    var groups: std.ArrayList(u8) = .empty;
+    defer groups.deinit(allocator);
+    try appendInt(&groups, allocator, u16, 2);
+    try appendInt(&groups, allocator, u16, 0x001d);
+    try appendExtension(
+        &extensions,
+        allocator,
+        ext_supported_groups,
+        groups.items,
+    );
+
+    const signature_schemes = [_]u16{
+        auth.signature_scheme_ecdsa_secp256r1_sha256,
+        auth.signature_scheme_ecdsa_secp384r1_sha384,
+        auth.signature_scheme_ed25519,
+        auth.signature_scheme_rsa_pss_rsae_sha256,
+        auth.signature_scheme_rsa_pss_rsae_sha384,
+        auth.signature_scheme_rsa_pss_rsae_sha512,
+        auth.signature_scheme_rsa_pss_pss_sha256,
+        auth.signature_scheme_rsa_pss_pss_sha384,
+        auth.signature_scheme_rsa_pss_pss_sha512,
+        auth.signature_scheme_sm2sig_sm3,
+    };
+    var signatures: std.ArrayList(u8) = .empty;
+    defer signatures.deinit(allocator);
+    try appendInt(
+        &signatures,
+        allocator,
+        u16,
+        signature_schemes.len * 2,
+    );
+    for (signature_schemes) |scheme| {
+        try appendInt(&signatures, allocator, u16, scheme);
+    }
+    try appendExtension(
+        &extensions,
+        allocator,
+        ext_signature_algorithms,
+        signatures.items,
+    );
+
+    if (options.alpn_protocols.len != 0) {
+        var alpn_names: std.ArrayList(u8) = .empty;
+        defer alpn_names.deinit(allocator);
+        for (options.alpn_protocols) |protocol| {
+            if (protocol.len == 0 or protocol.len > std.math.maxInt(u8)) {
+                return error.InvalidClientHello;
+            }
+            try alpn_names.append(allocator, @intCast(protocol.len));
+            try alpn_names.appendSlice(allocator, protocol);
+        }
+        if (alpn_names.items.len > std.math.maxInt(u16)) {
+            return error.InvalidClientHello;
+        }
+        var alpn: std.ArrayList(u8) = .empty;
+        defer alpn.deinit(allocator);
+        try appendInt(
+            &alpn,
+            allocator,
+            u16,
+            alpn_names.items.len,
+        );
+        try alpn.appendSlice(allocator, alpn_names.items);
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_application_layer_protocol_negotiation,
+            alpn.items,
+        );
+    }
+
+    try appendExtension(
+        &extensions,
+        allocator,
+        ext_supported_versions,
+        &.{ 2, 0x03, 0x04 },
+    );
+
+    var shares: std.ArrayList(u8) = .empty;
+    defer shares.deinit(allocator);
+    try appendInt(&shares, allocator, u16, 4 + 32);
+    try appendInt(&shares, allocator, u16, 0x001d);
+    try appendInt(&shares, allocator, u16, 32);
+    try shares.appendSlice(allocator, &options.x25519_public_key);
+    try appendExtension(
+        &extensions,
+        allocator,
+        ext_key_share,
+        shares.items,
+    );
+
+    var suites: std.ArrayList(u8) = .empty;
+    defer suites.deinit(allocator);
+    for (options.cipher_suites, 0..) |suite, index| {
+        for (options.cipher_suites[0..index]) |previous| {
+            if (suite == previous) return error.InvalidClientHello;
+        }
+        try appendInt(
+            &suites,
+            allocator,
+            u16,
+            suite.wireValue(),
+        );
+    }
+    if (suites.items.len > std.math.maxInt(u16) or
+        extensions.items.len > std.math.maxInt(u16))
+    {
+        return error.InvalidClientHello;
+    }
+
+    const body_len = 2 + 32 + 1 + options.session_id.len +
+        2 + suites.items.len + 2 + 2 + extensions.items.len;
+    if (body_len > std.math.maxInt(u24)) {
+        return error.InvalidClientHello;
+    }
+    try out.append(allocator, handshake_type_client_hello);
+    try appendU24(out, allocator, @intCast(body_len));
+    try appendInt(out, allocator, u16, 0x0303);
+    try out.appendSlice(allocator, &options.random);
+    try out.append(allocator, @intCast(options.session_id.len));
+    try out.appendSlice(allocator, options.session_id);
+    try appendInt(out, allocator, u16, suites.items.len);
+    try out.appendSlice(allocator, suites.items);
+    try out.appendSlice(allocator, &.{ 1, 0 });
+    try appendInt(out, allocator, u16, extensions.items.len);
+    try out.appendSlice(allocator, extensions.items);
+}
 
 pub const Parsed = struct {
     legacy_version: u16,
@@ -207,6 +383,71 @@ fn readSlice(bytes: []const u8, pos: *usize, len: usize) Error![]const u8 {
     if (end > bytes.len) return error.InvalidClientHello;
     defer pos.* = end;
     return bytes[pos.*..end];
+}
+
+fn appendExtension(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    typ: u16,
+    payload: []const u8,
+) std.mem.Allocator.Error!void {
+    try appendInt(out, allocator, u16, typ);
+    try appendInt(out, allocator, u16, payload.len);
+    try out.appendSlice(allocator, payload);
+}
+
+fn appendInt(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    comptime T: type,
+    value: anytype,
+) std.mem.Allocator.Error!void {
+    var bytes: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &bytes, @intCast(value), .big);
+    try out.appendSlice(allocator, &bytes);
+}
+
+fn appendU24(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    value: u24,
+) std.mem.Allocator.Error!void {
+    try out.appendSlice(allocator, &.{
+        @truncate(value >> 16),
+        @truncate(value >> 8),
+        @truncate(value),
+    });
+}
+
+test "stream ClientHello writer round-trips without QUIC extensions" {
+    const allocator = std.testing.allocator;
+    const public_key = [_]u8{0x44} ** 32;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try write(&encoded, allocator, .{
+        .random = [_]u8{0x33} ** 32,
+        .session_id = "session",
+        .server_name = "mqtt.example",
+        .x25519_public_key = public_key,
+        .cipher_suites = &.{
+            .aes_256_gcm_sha384,
+            .aes_128_gcm_sha256,
+        },
+    });
+    const parsed = try parse(encoded.items);
+    try std.testing.expect(parsed.offersTls13());
+    try std.testing.expectEqualStrings(
+        "mqtt.example",
+        parsed.server_name.?,
+    );
+    try std.testing.expectEqualStrings("session", parsed.session_id);
+    const share = (try parsed.keyShareForGroup(0x001d)).?;
+    try std.testing.expectEqualSlices(
+        u8,
+        &public_key,
+        share.key_exchange,
+    );
+    try std.testing.expect(parsed.quic_transport_parameters == null);
 }
 
 test "ClientHello parser extracts a minimal TLS 1.3 offer" {

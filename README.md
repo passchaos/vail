@@ -112,5 +112,12 @@ verifies required or optional client Certificate, CertificateVerify
 possession, trust policy, and Finished messages; stream/QUIC adapters remain
 responsible for record reassembly and alert policy.
 
+For the client role, `tls.client_hello.write` emits a stream-oriented TLS 1.3
+ClientHello without QUIC-only extensions, while
+`tls.client_handshake.verifyServerAndWriteClientFlight` verifies the server
+chain, CertificateVerify and Finished and builds an optional client-certificate
+response. Socket ownership and encrypted-record reassembly remain downstream
+transport concerns.
+
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.
