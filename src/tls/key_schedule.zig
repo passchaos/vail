@@ -314,3 +314,24 @@ pub fn deriveResumptionPskFor(
         )),
     };
 }
+
+/// Derive the next TLS 1.3 application traffic-secret generation.
+///
+/// RFC 8446 section 7.2 uses the same `traffic upd` label for every
+/// negotiated transcript hash. Keeping the runtime dispatch here prevents
+/// record transports from silently assuming the default SHA-256 schedule.
+pub fn nextTrafficSecretFor(
+    traffic_secret: secret.Secret,
+) Error!secret.Secret {
+    return switch (traffic_secret.hash) {
+        .sha256 => .fromSha256(Sha256.nextTrafficSecret(
+            try traffic_secret.sha256(),
+        )),
+        .sha384 => .fromSha384(Sha384.nextTrafficSecret(
+            try traffic_secret.sha384(),
+        )),
+        .sm3 => .fromSm3(Sm3.nextTrafficSecret(
+            try traffic_secret.sm3(),
+        )),
+    };
+}

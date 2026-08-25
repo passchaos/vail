@@ -912,6 +912,31 @@ test "TLS 1.3 exporter matches independently generated SHA-256 vector" {
     );
 }
 
+test "runtime TLS traffic updates preserve every negotiated hash" {
+    const cases = [_]struct {
+        hash: secret.Hash,
+        bytes: usize,
+    }{
+        .{ .hash = .sha256, .bytes = 32 },
+        .{ .hash = .sha384, .bytes = 48 },
+        .{ .hash = .sm3, .bytes = 32 },
+    };
+    for (cases) |case| {
+        var input: [secret.max_len]u8 = [_]u8{0x6d} ** secret.max_len;
+        var current = try secret.Secret.init(case.hash, input[0..case.bytes]);
+        defer current.deinit();
+        var updated = try key_schedule.nextTrafficSecretFor(current);
+        defer updated.deinit();
+        try std.testing.expectEqual(case.hash, updated.hash);
+        try std.testing.expectEqual(case.bytes, updated.bytes().len);
+        try std.testing.expect(!std.mem.eql(
+            u8,
+            current.bytes(),
+            updated.bytes(),
+        ));
+    }
+}
+
 test "TLS 1.3 SHA-384 schedule keeps 48-byte secrets and Finished values" {
     const Schedule = key_schedule.Sha384;
     const shared = [_]u8{0x81} ** Schedule.secret_len;

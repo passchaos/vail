@@ -20,7 +20,9 @@ The current foundation provides:
 - X.509 chain, hostname, validity, custom-bundle, and system-CA verification.
 - TLS 1.3 SHA-256 early, handshake, application, exporter, resumption, PSK
   binder, Finished, 0-RTT, and traffic-update key scheduling, including
-  allocation-free caller-buffer RFC 8446 exporter output.
+  allocation-free caller-buffer RFC 8446 exporter output; runtime traffic-
+  secret updates dispatch across SHA-256, SHA-384, and SM3 rather than assuming
+  the default suite.
 - X25519 plus constant-time secp256r1 and secp384r1 ECDH key exchange, with
   uncompressed SEC1 validation and incremental SHA-256/SHA-384 transcript
   hashing.
