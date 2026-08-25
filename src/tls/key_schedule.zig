@@ -322,7 +322,7 @@ pub fn deriveResumptionPskFor(
 /// record transports from silently assuming the default SHA-256 schedule.
 pub fn nextTrafficSecretFor(
     traffic_secret: secret.Secret,
-) Error!secret.Secret {
+) secret.Error!secret.Secret {
     return switch (traffic_secret.hash) {
         .sha256 => .fromSha256(Sha256.nextTrafficSecret(
             try traffic_secret.sha256(),
