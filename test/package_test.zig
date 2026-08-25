@@ -37,6 +37,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.tls, "client_handshake"));
     try std.testing.expect(@hasDecl(vail.tls, "client_hello"));
     try std.testing.expect(@hasDecl(vail.tls, "key_schedule"));
+    try std.testing.expect(@hasDecl(
+        vail.tls.key_schedule,
+        "deriveExporterMasterSecretFor",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.key_schedule,
+        "exportKeyingMaterialFor",
+    ));
     try std.testing.expect(@hasDecl(vail.tls, "key_exchange"));
     try std.testing.expect(@hasDecl(vail.tls, "psk"));
     try std.testing.expect(@hasDecl(vail.tls, "record"));

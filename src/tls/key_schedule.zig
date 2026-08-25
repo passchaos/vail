@@ -30,6 +30,9 @@ pub const computeFinished = Sha256.computeFinished;
 pub const verifyFinished = Sha256.verifyFinished;
 pub const deriveResumptionMasterSecret =
     Sha256.deriveResumptionMasterSecret;
+pub const deriveExporterMasterSecret =
+    Sha256.deriveExporterMasterSecret;
+pub const exportKeyingMaterial = Sha256.exportKeyingMaterial;
 pub const deriveResumptionPsk = Sha256.deriveResumptionPsk;
 pub const nextTrafficSecret = Sha256.nextTrafficSecret;
 
@@ -61,6 +64,7 @@ pub const RuntimeApplicationSecrets = struct {
 pub const Error = secret.Error || error{
     HashMismatch,
     BadFinished,
+    InvalidExporterInput,
 };
 
 pub fn deriveHandshakeFor(
@@ -237,6 +241,57 @@ pub fn deriveResumptionMasterSecretFor(
             try master_secret.sm3(),
             try transcript_hash.sm3(),
         )),
+    };
+}
+
+pub fn deriveExporterMasterSecretFor(
+    master_secret: secret.Secret,
+    transcript_hash: transcript.Digest,
+) Error!secret.Secret {
+    if (master_secret.hash != transcript_hash.hash) {
+        return error.HashMismatch;
+    }
+    return switch (master_secret.hash) {
+        .sha256 => .fromSha256(Sha256.deriveExporterMasterSecret(
+            try master_secret.sha256(),
+            try transcript_hash.sha256(),
+        )),
+        .sha384 => .fromSha384(Sha384.deriveExporterMasterSecret(
+            try master_secret.sha384(),
+            try transcript_hash.sha384(),
+        )),
+        .sm3 => .fromSm3(Sm3.deriveExporterMasterSecret(
+            try master_secret.sm3(),
+            try transcript_hash.sm3(),
+        )),
+    };
+}
+
+pub fn exportKeyingMaterialFor(
+    exporter_master_secret: secret.Secret,
+    label: []const u8,
+    context: []const u8,
+    out: []u8,
+) Error!void {
+    return switch (exporter_master_secret.hash) {
+        .sha256 => Sha256.exportKeyingMaterial(
+            try exporter_master_secret.sha256(),
+            label,
+            context,
+            out,
+        ),
+        .sha384 => Sha384.exportKeyingMaterial(
+            try exporter_master_secret.sha384(),
+            label,
+            context,
+            out,
+        ),
+        .sm3 => Sm3.exportKeyingMaterial(
+            try exporter_master_secret.sm3(),
+            label,
+            context,
+            out,
+        ),
     };
 }
 

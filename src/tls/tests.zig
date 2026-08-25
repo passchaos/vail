@@ -828,6 +828,42 @@ test "TLS 1.3 key schedule separates handshake application and PSK secrets" {
         application.master_secret,
         transcript_hash,
     );
+    const exporter_master = key_schedule.deriveExporterMasterSecret(
+        application.master_secret,
+        transcript_hash,
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &exporter_master,
+        &resumption_master,
+    ));
+    var exported_a: [42]u8 = undefined;
+    var exported_b: [42]u8 = undefined;
+    var exported_other_context: [42]u8 = undefined;
+    try key_schedule.exportKeyingMaterial(
+        exporter_master,
+        "EXPORTER-vail-test",
+        "context",
+        &exported_a,
+    );
+    try key_schedule.exportKeyingMaterial(
+        exporter_master,
+        "EXPORTER-vail-test",
+        "context",
+        &exported_b,
+    );
+    try key_schedule.exportKeyingMaterial(
+        exporter_master,
+        "EXPORTER-vail-test",
+        "other",
+        &exported_other_context,
+    );
+    try std.testing.expectEqualSlices(u8, &exported_a, &exported_b);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &exported_a,
+        &exported_other_context,
+    ));
     const first_psk = key_schedule.deriveResumptionPsk(
         resumption_master,
         "one",
@@ -845,6 +881,35 @@ test "TLS 1.3 key schedule separates handshake application and PSK secrets" {
         &updated,
         &application.client_traffic_secret,
     ));
+}
+
+test "TLS 1.3 exporter matches independently generated SHA-256 vector" {
+    const master_secret = [_]u8{0x44} ** key_schedule.secret_len;
+    var transcript_hash: [key_schedule.secret_len]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(
+        "transcript",
+        &transcript_hash,
+        .{},
+    );
+    const exporter_master = key_schedule.deriveExporterMasterSecret(
+        master_secret,
+        transcript_hash,
+    );
+    try expectHex(
+        "b1be727372802b8b8a02865283a50fe3ca6e1a7222ef5d3f15d077504e7ebcb2",
+        &exporter_master,
+    );
+    var exported: [42]u8 = undefined;
+    try key_schedule.exportKeyingMaterial(
+        exporter_master,
+        "EXPORTER-test",
+        "context",
+        &exported,
+    );
+    try expectHex(
+        "6ec16a5753eb19eff8d2f0440d0f6e02d83ea71e06b46d14c27ba8de2653da7a936a454c88c8f5e1840d",
+        &exported,
+    );
 }
 
 test "TLS 1.3 SHA-384 schedule keeps 48-byte secrets and Finished values" {
@@ -928,6 +993,18 @@ test "runtime TLS key schedule dispatch preserves SHA-384 secret identity" {
         handshake.handshake_secret,
         application_hash,
     );
+    const exporter_master = try key_schedule.deriveExporterMasterSecretFor(
+        application.master_secret,
+        application_hash,
+    );
+    var exported: [80]u8 = undefined;
+    try key_schedule.exportKeyingMaterialFor(
+        exporter_master,
+        "EXPORTER-runtime-test",
+        "sha384",
+        &exported,
+    );
+    try std.testing.expect(!std.mem.allEqual(u8, &exported, 0));
     const finished = try key_schedule.computeFinishedFor(
         application.client_traffic_secret,
         application_hash,

@@ -18,8 +18,9 @@ The current foundation provides:
 - type-safe server identities and pinned-key client verification;
 - CertificateRequest codec and mTLS policy types;
 - X.509 chain, hostname, validity, custom-bundle, and system-CA verification.
-- TLS 1.3 SHA-256 early, handshake, application, resumption, PSK binder,
-  Finished, 0-RTT, and traffic-update key scheduling.
+- TLS 1.3 SHA-256 early, handshake, application, exporter, resumption, PSK
+  binder, Finished, 0-RTT, and traffic-update key scheduling, including
+  allocation-free caller-buffer RFC 8446 exporter output.
 - X25519 plus constant-time secp256r1 and secp384r1 ECDH key exchange, with
   uncompressed SEC1 validation and incremental SHA-256/SHA-384 transcript
   hashing.
@@ -40,7 +41,7 @@ The current foundation provides:
   suite confidentiality/integrity limits.
 - Compile-time-specialized SHA-256/SHA-384 TLS 1.3 schedules, runtime
   hash-bound secrets/transcripts, 32/48-byte PSK binders, CertificateVerify,
-  Finished, resumption PSKs, and stateless tickets.
+  Finished, exporter keying material, resumption PSKs, and stateless tickets.
 - Canonical TLS 1.3 cipher-suite identities and validated client/server
   preference selection, with stateless tickets bound to their issuing suite.
 - QUIC transport-parameter TLS extension plumbing: ClientHello extraction,

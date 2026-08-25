@@ -167,6 +167,63 @@ pub fn Schedule(comptime Hash: type) type {
             );
         }
 
+        /// Derive the TLS 1.3 exporter master secret from the transcript
+        /// through the peer Finished message (RFC 8446 section 7.1).
+        pub fn deriveExporterMasterSecret(
+            master_secret: [secret_len]u8,
+            transcript_hash: [secret_len]u8,
+        ) [secret_len]u8 {
+            return deriveSecret(
+                master_secret,
+                "exp master",
+                &transcript_hash,
+            );
+        }
+
+        /// Export application keying material as specified by RFC 8446
+        /// section 7.5. The caller supplies the already-derived exporter
+        /// master secret so no transcript or traffic-secret state is needed.
+        pub fn exportKeyingMaterial(
+            exporter_master_secret: [secret_len]u8,
+            label: []const u8,
+            context: []const u8,
+            out: []u8,
+        ) error{InvalidExporterInput}!void {
+            // HKDF-Expand-Label prepends "tls13 " to the caller's label; its
+            // one-byte vector length therefore limits the caller portion to
+            // 249 bytes. The context itself is hashed before encoding.
+            if (label.len > 249 or
+                out.len > std.math.maxInt(u16) or
+                out.len > secret_len * 255)
+            {
+                return error.InvalidExporterInput;
+            }
+            var context_hash: [secret_len]u8 = undefined;
+            Hash.hash(context, &context_hash, .{});
+            const empty_hash = std.crypto.tls.emptyHash(Hash);
+            var derived_secret = deriveSecret(
+                exporter_master_secret,
+                label,
+                &empty_hash,
+            );
+            defer std.crypto.secureZero(u8, &derived_secret);
+            // The standard helper requires a comptime output length. Build its
+            // RFC 8446 HkdfLabel here for caller-sized output without allocation.
+            var info: [2 + 1 + 6 + 249 + 1 + 255]u8 = undefined;
+            std.mem.writeInt(u16, info[0..2], @intCast(out.len), .big);
+            info[2] = 14;
+            @memcpy(info[3..9], "tls13 ");
+            @memcpy(info[9..17], "exporter");
+            var offset: usize = 17;
+            info[offset] = @intCast(context_hash.len);
+            offset += 1;
+            @memcpy(info[offset..][0..context_hash.len], &context_hash);
+            offset += context_hash.len;
+            Hkdf.expand(out, info[0..offset], derived_secret);
+            std.crypto.secureZero(u8, &context_hash);
+            std.crypto.secureZero(u8, &info);
+        }
+
         pub fn deriveResumptionPsk(
             resumption_master_secret: [secret_len]u8,
             ticket_nonce: []const u8,
