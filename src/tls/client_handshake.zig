@@ -44,15 +44,24 @@ pub const Options = struct {
 };
 
 pub const Result = struct {
+    allocator: std.mem.Allocator,
     application: key_schedule.RuntimeApplicationSecrets,
     transcript_after_server_finished: transcript.Digest,
     transcript_after_client_finished: transcript.Digest,
     selected_alpn: ?[]const u8,
+    /// Deep-owned authenticated server certificate chain. Verification runs
+    /// against the parser's borrowed views first; copies are retained only
+    /// after trust, CertificateVerify, and Finished all succeed.
+    peer_certificate_chain: [][]const u8,
 
     pub fn deinit(self: *Result) void {
         self.application.master_secret.deinit();
         self.application.client_traffic_secret.deinit();
         self.application.server_traffic_secret.deinit();
+        for (self.peer_certificate_chain) |certificate| {
+            self.allocator.free(certificate);
+        }
+        self.allocator.free(self.peer_certificate_chain);
         self.* = undefined;
     }
 };
@@ -123,6 +132,11 @@ pub fn verifyServerAndWriteClientFlight(
     }
     state.update(flight.finished);
     const transcript_after_server_finished = state.digest();
+    const peer_certificate_chain = try copyCertificateChain(
+        allocator,
+        certificate.entries,
+    );
+    errdefer freeCertificateChain(allocator, peer_certificate_chain);
 
     var application = try key_schedule.deriveApplicationFor(
         options.handshake_secret,
@@ -175,11 +189,38 @@ pub fn verifyServerAndWriteClientFlight(
     state.update(out.items[finished_start..]);
 
     return .{
+        .allocator = allocator,
         .application = application,
         .transcript_after_server_finished = transcript_after_server_finished,
         .transcript_after_client_finished = state.digest(),
         .selected_alpn = encrypted_extensions.alpn_protocol,
+        .peer_certificate_chain = peer_certificate_chain,
     };
+}
+
+fn copyCertificateChain(
+    allocator: std.mem.Allocator,
+    certificates: []const []const u8,
+) std.mem.Allocator.Error![][]const u8 {
+    const copies = try allocator.alloc([]const u8, certificates.len);
+    var copied: usize = 0;
+    errdefer {
+        for (copies[0..copied]) |certificate| allocator.free(certificate);
+        allocator.free(copies);
+    }
+    for (certificates, 0..) |certificate, index| {
+        copies[index] = try allocator.dupe(u8, certificate);
+        copied += 1;
+    }
+    return copies;
+}
+
+fn freeCertificateChain(
+    allocator: std.mem.Allocator,
+    certificates: [][]const u8,
+) void {
+    for (certificates) |certificate| allocator.free(certificate);
+    allocator.free(certificates);
 }
 
 pub fn splitServerFlight(bytes: []const u8) Error!ServerFlight {
