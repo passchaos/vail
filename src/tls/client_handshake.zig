@@ -471,6 +471,18 @@ test "authenticated client handshake verifies server and writes identity" {
         },
     );
     defer result.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        result.peer_certificate_chain.len,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &server_public,
+        result.peer_certificate_chain[0],
+    );
+    try std.testing.expect(
+        result.peer_certificate_chain[0].ptr != server_public[0..].ptr,
+    );
     const certificate_len = try handshakeMessageLength(
         client_flight.items,
     );

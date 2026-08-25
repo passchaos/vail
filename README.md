@@ -117,8 +117,10 @@ For the client role, `tls.client_hello.write` emits a stream-oriented TLS 1.3
 ClientHello without QUIC-only extensions, while
 `tls.client_handshake.verifyServerAndWriteClientFlight` verifies the server
 chain, CertificateVerify and Finished and builds an optional client-certificate
-response. Socket ownership and encrypted-record reassembly remain downstream
-transport concerns.
+response. Its result deep-owns the authenticated server certificate chain so a
+downstream transport can preserve peer identity after releasing its encrypted
+handshake buffer. Socket ownership and encrypted-record reassembly remain
+downstream transport concerns.
 
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.
