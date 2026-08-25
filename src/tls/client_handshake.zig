@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const auth = @import("auth.zig");
+const cipher_suite = @import("cipher_suite.zig");
 const client_auth = @import("client_auth.zig");
 const key_schedule = @import("key_schedule.zig");
 const secret = @import("secret.zig");
@@ -45,6 +46,10 @@ pub const Options = struct {
 
 pub const Result = struct {
     allocator: std.mem.Allocator,
+    /// Cipher suite authenticated by the complete TLS 1.3 server flight.
+    /// Keeping it with the established secrets lets transports report the
+    /// negotiated AEAD and transcript hash after handshake buffers are gone.
+    cipher_suite: cipher_suite.Suite,
     application: key_schedule.RuntimeApplicationSecrets,
     transcript_after_server_finished: transcript.Digest,
     transcript_after_client_finished: transcript.Digest,
@@ -190,6 +195,7 @@ pub fn verifyServerAndWriteClientFlight(
 
     return .{
         .allocator = allocator,
+        .cipher_suite = parsed_server_hello.cipher_suite,
         .application = application,
         .transcript_after_server_finished = transcript_after_server_finished,
         .transcript_after_client_finished = state.digest(),
@@ -471,6 +477,8 @@ test "authenticated client handshake verifies server and writes identity" {
         },
     );
     defer result.deinit();
+    try std.testing.expectEqual(suite, result.cipher_suite);
+    try std.testing.expectEqual(suite.hash(), result.cipher_suite.hash());
     try std.testing.expectEqual(
         @as(usize, 1),
         result.peer_certificate_chain.len,

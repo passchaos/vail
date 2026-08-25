@@ -119,8 +119,10 @@ ClientHello without QUIC-only extensions, while
 chain, CertificateVerify and Finished and builds an optional client-certificate
 response. Its result deep-owns the authenticated server certificate chain so a
 downstream transport can preserve peer identity after releasing its encrypted
-handshake buffer. Socket ownership and encrypted-record reassembly remain
-downstream transport concerns.
+handshake buffer. The same result retains the authenticated negotiated cipher
+suite, allowing a transport to expose both its AEAD choice and transcript hash
+without reparsing released ServerHello bytes. Socket ownership and encrypted-
+record reassembly remain downstream transport concerns.
 
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.
