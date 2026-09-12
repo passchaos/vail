@@ -94,6 +94,129 @@ test "ECDSA P256 CertificateVerify round-trip" {
     );
     const parsed = try auth.parseCertificateVerify(verify.items);
     try auth.verifyCertificateVerify(&public_key, parsed, &transcript_hash);
+    var wrong_hash = transcript_hash;
+    wrong_hash[0] ^= 1;
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        auth.verifyCertificateVerify(&public_key, parsed, &wrong_hash),
+    );
+}
+
+test "ECDSA P256 CertificateVerify matches the standard verifier" {
+    const allocator = std.testing.allocator;
+    for (0..32) |index| {
+        var seed = [_]u8{0x43} ** EcdsaP256Sha256.KeyPair.seed_length;
+        std.mem.writeInt(u64, seed[0..8], index + 1, .little);
+        const key_pair = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+        const public_key = key_pair.public_key.toUncompressedSec1();
+        var transcript_hash = [_]u8{0x34} ** 32;
+        std.mem.writeInt(u64, transcript_hash[0..8], index + 1, .little);
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try auth.writeCertificateVerify(
+            &encoded,
+            allocator,
+            .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            &transcript_hash,
+        );
+        const parsed = try auth.parseCertificateVerify(encoded.items);
+        try auth.verifyCertificateVerify(
+            &public_key,
+            parsed,
+            &transcript_hash,
+        );
+
+        const signature = try EcdsaP256Sha256.Signature.fromDer(
+            parsed.signature,
+        );
+        var message: [
+            64 + "TLS 1.3, server CertificateVerify".len + 1 +
+                transcript_hash.len
+        ]u8 = undefined;
+        @memset(message[0..64], 0x20);
+        @memcpy(
+            message[64..][0.."TLS 1.3, server CertificateVerify".len],
+            "TLS 1.3, server CertificateVerify",
+        );
+        message[64 + "TLS 1.3, server CertificateVerify".len] = 0;
+        @memcpy(message[message.len - transcript_hash.len ..], &transcript_hash);
+        try signature.verify(
+            &message,
+            try EcdsaP256Sha256.PublicKey.fromSec1(&public_key),
+        );
+
+        transcript_hash[31] ^= 1;
+        try std.testing.expectError(
+            error.BadCertificateVerify,
+            auth.verifyCertificateVerify(
+                &public_key,
+                parsed,
+                &transcript_hash,
+            ),
+        );
+    }
+}
+
+test "ECDSA P256 CertificateVerify rejects invalid scalars" {
+    const key_pair = try EcdsaP256Sha256.KeyPair.generateDeterministic(
+        [_]u8{0x45} ** EcdsaP256Sha256.KeyPair.seed_length,
+    );
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const transcript_hash = [_]u8{0x36} ** 32;
+    const zero_r = [_]u8{
+        0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0x01, 0x01,
+    };
+    const non_canonical_r = [_]u8{
+        0x30, 0x26, 0x02, 0x21, 0x00,
+    } ++ ([_]u8{0xff} ** 32) ++ [_]u8{ 0x02, 0x01, 0x01 };
+
+    inline for (.{ zero_r, non_canonical_r }) |signature| {
+        try std.testing.expectError(
+            error.BadCertificateVerify,
+            auth.verifyCertificateVerify(
+                &public_key,
+                .{
+                    .scheme = auth.signature_scheme_ecdsa_secp256r1_sha256,
+                    .signature = &signature,
+                },
+                &transcript_hash,
+            ),
+        );
+    }
+}
+
+test "ECDSA P256 client CertificateVerify uses the client context" {
+    const allocator = std.testing.allocator;
+    const key_pair = try EcdsaP256Sha256.KeyPair.generateDeterministic(
+        [_]u8{0x46} ** EcdsaP256Sha256.KeyPair.seed_length,
+    );
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const transcript_hash = [_]u8{0x37} ** 32;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try auth.writeCertificateVerifyForRole(
+        &encoded,
+        allocator,
+        .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        &transcript_hash,
+        .client,
+    );
+    const parsed = try auth.parseCertificateVerify(encoded.items);
+    try auth.verifyCertificateVerifyForRole(
+        &public_key,
+        parsed,
+        &transcript_hash,
+        .client,
+    );
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        auth.verifyCertificateVerifyForRole(
+            &public_key,
+            parsed,
+            &transcript_hash,
+            .server,
+        ),
+    );
 }
 
 test "ECDSA P384 CertificateVerify round-trip and pin" {

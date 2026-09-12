@@ -598,10 +598,12 @@ pub fn verifyCertificateVerifyForRole(
             const signature = EcdsaP256Sha256.Signature.fromDer(
                 parsed.signature,
             ) catch return error.InvalidCertificateVerify;
-            var verifier = signature.verifier(public_key) catch
-                return error.BadCertificateVerify;
-            updateCertificateVerifyInput(&verifier, transcript_hash, role);
-            verifier.verify() catch return error.BadCertificateVerify;
+            verifyP256CertificateVerify(
+                signature,
+                public_key,
+                transcript_hash,
+                role,
+            ) catch return error.BadCertificateVerify;
         },
         signature_scheme_ecdsa_secp384r1_sha384 => {
             const public_key_bytes =
@@ -767,6 +769,49 @@ fn updateCertificateVerifyInput(
     verifier.update(certificateVerifyContext(role));
     verifier.update(&.{0});
     verifier.update(transcript_hash);
+}
+
+fn verifyP256CertificateVerify(
+    signature: EcdsaP256Sha256.Signature,
+    public_key: EcdsaP256Sha256.PublicKey,
+    transcript_hash: []const u8,
+    role: EndpointRole,
+) !void {
+    const P256 = std.crypto.ecc.P256;
+    const Scalar = P256.scalar.Scalar;
+
+    const r = try Scalar.fromBytes(signature.r, .big);
+    const s = try Scalar.fromBytes(signature.s, .big);
+    if (r.isZero() or s.isZero()) return error.IdentityElement;
+
+    var hasher = Sha256.init(.{});
+    updateCertificateVerifyInput(&hasher, transcript_hash, role);
+    var digest: [Sha256.digest_length]u8 = undefined;
+    hasher.final(&digest);
+    const z = scalarFromDigest(digest);
+    if (z.isZero()) return error.SignatureVerificationFailed;
+
+    const s_inv = s.invert();
+    const v1 = z.mul(s_inv).toBytes(.little);
+    const v2 = r.mul(s_inv).toBytes(.little);
+    const point = try P256.mulDoubleBasePublic(
+        P256.basePoint,
+        v1,
+        public_key.p,
+        v2,
+        .little,
+    );
+    const x = point.affineCoordinates().x.toBytes(.big);
+    if (!r.equivalent(scalarFromDigest(x))) {
+        return error.SignatureVerificationFailed;
+    }
+}
+
+fn scalarFromDigest(bytes: [32]u8) std.crypto.ecc.P256.scalar.Scalar {
+    return std.crypto.ecc.P256.scalar.Scalar.fromBytes48(
+        [_]u8{0} ** 16 ++ bytes,
+        .big,
+    );
 }
 
 fn certificateVerifyContext(role: EndpointRole) []const u8 {

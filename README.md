@@ -14,10 +14,19 @@ The current foundation provides:
   AEAD record-protection codecs;
 - Ed25519, ECDSA P-256, ECDSA P-384, and SM2/SM3 verifier
   implementations, plus RSA-PSS/RSAE SHA-256 X.509 CertificateVerify and DER
-  RSAPublicKey pin verification;
+  RSAPublicKey pin verification. TLS P-256 verification uses the curve's public
+  double-scalar primitive for the ECDSA verification equation, with
+  deterministic equivalence and malformed-scalar tests against Zig's generic
+  verifier;
 - type-safe server identities and pinned-key client verification;
 - CertificateRequest codec and mTLS policy types;
 - X.509 chain, hostname, validity, custom-bundle, and system-CA verification.
+  An exact certificate or cross-signed form with the same Subject and complete
+  SubjectPublicKeyInfo is recognized as a configured trust anchor without
+  verifying the anchor's issuer signature. Hostname and validity remain
+  mandatory; leaves enforce optional digitalSignature/serverAuth usage, and
+  presented intermediates require CA=true, optional keyCertSign, pathLen, and
+  supported critical extensions;
 - TLS 1.3 SHA-256 early, handshake, application, exporter, resumption, PSK
   binder, Finished, 0-RTT, and traffic-update key scheduling, including
   allocation-free caller-buffer RFC 8446 exporter output; runtime traffic-
