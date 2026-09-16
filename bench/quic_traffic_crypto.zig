@@ -5,6 +5,10 @@ const traffic = vail.quic.traffic_crypto;
 const iterations: usize = 200_000;
 
 pub fn main(init: std.process.Init) !void {
+    std.debug.print(
+        "prepared key bytes: {d}\n",
+        .{@sizeOf(traffic.PreparedKeys)},
+    );
     const secret = [_]u8{0x42} ** traffic.secret_len;
     const plaintext = [_]u8{0x51} ** 1200;
     const aad = "quic short header";

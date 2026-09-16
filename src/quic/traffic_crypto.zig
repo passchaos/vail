@@ -434,8 +434,7 @@ pub fn nextTrafficSecret(
 
 pub const PreparedKeys = struct {
     keys: Keys,
-    aes_128_gcm: ?backend.AesGcmContext = null,
-    aes_256_gcm: ?backend.AesGcmContext = null,
+    aes_gcm: ?backend.AesGcmContext = null,
 
     /// Prepare packet-protection state for repeated operations with one key.
     /// In AWS-LC linked builds this caches EVP_AEAD_CTX precomputation so the
@@ -444,23 +443,22 @@ pub const PreparedKeys = struct {
     pub fn init(keys: Keys) PreparedKeys {
         return .{
             .keys = keys,
-            .aes_128_gcm = if (keys.suite == .aes_128_gcm_sha256)
-                backend.AesGcmContext.init(
+            .aes_gcm = switch (keys.suite) {
+                .aes_128_gcm_sha256 => backend.AesGcmContext.init(
                     .aes_128_gcm,
                     keys.key[0..Aes128Gcm.key_length],
-                )
-            else
-                null,
-            .aes_256_gcm = if (keys.suite == .aes_256_gcm_sha384)
-                backend.AesGcmContext.init(.aes_256_gcm, &keys.key)
-            else
-                null,
+                ),
+                .aes_256_gcm_sha384 => backend.AesGcmContext.init(
+                    .aes_256_gcm,
+                    &keys.key,
+                ),
+                else => null,
+            },
         };
     }
 
     pub fn deinit(self: *PreparedKeys) void {
-        if (self.aes_128_gcm) |*ctx| ctx.deinit();
-        if (self.aes_256_gcm) |*ctx| ctx.deinit();
+        if (self.aes_gcm) |*ctx| ctx.deinit();
         self.* = undefined;
     }
 
@@ -477,12 +475,7 @@ pub const PreparedKeys = struct {
         }
         const nonce = packetNonce(self.keys.iv, packet_number);
         switch (self.keys.suite) {
-            .aes_128_gcm_sha256 => if (self.aes_128_gcm) |*ctx| {
-                if (ctx.seal(&nonce, associated_data, plaintext, ciphertext, tag)) {
-                    return;
-                }
-            },
-            .aes_256_gcm_sha384 => if (self.aes_256_gcm) |*ctx| {
+            .aes_128_gcm_sha256, .aes_256_gcm_sha384 => if (self.aes_gcm) |*ctx| {
                 if (ctx.seal(&nonce, associated_data, plaintext, ciphertext, tag)) {
                     return;
                 }
@@ -512,13 +505,7 @@ pub const PreparedKeys = struct {
         }
         const nonce = packetNonce(self.keys.iv, packet_number);
         switch (self.keys.suite) {
-            .aes_128_gcm_sha256 => if (self.aes_128_gcm) |*ctx| {
-                if (ctx.open(&nonce, associated_data, ciphertext, &tag, plaintext)) {
-                    return;
-                }
-                return error.AuthenticationFailed;
-            },
-            .aes_256_gcm_sha384 => if (self.aes_256_gcm) |*ctx| {
+            .aes_128_gcm_sha256, .aes_256_gcm_sha384 => if (self.aes_gcm) |*ctx| {
                 if (ctx.open(&nonce, associated_data, ciphertext, &tag, plaintext)) {
                     return;
                 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const backend = @import("../crypto/backend.zig");
 const initial = @import("initial.zig");
 const retry = @import("retry.zig");
 const key_schedule = @import("../tls/key_schedule.zig");
@@ -216,6 +217,55 @@ test "AES and ChaCha traffic suites round-trip without allocation" {
             keys.open(7, "header", &ciphertext, bad_tag, &opened),
         );
     }
+}
+
+test "prepared QUIC traffic keys match value-key suites" {
+    const plaintext = "prepared Vail QUIC traffic";
+    const aad = "header";
+    inline for (.{
+        traffic.Suite.aes_128_gcm_sha256,
+        traffic.Suite.aes_256_gcm_sha384,
+        traffic.Suite.chacha20_poly1305_sha256,
+        traffic.Suite.sm4_gcm_sm3,
+    }) |suite| {
+        const secret: tls_secret.Secret = switch (suite.hash()) {
+            .sha256 => .fromSha256([_]u8{0x61} ** 32),
+            .sha384 => .fromSha384([_]u8{0x62} ** 48),
+            .sm3 => .fromSm3([_]u8{0x63} ** 32),
+        };
+        const keys = try traffic.Keys.deriveChecked(suite, secret, .{});
+        var prepared = traffic.PreparedKeys.init(keys);
+        defer prepared.deinit();
+
+        var expected_ciphertext: [plaintext.len]u8 = undefined;
+        var expected_tag: [traffic.tag_len]u8 = undefined;
+        try keys.protect(23, aad, plaintext, &expected_ciphertext, &expected_tag);
+        var actual_ciphertext: [plaintext.len]u8 = undefined;
+        var actual_tag: [traffic.tag_len]u8 = undefined;
+        try prepared.protect(23, aad, plaintext, &actual_ciphertext, &actual_tag);
+        try std.testing.expectEqualSlices(
+            u8,
+            &expected_ciphertext,
+            &actual_ciphertext,
+        );
+        try std.testing.expectEqualSlices(u8, &expected_tag, &actual_tag);
+
+        var opened: [plaintext.len]u8 = undefined;
+        try prepared.open(23, aad, &actual_ciphertext, actual_tag, &opened);
+        try std.testing.expectEqualStrings(plaintext, &opened);
+    }
+}
+
+test "prepared QUIC traffic keys store one AES context" {
+    if (!backend.aws_lc_linked) return error.SkipZigTest;
+    const LegacyPreparedKeys = struct {
+        keys: traffic.Keys,
+        aes_128_gcm: ?backend.AesGcmContext = null,
+        aes_256_gcm: ?backend.AesGcmContext = null,
+    };
+    try std.testing.expect(
+        @sizeOf(traffic.PreparedKeys) < @sizeOf(LegacyPreparedKeys),
+    );
 }
 
 test "ChaCha header protection follows RFC 9001 sample layout" {

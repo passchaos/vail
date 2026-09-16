@@ -103,6 +103,17 @@ open+seal on both AES suites in this run, while AES-256 seal alone is comparable
 ChaCha20-Poly1305 and the legacy standalone AES-256 SHA-384 helper remain
 reported as controls.
 
+Prepared QUIC keys now retain one optional AES-GCM backend context selected by
+the negotiated suite instead of separate mutually exclusive AES-128 and
+AES-256 slots. On the linked BoringSSL-compatible backend used above,
+`PreparedKeys` shrank from 1,344 to 752 bytes (44.0%). Default and linked test
+suites verify prepared/value-key equivalence for AES-128, AES-256, ChaCha20,
+and SM4. Seven fixed-binary, alternating-order 200,000-operation pairs were
+timing-neutral: AES-128 seal/open+seal medians moved from 651/1,205 to
+652/1,206 ns, while unified AES-256 moved from 672/1,331 to 672/1,329 ns.
+The retained result is the deterministic state-size reduction, not a speed
+claim.
+
 ClientHello interop checks are available with `zig build interop-openssl-clienthello`
 and `zig build interop-rustls-clienthello`; both feed real OpenSSL/rustls
 ClientHello wire bytes into Vail's parser and verify TLS 1.3, SNI, cipher-suite,
