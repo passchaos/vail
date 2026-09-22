@@ -93,6 +93,23 @@ pub const ClientCertificateBundleVerifier = struct {
 
 const EndpointPurpose = enum { server_auth, client_auth };
 
+/// Validate one DER certificate as a currently usable trust anchor for TLS
+/// client authentication. This checks X.509 parsing, validity, CA constraints,
+/// keyCertSign, clientAuth EKU restrictions, and supported critical
+/// extensions; it deliberately does not verify the anchor's issuer signature.
+pub fn validateClientCertificateAuthority(
+    certificate_der: []const u8,
+    now_seconds: i64,
+) !void {
+    const certificate = try parseCertificate(certificate_der);
+    try verifyValidity(certificate, now_seconds);
+    try validateIssuerUsage(
+        certificate_der,
+        0,
+        .client_auth,
+    );
+}
+
 fn verifyChain(
     bundle: *const Certificate.Bundle,
     now_seconds: i64,

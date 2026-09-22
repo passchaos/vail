@@ -54,6 +54,27 @@ test "client certificate bundle verifier validates trust without hostname" {
     );
 }
 
+test "client certificate trust anchors validate before listener setup" {
+    const ca_der = @embedFile("testdata/ca.der");
+    const leaf_der = @embedFile("testdata/server.der");
+    try trust.validateClientCertificateAuthority(ca_der, 1_900_000_000);
+    try std.testing.expectError(
+        error.InvalidCertificateUsage,
+        trust.validateClientCertificateAuthority(
+            leaf_der,
+            1_900_000_000,
+        ),
+    );
+    try std.testing.expectError(
+        error.CertificateNotYetValid,
+        trust.validateClientCertificateAuthority(ca_der, 1),
+    );
+    try std.testing.expectError(
+        error.CertificateExpired,
+        trust.validateClientCertificateAuthority(ca_der, 3_000_000_000),
+    );
+}
+
 test "bundle verifier treats the same certificate key as a trust anchor" {
     const server_der = @embedFile("testdata/server.der");
     var configured_anchor = server_der.*;
