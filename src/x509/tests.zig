@@ -242,6 +242,7 @@ test "bundle verifier enforces leaf and issuer certificate usage" {
     try std.testing.expect(ca.is_ca);
     try std.testing.expect(ca.key_usage_present);
     try std.testing.expect(ca.key_cert_sign);
+    try std.testing.expect(ca.crl_sign);
     try trust.testing.validateIssuerUsage(ca, 0);
 
     const leaf = try trust.testing.certificateUsage(server_der);
@@ -458,11 +459,13 @@ test "bundle verifier parses basic constraints and key usage strictly" {
     );
     try std.testing.expect(digital_signature.digital_signature);
     try std.testing.expect(!digital_signature.key_cert_sign);
+    try std.testing.expect(!digital_signature.crl_sign);
     const key_cert_sign = try trust.testing.parseKeyUsage(
         &.{ 0x03, 0x02, 0x02, 0x04 },
     );
     try std.testing.expect(!key_cert_sign.digital_signature);
     try std.testing.expect(key_cert_sign.key_cert_sign);
+    try std.testing.expect(!key_cert_sign.crl_sign);
 }
 
 test "bundle verifier path length skips self-issued intermediates" {

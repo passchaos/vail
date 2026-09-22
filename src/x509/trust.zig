@@ -110,6 +110,22 @@ pub fn validateClientCertificateAuthority(
     );
 }
 
+/// Validate a DER certificate as an issuer for a client-authentication CRL.
+/// When KeyUsage is present, cRLSign is mandatory in addition to the ordinary
+/// CA/path/purpose constraints.
+pub fn validateClientCertificateRevocationListIssuer(
+    certificate_der: []const u8,
+    now_seconds: i64,
+) !void {
+    const certificate = try parseCertificate(certificate_der);
+    try verifyValidity(certificate, now_seconds);
+    const usage = try certificateUsage(certificate_der);
+    try validateIssuerUsageProfile(usage, 0, .client_auth);
+    if (usage.key_usage_present and !usage.crl_sign) {
+        return error.InvalidCertificateUsage;
+    }
+}
+
 fn verifyChain(
     bundle: *const Certificate.Bundle,
     now_seconds: i64,
@@ -240,6 +256,7 @@ const CertificateUsage = struct {
     key_usage_present: bool = false,
     digital_signature: bool = false,
     key_cert_sign: bool = false,
+    crl_sign: bool = false,
     extended_key_usage_present: bool = false,
     server_auth: bool = false,
     client_auth: bool = false,
@@ -371,6 +388,7 @@ fn certificateUsage(certificate_der: []const u8) !CertificateUsage {
             const key_usage = try parseKeyUsage(value.value);
             result.digital_signature = key_usage.digital_signature;
             result.key_cert_sign = key_usage.key_cert_sign;
+            result.crl_sign = key_usage.crl_sign;
         } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x25 })) {
             if (result.extended_key_usage_present) {
                 return error.InvalidCertificateExtension;
@@ -460,6 +478,7 @@ fn parseBasicConstraints(encoded: []const u8) !BasicConstraints {
 const KeyUsage = struct {
     digital_signature: bool,
     key_cert_sign: bool,
+    crl_sign: bool,
 };
 
 fn parseKeyUsage(encoded: []const u8) !KeyUsage {
@@ -489,6 +508,7 @@ fn parseKeyUsage(encoded: []const u8) !KeyUsage {
     return .{
         .digital_signature = (bits.value[1] & 0x80) != 0,
         .key_cert_sign = (bits.value[1] & 0x04) != 0,
+        .crl_sign = (bits.value[1] & 0x02) != 0,
     };
 }
 
