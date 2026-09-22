@@ -25,6 +25,35 @@ test "bundle verifier validates hostname and time" {
     );
 }
 
+test "client certificate bundle verifier validates trust without hostname" {
+    const client_der = @embedFile("testdata/server.der");
+    const ca_der = @embedFile("testdata/ca.der");
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(std.testing.allocator);
+    try bundle.bytes.appendSlice(std.testing.allocator, ca_der);
+    try bundle.parseCert(std.testing.allocator, 0, 1_900_000_000);
+    const verifier = trust.ClientCertificateBundleVerifier{
+        .bundle = &bundle,
+        .now_seconds = 1_900_000_000,
+    };
+    try verifier.verify(.{
+        .server_name = null,
+        .chain = &.{client_der},
+    });
+    try verifier.verify(.{
+        .server_name = "not-the-client-name.example",
+        .chain = &.{client_der},
+    });
+    try verifier.clientVerifier().verifyTrust(null, &.{client_der});
+
+    var corrupted_client = client_der.*;
+    corrupted_client[corrupted_client.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.CertificateUntrusted,
+        verifier.clientVerifier().verifyTrust(null, &.{&corrupted_client}),
+    );
+}
+
 test "bundle verifier treats the same certificate key as a trust anchor" {
     const server_der = @embedFile("testdata/server.der");
     var configured_anchor = server_der.*;
@@ -311,7 +340,41 @@ test "bundle verifier parses serverAuth and anyExtendedKeyUsage" {
         &.{ 0x30, 0x0a, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01 },
     );
     try std.testing.expect(server_auth.server_auth);
+    try std.testing.expect(!server_auth.client_auth);
     try std.testing.expect(!server_auth.any);
+
+    const client_auth = try trust.testing.parseExtendedKeyUsage(
+        &.{ 0x30, 0x0a, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02 },
+    );
+    try std.testing.expect(!client_auth.server_auth);
+    try std.testing.expect(client_auth.client_auth);
+    try std.testing.expect(!client_auth.any);
+    try trust.testing.validateClientLeafUsage(.{
+        .extended_key_usage_present = true,
+        .client_auth = true,
+    });
+    try std.testing.expectError(
+        error.InvalidCertificateUsage,
+        trust.testing.validateClientLeafUsage(.{
+            .extended_key_usage_present = true,
+            .server_auth = true,
+        }),
+    );
+    try trust.testing.validateClientIssuerUsage(.{
+        .basic_constraints_present = true,
+        .is_ca = true,
+        .extended_key_usage_present = true,
+        .client_auth = true,
+    }, 0);
+    try std.testing.expectError(
+        error.InvalidCertificateUsage,
+        trust.testing.validateClientIssuerUsage(.{
+            .basic_constraints_present = true,
+            .is_ca = true,
+            .extended_key_usage_present = true,
+            .server_auth = true,
+        }, 0),
+    );
 
     const any = try trust.testing.parseExtendedKeyUsage(
         &.{ 0x30, 0x06, 0x06, 0x04, 0x55, 0x1d, 0x25, 0x00 },

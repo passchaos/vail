@@ -1,4 +1,4 @@
-//! Built-in X.509 chain, validity, and hostname policy for TLS server auth.
+//! Built-in X.509 chain, validity, hostname, and endpoint-purpose policy.
 //!
 //! `SystemStore` loads the platform CA bundle once and then exposes a
 //! zero-allocation verification callback suitable for `auth.ClientVerifier`.
@@ -32,23 +32,12 @@ pub const BundleVerifier = struct {
         const server_name = trust_context.server_name orelse
             return error.MissingServerName;
         try leaf.verifyHostName(server_name);
-        try validateLeafUsage(trust_context.chain[0]);
-
-        var subject = leaf;
-        var ca_below: usize = 0;
-        for (trust_context.chain[1..]) |issuer_der| {
-            const issuer = try parseCertificate(issuer_der);
-            try validateIssuerUsage(issuer_der, ca_below);
-            try subject.verify(issuer, self.now_seconds);
-            ca_below = try countCaBelow(ca_below, issuer);
-            subject = issuer;
-        }
-        if (trustedEquivalentAnchor(self.bundle, subject)) |anchor| {
-            try verifyValidity(subject, self.now_seconds);
-            try verifyValidity(anchor, self.now_seconds);
-            return;
-        }
-        try self.bundle.verify(subject, self.now_seconds);
+        try verifyChain(
+            self.bundle,
+            self.now_seconds,
+            trust_context.chain,
+            .server_auth,
+        );
     }
 
     fn verifyCallback(
@@ -61,6 +50,73 @@ pub const BundleVerifier = struct {
         try self.verify(trust_context);
     }
 };
+
+/// CA-bundle policy for certificates presented by TLS clients. It performs no
+/// hostname check and enforces the RFC 5280 clientAuth purpose throughout the
+/// supplied path. TLS separately verifies CertificateVerify possession.
+pub const ClientCertificateBundleVerifier = struct {
+    bundle: *const Certificate.Bundle,
+    now_seconds: i64,
+
+    pub fn clientVerifier(
+        self: *const ClientCertificateBundleVerifier,
+    ) auth.ClientVerifier {
+        return .{
+            .verify_trust = verifyCallback,
+            .context = @ptrCast(@constCast(self)),
+        };
+    }
+
+    pub fn verify(
+        self: ClientCertificateBundleVerifier,
+        trust_context: auth.TrustContext,
+    ) !void {
+        try verifyChain(
+            self.bundle,
+            self.now_seconds,
+            trust_context.chain,
+            .client_auth,
+        );
+    }
+
+    fn verifyCallback(
+        context: ?*anyopaque,
+        trust_context: auth.TrustContext,
+    ) anyerror!void {
+        const self: *const ClientCertificateBundleVerifier =
+            @ptrCast(@alignCast(
+                context orelse return error.MissingTrustContext,
+            ));
+        try self.verify(trust_context);
+    }
+};
+
+const EndpointPurpose = enum { server_auth, client_auth };
+
+fn verifyChain(
+    bundle: *const Certificate.Bundle,
+    now_seconds: i64,
+    chain: []const []const u8,
+    purpose: EndpointPurpose,
+) !void {
+    if (chain.len == 0) return error.EmptyCertificateChain;
+    var subject = try parseCertificate(chain[0]);
+    try validateLeafUsage(chain[0], purpose);
+    var ca_below: usize = 0;
+    for (chain[1..]) |issuer_der| {
+        const issuer = try parseCertificate(issuer_der);
+        try validateIssuerUsage(issuer_der, ca_below, purpose);
+        try subject.verify(issuer, now_seconds);
+        ca_below = try countCaBelow(ca_below, issuer);
+        subject = issuer;
+    }
+    if (trustedEquivalentAnchor(bundle, subject)) |anchor| {
+        try verifyValidity(subject, now_seconds);
+        try verifyValidity(anchor, now_seconds);
+        return;
+    }
+    try bundle.verify(subject, now_seconds);
+}
 
 pub const SystemStore = struct {
     allocator: std.mem.Allocator,
@@ -159,20 +215,30 @@ const CertificateUsage = struct {
     key_cert_sign: bool = false,
     extended_key_usage_present: bool = false,
     server_auth: bool = false,
+    client_auth: bool = false,
     any_extended_key_usage: bool = false,
     unsupported_critical_extension: bool = false,
 };
 
-fn validateLeafUsage(certificate_der: []const u8) !void {
-    return validateLeafUsageProfile(try certificateUsage(certificate_der));
+fn validateLeafUsage(
+    certificate_der: []const u8,
+    purpose: EndpointPurpose,
+) !void {
+    return validateLeafUsageProfile(
+        try certificateUsage(certificate_der),
+        purpose,
+    );
 }
 
-fn validateLeafUsageProfile(usage: CertificateUsage) !void {
+fn validateLeafUsageProfile(
+    usage: CertificateUsage,
+    purpose: EndpointPurpose,
+) !void {
     if (usage.unsupported_critical_extension or
         (usage.basic_constraints_present and usage.is_ca) or
         (usage.key_usage_present and !usage.digital_signature) or
         (usage.extended_key_usage_present and
-            !usage.server_auth and
+            !purposeAllowed(usage, purpose) and
             !usage.any_extended_key_usage))
     {
         return error.InvalidCertificateUsage;
@@ -182,23 +248,26 @@ fn validateLeafUsageProfile(usage: CertificateUsage) !void {
 fn validateIssuerUsage(
     certificate_der: []const u8,
     ca_below: usize,
+    purpose: EndpointPurpose,
 ) !void {
     return validateIssuerUsageProfile(
         try certificateUsage(certificate_der),
         ca_below,
+        purpose,
     );
 }
 
 fn validateIssuerUsageProfile(
     usage: CertificateUsage,
     ca_below: usize,
+    purpose: EndpointPurpose,
 ) !void {
     if (usage.unsupported_critical_extension or
         !usage.basic_constraints_present or
         !usage.is_ca or
         (usage.key_usage_present and !usage.key_cert_sign) or
         (usage.extended_key_usage_present and
-            !usage.server_auth and
+            !purposeAllowed(usage, purpose) and
             !usage.any_extended_key_usage))
     {
         return error.InvalidCertificateUsage;
@@ -206,6 +275,16 @@ fn validateIssuerUsageProfile(
     if (usage.path_len) |limit| {
         if (ca_below > limit) return error.CertificatePathLengthExceeded;
     }
+}
+
+fn purposeAllowed(
+    usage: CertificateUsage,
+    purpose: EndpointPurpose,
+) bool {
+    return switch (purpose) {
+        .server_auth => usage.server_auth,
+        .client_auth => usage.client_auth,
+    };
 }
 
 fn certificateUsage(certificate_der: []const u8) !CertificateUsage {
@@ -272,6 +351,7 @@ fn certificateUsage(certificate_der: []const u8) !CertificateUsage {
             result.extended_key_usage_present = true;
             const extended = try parseExtendedKeyUsage(value.value);
             result.server_auth = extended.server_auth;
+            result.client_auth = extended.client_auth;
             result.any_extended_key_usage = extended.any;
         } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x11 })) {
             // Hostname verification above consumes subjectAltName.
@@ -387,6 +467,7 @@ fn parseKeyUsage(encoded: []const u8) !KeyUsage {
 
 const ExtendedKeyUsage = struct {
     server_auth: bool = false,
+    client_auth: bool = false,
     any: bool = false,
 };
 
@@ -402,6 +483,11 @@ fn parseExtendedKeyUsage(encoded: []const u8) !ExtendedKeyUsage {
             u8,
             purpose.value,
             &.{ 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01 },
+        );
+        result.client_auth = result.client_auth or std.mem.eql(
+            u8,
+            purpose.value,
+            &.{ 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02 },
         );
         result.any = result.any or std.mem.eql(
             u8,
@@ -519,11 +605,22 @@ pub const testing = struct {
     }
 
     pub fn validateLeafUsage(usage: Usage) !void {
-        return validateLeafUsageProfile(usage);
+        return validateLeafUsageProfile(usage, .server_auth);
+    }
+
+    pub fn validateClientLeafUsage(usage: Usage) !void {
+        return validateLeafUsageProfile(usage, .client_auth);
     }
 
     pub fn validateIssuerUsage(usage: Usage, ca_below: usize) !void {
-        return validateIssuerUsageProfile(usage, ca_below);
+        return validateIssuerUsageProfile(usage, ca_below, .server_auth);
+    }
+
+    pub fn validateClientIssuerUsage(
+        usage: Usage,
+        ca_below: usize,
+    ) !void {
+        return validateIssuerUsageProfile(usage, ca_below, .client_auth);
     }
 
     pub fn countCaBelow(

@@ -20,11 +20,14 @@ The current foundation provides:
   verifier;
 - type-safe server identities and pinned-key client verification;
 - CertificateRequest codec and mTLS policy types;
-- X.509 chain, hostname, validity, custom-bundle, and system-CA verification.
+- X.509 chain, hostname, validity, custom-bundle, and system-CA verification,
+  plus a client-certificate bundle verifier that omits hostname matching and
+  enforces the clientAuth endpoint purpose for mTLS server policy.
   An exact certificate or cross-signed form with the same Subject and complete
   SubjectPublicKeyInfo is recognized as a configured trust anchor without
   verifying the anchor's issuer signature. Hostname and validity remain
-  mandatory; leaves enforce optional digitalSignature/serverAuth usage, and
+  mandatory for server authentication; leaves enforce optional
+  digitalSignature plus endpoint-specific serverAuth/clientAuth usage, and
   presented intermediates require CA=true, optional keyCertSign, pathLen, and
   supported critical extensions;
 - TLS 1.3 SHA-256 early, handshake, application, exporter, resumption, PSK
