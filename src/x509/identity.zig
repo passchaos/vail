@@ -24,6 +24,13 @@ pub fn commonNameAlloc(
     allocator: std.mem.Allocator,
     certificate_der: []const u8,
 ) Error![]u8 {
+    const certificate = Certificate.der.Element.parse(
+        certificate_der,
+        0,
+    ) catch return error.InvalidCertificate;
+    if (certificate.slice.end != certificate_der.len) {
+        return error.InvalidCertificate;
+    }
     const parsed = Certificate.parse(.{
         .buffer = certificate_der,
         .index = 0,
@@ -244,5 +251,11 @@ test "X509 identity rejects ambiguous and unsafe subjects" {
             .tag = 0x1e,
             .value = &.{ 0xd8, 0x00 },
         }),
+    );
+    const certificate = @embedFile("testdata/server.der");
+    const trailing = certificate.* ++ .{0x00};
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        commonNameAlloc(std.testing.allocator, &trailing),
     );
 }
