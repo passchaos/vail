@@ -23,6 +23,8 @@ The current foundation provides:
 - X.509 chain, hostname, validity, custom-bundle, and system-CA verification,
   plus a client-certificate bundle verifier that omits hostname matching and
   enforces the clientAuth endpoint purpose for mTLS server policy.
+  Strict subject identity extraction returns an owned, unambiguous UTF-8
+  common name and converts supported X.509 DirectoryString encodings;
   An exact certificate or cross-signed form with the same Subject and complete
   SubjectPublicKeyInfo is recognized as a configured trust anchor without
   verifying the anchor's issuer signature. Hostname and validity remain

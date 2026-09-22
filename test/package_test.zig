@@ -57,6 +57,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.tls, "transcript"));
     try std.testing.expect(@hasDecl(vail, "x509"));
     try std.testing.expect(@hasDecl(vail.x509, "trust"));
+    try std.testing.expect(@hasDecl(vail.x509, "identity"));
+    try std.testing.expect(@hasDecl(
+        vail.x509.identity,
+        "commonNameAlloc",
+    ));
     try std.testing.expect(@hasDecl(
         vail.x509.trust,
         "ClientCertificateBundleVerifier",
