@@ -268,6 +268,27 @@ test "bundle verifier enforces leaf and issuer certificate usage" {
             .chain = &.{ server_der, &invalid_ca },
         }),
     );
+    var invalid_anchor_bundle: std.crypto.Certificate.Bundle = .empty;
+    defer invalid_anchor_bundle.deinit(std.testing.allocator);
+    try invalid_anchor_bundle.bytes.appendSlice(
+        std.testing.allocator,
+        &invalid_ca,
+    );
+    try invalid_anchor_bundle.parseCert(
+        std.testing.allocator,
+        0,
+        1_900_000_000,
+    );
+    try std.testing.expectError(
+        error.InvalidCertificateUsage,
+        (trust.BundleVerifier{
+            .bundle = &invalid_anchor_bundle,
+            .now_seconds = 1_900_000_000,
+        }).verify(.{
+            .server_name = "localhost",
+            .chain = &.{server_der},
+        }),
+    );
 
     var unknown_critical_ca = ca_der.*;
     const basic_constraints_oid = std.mem.indexOf(

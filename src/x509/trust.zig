@@ -115,7 +115,17 @@ fn verifyChain(
         try verifyValidity(anchor, now_seconds);
         return;
     }
-    try bundle.verify(subject, now_seconds);
+    const anchor_index = bundle.find(subject.issuer()) orelse
+        return error.CertificateIssuerNotFound;
+    const anchor_element = try Certificate.der.Element.parse(
+        bundle.bytes.items,
+        anchor_index,
+    );
+    const anchor_der = bundle.bytes.items[anchor_index..anchor_element.slice.end];
+    const anchor = try parseCertificate(anchor_der);
+    try validateIssuerUsage(anchor_der, ca_below, purpose);
+    try verifyValidity(anchor, now_seconds);
+    try subject.verify(anchor, now_seconds);
 }
 
 pub const SystemStore = struct {
