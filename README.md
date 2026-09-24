@@ -25,9 +25,10 @@ The current foundation provides:
   enforces the clientAuth endpoint purpose for mTLS server policy.
   Strict subject identity extraction returns an owned, unambiguous UTF-8
   common name and converts supported X.509 DirectoryString encodings;
-- verified RFC 5280 certificate-revocation lists for P-256/SHA-256 client CAs,
-  including issuer and cRLSign checks, strict DER/extensions, update windows,
-  authenticated signatures, and leaf serial lookup;
+- verified RFC 5280 certificate-revocation lists for P-256 ECDSA/SHA-256 and
+  1024-4096-bit RSA PKCS#1 v1.5/SHA-256 client CAs, including issuer and
+  cRLSign checks, strict DER/extensions, update windows, authenticated
+  signatures, and leaf serial lookup;
   An exact certificate or cross-signed form with the same Subject and complete
   SubjectPublicKeyInfo is recognized as a configured trust anchor without
   verifying the anchor's issuer signature. Hostname and validity remain

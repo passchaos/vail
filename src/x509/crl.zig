@@ -1,14 +1,16 @@
 //! Strict RFC 5280 certificate revocation lists.
 //!
 //! A list is returned only after issuer, signature, update-window, extension,
-//! and revoked-entry validation succeeds. The initial implementation supports
-//! ECDSA P-256/SHA-256 signatures; other algorithms fail explicitly.
+//! and revoked-entry validation succeeds. Supported signatures are ECDSA
+//! P-256/SHA-256 and RSA PKCS#1 v1.5/SHA-256 with 1024-4096-bit keys; other
+//! algorithms fail explicitly.
 
 const std = @import("std");
 const trust = @import("trust.zig");
 
 const Certificate = std.crypto.Certificate;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const Error = error{
     InvalidCrl,
@@ -24,6 +26,9 @@ pub const Error = error{
 
 const oid_ecdsa_sha256 = [_]u8{
     0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02,
+};
+const oid_rsa_sha256 = [_]u8{
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b,
 };
 const oid_delta_crl_indicator = [_]u8{ 0x55, 0x1d, 0x1b };
 const oid_issuing_distribution_point = [_]u8{ 0x55, 0x1d, 0x1c };
@@ -95,8 +100,10 @@ pub fn parseAndVerify(
     }
     if (first.tag != 0x30) return error.InvalidCrl;
     const inner_algorithm = first;
-    try requireEcdsaSha256(inner_algorithm);
-    try requireEcdsaSha256(outer_algorithm);
+    const signature_algorithm = try parseSignatureAlgorithm(inner_algorithm);
+    if (try parseSignatureAlgorithm(outer_algorithm) != signature_algorithm) {
+        return error.InvalidCrl;
+    }
     if (!std.mem.eql(
         u8,
         tbs.value[inner_algorithm.start..inner_algorithm.end],
@@ -140,22 +147,12 @@ pub fn parseAndVerify(
     if (signature_value.value.len < 2 or signature_value.value[0] != 0) {
         return error.InvalidCrl;
     }
-    const public_key = switch (issuer_certificate.pub_key_algo) {
-        .X9_62_id_ecPublicKey => |curve| if (curve == .X9_62_prime256v1)
-            EcdsaP256Sha256.PublicKey.fromSec1(
-                issuer_certificate.pubKey(),
-            ) catch return error.InvalidIssuer
-        else
-            return error.UnsupportedSignatureAlgorithm,
-        else => return error.UnsupportedSignatureAlgorithm,
-    };
-    const signature = EcdsaP256Sha256.Signature.fromDer(
-        signature_value.value[1..],
-    ) catch return error.InvalidCrlSignature;
-    signature.verify(
+    try verifySignature(
+        signature_algorithm,
+        issuer_certificate,
         certificate_list.value[tbs.start..tbs.end],
-        public_key,
-    ) catch return error.InvalidCrlSignature;
+        signature_value.value[1..],
+    );
 
     return .{
         .der = crl_der,
@@ -166,13 +163,79 @@ pub fn parseAndVerify(
     };
 }
 
-fn requireEcdsaSha256(algorithm: Element) Error!void {
+const SignatureAlgorithm = enum { ecdsa_p256_sha256, rsa_pkcs1_sha256 };
+
+fn parseSignatureAlgorithm(algorithm: Element) Error!SignatureAlgorithm {
     var fields = Reader{ .bytes = algorithm.value };
     const oid = fields.require(0x06) catch return error.InvalidCrl;
-    if (!std.mem.eql(u8, oid.value, &oid_ecdsa_sha256)) {
-        return error.UnsupportedSignatureAlgorithm;
+    if (std.mem.eql(u8, oid.value, &oid_ecdsa_sha256)) {
+        if (!fields.done()) return error.InvalidCrl;
+        return .ecdsa_p256_sha256;
     }
-    if (!fields.done()) return error.InvalidCrl;
+    if (std.mem.eql(u8, oid.value, &oid_rsa_sha256)) {
+        const parameters = (fields.next() catch return error.InvalidCrl) orelse
+            return error.InvalidCrl;
+        if (parameters.tag != 0x05 or parameters.value.len != 0 or
+            !fields.done())
+        {
+            return error.InvalidCrl;
+        }
+        return .rsa_pkcs1_sha256;
+    }
+    return error.UnsupportedSignatureAlgorithm;
+}
+
+fn verifySignature(
+    algorithm: SignatureAlgorithm,
+    issuer: Certificate.Parsed,
+    message: []const u8,
+    signature_bytes: []const u8,
+) Error!void {
+    switch (algorithm) {
+        .ecdsa_p256_sha256 => {
+            const public_key = switch (issuer.pub_key_algo) {
+                .X9_62_id_ecPublicKey => |curve| if (curve == .X9_62_prime256v1)
+                    EcdsaP256Sha256.PublicKey.fromSec1(
+                        issuer.pubKey(),
+                    ) catch return error.InvalidIssuer
+                else
+                    return error.UnsupportedSignatureAlgorithm,
+                else => return error.UnsupportedSignatureAlgorithm,
+            };
+            const signature = EcdsaP256Sha256.Signature.fromDer(
+                signature_bytes,
+            ) catch return error.InvalidCrlSignature;
+            signature.verify(message, public_key) catch
+                return error.InvalidCrlSignature;
+        },
+        .rsa_pkcs1_sha256 => {
+            if (issuer.pub_key_algo != .rsaEncryption) {
+                return error.UnsupportedSignatureAlgorithm;
+            }
+            const parts = Certificate.rsa.PublicKey.parseDer(
+                issuer.pubKey(),
+            ) catch return error.InvalidIssuer;
+            switch (parts.modulus.len) {
+                inline 128, 256, 384, 512 => |modulus_len| {
+                    if (signature_bytes.len != modulus_len) {
+                        return error.InvalidCrlSignature;
+                    }
+                    const public_key = Certificate.rsa.PublicKey.fromBytes(
+                        parts.exponent,
+                        parts.modulus,
+                    ) catch return error.InvalidIssuer;
+                    Certificate.rsa.PKCS1v1_5Signature.verify(
+                        modulus_len,
+                        signature_bytes[0..modulus_len].*,
+                        message,
+                        public_key,
+                        Sha256,
+                    ) catch return error.InvalidCrlSignature;
+                },
+                else => return error.UnsupportedSignatureAlgorithm,
+            }
+        },
+    }
 }
 
 const RevokedEntry = struct {
@@ -468,4 +531,79 @@ test "CRL rejects tampering and invalid update windows" {
         error.IssuerMismatch,
         list.isRevoked(wrong_leaf),
     );
+}
+
+test "CRL verifies Mosquitto RSA SHA256 fixtures" {
+    const allocator = std.testing.allocator;
+    const ca = try decodePemFixture(
+        allocator,
+        @embedFile("testdata/mosquitto-signing-ca.pem"),
+        "CERTIFICATE",
+    );
+    defer allocator.free(ca);
+    const good = try decodePemFixture(
+        allocator,
+        @embedFile("testdata/mosquitto-client.pem"),
+        "CERTIFICATE",
+    );
+    defer allocator.free(good);
+    const revoked = try decodePemFixture(
+        allocator,
+        @embedFile("testdata/mosquitto-client-revoked.pem"),
+        "CERTIFICATE",
+    );
+    defer allocator.free(revoked);
+    const crl_bytes = try decodePemFixture(
+        allocator,
+        @embedFile("testdata/mosquitto-crl.pem"),
+        "X509 CRL",
+    );
+    defer allocator.free(crl_bytes);
+
+    const list = try parseAndVerify(crl_bytes, ca, 1_800_000_000);
+    try std.testing.expect(!try list.isRevoked(good));
+    try std.testing.expect(try list.isRevoked(revoked));
+
+    const tampered = try allocator.dupe(u8, crl_bytes);
+    defer allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.InvalidCrlSignature,
+        parseAndVerify(tampered, ca, 1_800_000_000),
+    );
+}
+
+fn decodePemFixture(
+    allocator: std.mem.Allocator,
+    pem: []const u8,
+    label: []const u8,
+) ![]u8 {
+    const begin = try std.fmt.allocPrint(
+        allocator,
+        "-----BEGIN {s}-----",
+        .{label},
+    );
+    defer allocator.free(begin);
+    const end = try std.fmt.allocPrint(
+        allocator,
+        "-----END {s}-----",
+        .{label},
+    );
+    defer allocator.free(end);
+    const begin_at = std.mem.indexOf(u8, pem, begin) orelse
+        return error.InvalidCrl;
+    const body_start = begin_at + begin.len;
+    const end_at = std.mem.indexOfPos(u8, pem, body_start, end) orelse
+        return error.InvalidCrl;
+    var compact: std.ArrayList(u8) = .empty;
+    defer compact.deinit(allocator);
+    for (pem[body_start..end_at]) |byte| switch (byte) {
+        ' ', '\t', '\r', '\n' => {},
+        else => try compact.append(allocator, byte),
+    };
+    const len = try std.base64.standard.Decoder.calcSizeForSlice(compact.items);
+    const decoded = try allocator.alloc(u8, len);
+    errdefer allocator.free(decoded);
+    try std.base64.standard.Decoder.decode(decoded, compact.items);
+    return decoded;
 }
