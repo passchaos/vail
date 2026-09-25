@@ -1,10 +1,11 @@
 //! Strict X.509 subject identity extraction.
 //!
-//! The returned common name is deeply owned UTF-8. Ambiguous subjects with
-//! multiple commonName attributes and legacy string encodings whose Unicode
-//! meaning is not defined here fail closed.
+//! Returned identities are deeply owned UTF-8. Common-name extraction rejects
+//! ambiguous subjects and legacy string encodings whose Unicode meaning is not
+//! defined here. Full-subject extraction matches OpenSSL's RFC 2253 rendering.
 
 const std = @import("std");
+const rfc2253 = @import("rfc2253.zig");
 
 const Certificate = std.crypto.Certificate;
 
@@ -16,6 +17,7 @@ pub const Error = std.mem.Allocator.Error || error{
     EmptyCommonName,
     UnsupportedDirectoryString,
     InvalidDirectoryString,
+    InvalidObjectIdentifier,
 };
 
 const oid_common_name = [_]u8{ 0x55, 0x04, 0x03 };
@@ -39,6 +41,36 @@ pub fn commonNameAlloc(
         allocator,
         parsed.subject(),
     );
+}
+
+/// Return the certificate Subject in the RFC 2253 form emitted by OpenSSL's
+/// X509_NAME_print_ex with XN_FLAG_RFC2253 for the X.509 attribute vocabulary
+/// recognized by Zig's standard library. RDNs and attributes within a
+/// multi-valued RDN are reversed, unknown OIDs retain their numeric identity,
+/// and unsafe string bytes are escaped before this value becomes an identity.
+pub fn subjectNameAlloc(
+    allocator: std.mem.Allocator,
+    certificate_der: []const u8,
+) Error![]u8 {
+    const certificate = Certificate.der.Element.parse(
+        certificate_der,
+        0,
+    ) catch return error.InvalidCertificate;
+    if (certificate.slice.end != certificate_der.len) {
+        return error.InvalidCertificate;
+    }
+    const parsed = Certificate.parse(.{
+        .buffer = certificate_der,
+        .index = 0,
+    }) catch return error.InvalidCertificate;
+    return rfc2253.nameAlloc(allocator, parsed.subject()) catch |err|
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidSubject => error.InvalidSubject,
+            error.InvalidDirectoryString => error.InvalidDirectoryString,
+            error.InvalidObjectIdentifier => error.InvalidObjectIdentifier,
+            error.UnsupportedDirectoryString => unreachable,
+        };
 }
 
 fn commonNameFromSubjectAlloc(
@@ -190,6 +222,46 @@ test "X509 identity extracts an owned UTF8 common name" {
     try std.testing.expectEqualStrings("localhost", common_name);
 }
 
+test "X509 identity renders an owned RFC2253 subject" {
+    const certificate = @embedFile("testdata/server.der");
+    const subject = try subjectNameAlloc(std.testing.allocator, certificate);
+    defer std.testing.allocator.free(subject);
+    try std.testing.expectEqualStrings("CN=localhost", subject);
+
+    // OpenSSL encodes C/O as separate RDNs, then CN+OU as one multi-valued
+    // RDN. XN_FLAG_DN_REV reverses both the RDN list and attribute order.
+    const structured = [_]u8{
+        0x31, 0x0b, 0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x06,
+        0x13, 0x02, 'G',  'B',  0x31, 0x0c, 0x30, 0x0a, 0x06,
+        0x03, 0x55, 0x04, 0x0a, 0x0c, 0x03, 'O',  'r',  'g',
+        0x31, 0x1c, 0x30, 0x0b, 0x06, 0x03, 0x55, 0x04, 0x0b,
+        0x0c, 0x04, 'U',  'n',  'i',  't',  0x30, 0x0d, 0x06,
+        0x03, 0x55, 0x04, 0x03, 0x0c, 0x06, 'c',  'l',  'i',
+        'e',  'n',  't',
+    };
+    const rendered = try rfc2253.nameAlloc(
+        std.testing.allocator,
+        &structured,
+    );
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expectEqualStrings("CN=client+OU=Unit,O=Org,C=GB", rendered);
+}
+
+fn expectSubjectNameAlloc(allocator: std.mem.Allocator) !void {
+    const certificate = @embedFile("testdata/server.der");
+    const subject = try subjectNameAlloc(allocator, certificate);
+    defer allocator.free(subject);
+    try std.testing.expectEqualStrings("CN=localhost", subject);
+}
+
+test "X509 subject identity allocation failures are transactional" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        expectSubjectNameAlloc,
+        .{},
+    );
+}
+
 test "X509 identity converts supported DirectoryString encodings" {
     const utf8 = try directoryStringAlloc(std.testing.allocator, .{
         .tag = 0x0c,
@@ -257,5 +329,9 @@ test "X509 identity rejects ambiguous and unsafe subjects" {
     try std.testing.expectError(
         error.InvalidCertificate,
         commonNameAlloc(std.testing.allocator, &trailing),
+    );
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        subjectNameAlloc(std.testing.allocator, &trailing),
     );
 }

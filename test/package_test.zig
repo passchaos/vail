@@ -65,6 +65,10 @@ test "public modules are reachable" {
         "commonNameAlloc",
     ));
     try std.testing.expect(@hasDecl(
+        vail.x509.identity,
+        "subjectNameAlloc",
+    ));
+    try std.testing.expect(@hasDecl(
         vail.x509.trust,
         "ClientCertificateBundleVerifier",
     ));

@@ -23,8 +23,9 @@ The current foundation provides:
 - X.509 chain, hostname, validity, custom-bundle, and system-CA verification,
   plus a client-certificate bundle verifier that omits hostname matching and
   enforces the clientAuth endpoint purpose for mTLS server policy.
-  Strict subject identity extraction returns an owned, unambiguous UTF-8
-  common name and converts supported X.509 DirectoryString encodings;
+  Strict subject identity extraction returns either an owned, unambiguous UTF-8
+  common name or an OpenSSL-compatible RFC 2253 full Subject for the standard
+  X.509 attribute vocabulary and converts supported DirectoryString encodings;
 - verified RFC 5280 certificate-revocation lists for P-256 ECDSA/SHA-256 and
   1024-4096-bit RSA PKCS#1 v1.5/SHA-256 client CAs, including issuer and
   cRLSign checks, strict DER/extensions, update windows, authenticated
