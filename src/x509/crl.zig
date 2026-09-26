@@ -1,14 +1,15 @@
 //! Strict RFC 5280 certificate revocation lists.
 //!
 //! A list is returned only after issuer, signature, update-window, extension,
-//! and revoked-entry validation succeeds. Supported signatures are ECDSA
-//! P-256/SHA-256 and RSA PKCS#1 v1.5/SHA-256 with 1024-4096-bit keys; other
-//! algorithms fail explicitly.
+//! and revoked-entry validation succeeds. Supported signatures are Ed25519,
+//! ECDSA P-256/SHA-256, and RSA PKCS#1 v1.5/SHA-256 with 1024-4096-bit keys;
+//! other algorithms fail explicitly.
 
 const std = @import("std");
 const trust = @import("trust.zig");
 
 const Certificate = std.crypto.Certificate;
+const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -30,6 +31,7 @@ const oid_ecdsa_sha256 = [_]u8{
 const oid_rsa_sha256 = [_]u8{
     0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b,
 };
+const oid_ed25519 = [_]u8{ 0x2b, 0x65, 0x70 };
 const oid_delta_crl_indicator = [_]u8{ 0x55, 0x1d, 0x1b };
 const oid_issuing_distribution_point = [_]u8{ 0x55, 0x1d, 0x1c };
 const oid_certificate_issuer = [_]u8{ 0x55, 0x1d, 0x1d };
@@ -163,7 +165,11 @@ pub fn parseAndVerify(
     };
 }
 
-const SignatureAlgorithm = enum { ecdsa_p256_sha256, rsa_pkcs1_sha256 };
+const SignatureAlgorithm = enum {
+    ecdsa_p256_sha256,
+    rsa_pkcs1_sha256,
+    ed25519,
+};
 
 fn parseSignatureAlgorithm(algorithm: Element) Error!SignatureAlgorithm {
     var fields = Reader{ .bytes = algorithm.value };
@@ -181,6 +187,12 @@ fn parseSignatureAlgorithm(algorithm: Element) Error!SignatureAlgorithm {
             return error.InvalidCrl;
         }
         return .rsa_pkcs1_sha256;
+    }
+    if (std.mem.eql(u8, oid.value, &oid_ed25519)) {
+        // RFC 8410 section 3 requires parameters to be absent, including the
+        // otherwise common ASN.1 NULL value.
+        if (!fields.done()) return error.InvalidCrl;
+        return .ed25519;
     }
     return error.UnsupportedSignatureAlgorithm;
 }
@@ -234,6 +246,24 @@ fn verifySignature(
                 },
                 else => return error.UnsupportedSignatureAlgorithm,
             }
+        },
+        .ed25519 => {
+            if (issuer.pub_key_algo != .curveEd25519 or
+                issuer.pubKey().len != Ed25519.PublicKey.encoded_length)
+            {
+                return error.UnsupportedSignatureAlgorithm;
+            }
+            if (signature_bytes.len != Ed25519.Signature.encoded_length) {
+                return error.InvalidCrlSignature;
+            }
+            const public_key = Ed25519.PublicKey.fromBytes(
+                issuer.pubKey()[0..Ed25519.PublicKey.encoded_length].*,
+            ) catch return error.InvalidIssuer;
+            const signature = Ed25519.Signature.fromBytes(
+                signature_bytes[0..Ed25519.Signature.encoded_length].*,
+            );
+            signature.verify(message, public_key) catch
+                return error.InvalidCrlSignature;
         },
     }
 }
@@ -570,6 +600,38 @@ test "CRL verifies Mosquitto RSA SHA256 fixtures" {
     try std.testing.expectError(
         error.InvalidCrlSignature,
         parseAndVerify(tampered, ca, 1_800_000_000),
+    );
+}
+
+test "CRL verifies Ed25519 fixtures and rejects signature tampering" {
+    const ca = @embedFile("testdata/ed25519-crl-ca.der");
+    const good = @embedFile("testdata/ed25519-crl-good.der");
+    const revoked = @embedFile("testdata/ed25519-crl-revoked.der");
+    const crl_bytes = @embedFile("testdata/ed25519.crl.der");
+
+    const list = try parseAndVerify(crl_bytes, ca, 1_790_419_000);
+    try std.testing.expect(!try list.isRevoked(good));
+    try std.testing.expect(try list.isRevoked(revoked));
+
+    const tampered = try std.testing.allocator.dupe(u8, crl_bytes);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.InvalidCrlSignature,
+        parseAndVerify(tampered, ca, 1_790_419_000),
+    );
+}
+
+test "CRL rejects Ed25519 AlgorithmIdentifier parameters" {
+    try std.testing.expectError(
+        error.InvalidCrl,
+        parseSignatureAlgorithm(.{
+            .tag = 0x30,
+            .start = 0,
+            .value_start = 0,
+            .end = 7,
+            .value = &.{ 0x06, 0x03, 0x2b, 0x65, 0x70, 0x05, 0x00 },
+        }),
     );
 }
 
