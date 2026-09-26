@@ -2,8 +2,8 @@
 //!
 //! A list is returned only after issuer, signature, update-window, extension,
 //! and revoked-entry validation succeeds. Supported signatures are Ed25519,
-//! ECDSA P-256/SHA-256, and RSA PKCS#1 v1.5/SHA-256 with 1024-4096-bit keys;
-//! other algorithms fail explicitly.
+//! ECDSA P-256/SHA-256, ECDSA P-384/SHA-384, and RSA PKCS#1
+//! v1.5/SHA-256 with 1024-4096-bit keys; other algorithms fail explicitly.
 
 const std = @import("std");
 const trust = @import("trust.zig");
@@ -11,6 +11,7 @@ const trust = @import("trust.zig");
 const Certificate = std.crypto.Certificate;
 const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const Error = error{
@@ -27,6 +28,9 @@ pub const Error = error{
 
 const oid_ecdsa_sha256 = [_]u8{
     0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02,
+};
+const oid_ecdsa_sha384 = [_]u8{
+    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03,
 };
 const oid_rsa_sha256 = [_]u8{
     0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b,
@@ -167,6 +171,7 @@ pub fn parseAndVerify(
 
 const SignatureAlgorithm = enum {
     ecdsa_p256_sha256,
+    ecdsa_p384_sha384,
     rsa_pkcs1_sha256,
     ed25519,
 };
@@ -177,6 +182,10 @@ fn parseSignatureAlgorithm(algorithm: Element) Error!SignatureAlgorithm {
     if (std.mem.eql(u8, oid.value, &oid_ecdsa_sha256)) {
         if (!fields.done()) return error.InvalidCrl;
         return .ecdsa_p256_sha256;
+    }
+    if (std.mem.eql(u8, oid.value, &oid_ecdsa_sha384)) {
+        if (!fields.done()) return error.InvalidCrl;
+        return .ecdsa_p384_sha384;
     }
     if (std.mem.eql(u8, oid.value, &oid_rsa_sha256)) {
         const parameters = (fields.next() catch return error.InvalidCrl) orelse
@@ -215,6 +224,22 @@ fn verifySignature(
                 else => return error.UnsupportedSignatureAlgorithm,
             };
             const signature = EcdsaP256Sha256.Signature.fromDer(
+                signature_bytes,
+            ) catch return error.InvalidCrlSignature;
+            signature.verify(message, public_key) catch
+                return error.InvalidCrlSignature;
+        },
+        .ecdsa_p384_sha384 => {
+            const public_key = switch (issuer.pub_key_algo) {
+                .X9_62_id_ecPublicKey => |curve| if (curve == .secp384r1)
+                    EcdsaP384Sha384.PublicKey.fromSec1(
+                        issuer.pubKey(),
+                    ) catch return error.InvalidIssuer
+                else
+                    return error.UnsupportedSignatureAlgorithm,
+                else => return error.UnsupportedSignatureAlgorithm,
+            };
+            const signature = EcdsaP384Sha384.Signature.fromDer(
                 signature_bytes,
             ) catch return error.InvalidCrlSignature;
             signature.verify(message, public_key) catch
@@ -619,6 +644,25 @@ test "CRL verifies Ed25519 fixtures and rejects signature tampering" {
     try std.testing.expectError(
         error.InvalidCrlSignature,
         parseAndVerify(tampered, ca, 1_790_419_000),
+    );
+}
+
+test "CRL verifies P384 SHA384 fixtures and rejects signature tampering" {
+    const ca = @embedFile("testdata/p384-crl-ca.der");
+    const good = @embedFile("testdata/p384-crl-good.der");
+    const revoked = @embedFile("testdata/p384-crl-revoked.der");
+    const crl_bytes = @embedFile("testdata/p384.crl.der");
+
+    const list = try parseAndVerify(crl_bytes, ca, 1_790_420_000);
+    try std.testing.expect(!try list.isRevoked(good));
+    try std.testing.expect(try list.isRevoked(revoked));
+
+    const tampered = try std.testing.allocator.dupe(u8, crl_bytes);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.InvalidCrlSignature,
+        parseAndVerify(tampered, ca, 1_790_420_000),
     );
 }
 

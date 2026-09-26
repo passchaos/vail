@@ -27,7 +27,8 @@ The current foundation provides:
   common name or an OpenSSL-compatible RFC 2253 full Subject for the standard
   X.509 attribute vocabulary and converts supported DirectoryString encodings;
 - verified RFC 5280 certificate-revocation lists for Ed25519, P-256
-  ECDSA/SHA-256, and 1024-4096-bit RSA PKCS#1 v1.5/SHA-256 client CAs,
+  ECDSA/SHA-256, P-384 ECDSA/SHA-384, and 1024-4096-bit RSA PKCS#1
+  v1.5/SHA-256 client CAs,
   including issuer and
   cRLSign checks, strict DER/extensions, update windows, authenticated
   signatures, and leaf serial lookup;
