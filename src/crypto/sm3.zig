@@ -1,9 +1,7 @@
 //! SM3 hash function (GB/T 32905-2016).
 //!
-//! AWS-LC currently ships with `OPENSSL_NO_SM3` in the local checkout.  Vail
-//! keeps this small, audited implementation in Zig so TLS/GMSSL-facing code can
-//! depend on a stable Hash-compatible type today, and later swap in an AWS-LC
-//! provider without changing higher-level key-schedule or transcript APIs.
+//! Vail keeps this small implementation in Zig so TLS/GMSSL-facing code can
+//! depend on a stable Hash-compatible type without an external provider.
 
 const std = @import("std");
 

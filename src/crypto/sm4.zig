@@ -1,9 +1,7 @@
 //! SM4 block cipher and SM4-GCM AEAD support (GB/T 32907-2016).
 //!
-//! The local AWS-LC checkout currently disables SM4.  This module provides a
-//! compact portable implementation with the same fixed-size, allocation-free
-//! calling style as Zig's AES-GCM primitives, giving Vail a stable ShangMi
-//! surface while AWS-LC provider work continues.
+//! This module provides a compact portable implementation with the same
+//! fixed-size, allocation-free calling style as Zig's AES-GCM primitives.
 
 const std = @import("std");
 

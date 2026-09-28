@@ -1,5 +1,4 @@
 const std = @import("std");
-const backend = @import("../crypto/backend.zig");
 const initial = @import("initial.zig");
 const retry = @import("retry.zig");
 const key_schedule = @import("../tls/key_schedule.zig");
@@ -254,18 +253,6 @@ test "prepared QUIC traffic keys match value-key suites" {
         try prepared.open(23, aad, &actual_ciphertext, actual_tag, &opened);
         try std.testing.expectEqualStrings(plaintext, &opened);
     }
-}
-
-test "prepared QUIC traffic keys store one AES context" {
-    if (!backend.aws_lc_linked) return error.SkipZigTest;
-    const LegacyPreparedKeys = struct {
-        keys: traffic.Keys,
-        aes_128_gcm: ?backend.AesGcmContext = null,
-        aes_256_gcm: ?backend.AesGcmContext = null,
-    };
-    try std.testing.expect(
-        @sizeOf(traffic.PreparedKeys) < @sizeOf(LegacyPreparedKeys),
-    );
 }
 
 test "ChaCha header protection follows RFC 9001 sample layout" {

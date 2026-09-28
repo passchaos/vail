@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-const backend = @import("../crypto/backend.zig");
+const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
 const sm4 = @import("../crypto/sm4.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const secret = @import("secret.zig");
@@ -43,8 +43,7 @@ pub const Keys = struct {
     suite: cipher_suite.Suite,
     key: [max_key_len]u8,
     iv: [iv_len]u8,
-    aes_128_gcm: ?backend.AesGcmContext = null,
-    aes_256_gcm: ?backend.AesGcmContext = null,
+    aes_gcm: ?prepared_aes_gcm.Context = null,
 
     pub fn derive(
         suite: cipher_suite.Suite,
@@ -73,7 +72,9 @@ pub const Keys = struct {
                     "",
                     iv_len,
                 );
-                keys.aes_128_gcm = backend.AesGcmContext.init(.aes_128_gcm, keys.key[0..16]);
+                keys.aes_gcm = prepared_aes_gcm.Context.init128(
+                    keys.key[0..Aes128Gcm.key_length].*,
+                );
             },
             .aes_256_gcm_sha384 => {
                 const value = traffic_secret.sha384() catch return error.HashMismatch;
@@ -91,7 +92,7 @@ pub const Keys = struct {
                     "",
                     iv_len,
                 );
-                keys.aes_256_gcm = backend.AesGcmContext.init(.aes_256_gcm, &keys.key);
+                keys.aes_gcm = prepared_aes_gcm.Context.init256(keys.key);
             },
             .chacha20_poly1305_sha256 => {
                 const value = traffic_secret.sha256() catch return error.HashMismatch;
@@ -132,8 +133,7 @@ pub const Keys = struct {
     }
 
     pub fn deinit(self: *Keys) void {
-        if (self.aes_128_gcm) |*ctx| ctx.deinit();
-        if (self.aes_256_gcm) |*ctx| ctx.deinit();
+        if (self.aes_gcm) |*context| context.deinit();
         std.crypto.secureZero(u8, &self.key);
         std.crypto.secureZero(u8, &self.iv);
         self.* = undefined;
@@ -166,20 +166,36 @@ pub const Keys = struct {
         const tag = record[header_len + ciphertext_len ..][0..tag_len];
         switch (self.suite) {
             .aes_128_gcm_sha256 => {
-                if (self.aes_128_gcm) |ctx| {
-                    if (ctx.seal(&nonce, record[0..header_len], inner[0..ciphertext_len], ciphertext, tag)) {
-                        return record_len;
-                    }
-                }
-                Aes128Gcm.encrypt(ciphertext, tag, inner[0..ciphertext_len], record[0..header_len], nonce, self.key[0..16].*);
+                if (self.aes_gcm) |*context| context.encrypt(
+                    ciphertext,
+                    tag,
+                    inner[0..ciphertext_len],
+                    record[0..header_len],
+                    nonce,
+                ) else Aes128Gcm.encrypt(
+                    ciphertext,
+                    tag,
+                    inner[0..ciphertext_len],
+                    record[0..header_len],
+                    nonce,
+                    self.key[0..Aes128Gcm.key_length].*,
+                );
             },
             .aes_256_gcm_sha384 => {
-                if (self.aes_256_gcm) |ctx| {
-                    if (ctx.seal(&nonce, record[0..header_len], inner[0..ciphertext_len], ciphertext, tag)) {
-                        return record_len;
-                    }
-                }
-                Aes256Gcm.encrypt(ciphertext, tag, inner[0..ciphertext_len], record[0..header_len], nonce, self.key);
+                if (self.aes_gcm) |*context| context.encrypt(
+                    ciphertext,
+                    tag,
+                    inner[0..ciphertext_len],
+                    record[0..header_len],
+                    nonce,
+                ) else Aes256Gcm.encrypt(
+                    ciphertext,
+                    tag,
+                    inner[0..ciphertext_len],
+                    record[0..header_len],
+                    nonce,
+                    self.key,
+                );
             },
             .chacha20_poly1305_sha256 => ChaCha20Poly1305.encrypt(ciphertext, tag, inner[0..ciphertext_len], record[0..header_len], nonce, self.key),
             .sm4_gcm_sm3 => sm4.Gcm.encrypt(ciphertext, tag, inner[0..ciphertext_len], record[0..header_len], nonce, self.key[0..16].*),
@@ -210,18 +226,36 @@ pub const Keys = struct {
         const tag = record[header_len + ciphertext_len ..][0..tag_len].*;
         switch (self.suite) {
             .aes_128_gcm_sha256 => {
-                if (self.aes_128_gcm) |ctx| {
-                    if (!ctx.open(&nonce, record[0..header_len], ciphertext, &tag, plaintext[0..ciphertext_len])) {
-                        return error.AuthenticationFailed;
-                    }
-                } else Aes128Gcm.decrypt(plaintext[0..ciphertext_len], ciphertext, tag, record[0..header_len], nonce, self.key[0..16].*) catch return error.AuthenticationFailed;
+                if (self.aes_gcm) |*context| context.decrypt(
+                    plaintext[0..ciphertext_len],
+                    ciphertext,
+                    tag,
+                    record[0..header_len],
+                    nonce,
+                ) catch return error.AuthenticationFailed else Aes128Gcm.decrypt(
+                    plaintext[0..ciphertext_len],
+                    ciphertext,
+                    tag,
+                    record[0..header_len],
+                    nonce,
+                    self.key[0..Aes128Gcm.key_length].*,
+                ) catch return error.AuthenticationFailed;
             },
             .aes_256_gcm_sha384 => {
-                if (self.aes_256_gcm) |ctx| {
-                    if (!ctx.open(&nonce, record[0..header_len], ciphertext, &tag, plaintext[0..ciphertext_len])) {
-                        return error.AuthenticationFailed;
-                    }
-                } else Aes256Gcm.decrypt(plaintext[0..ciphertext_len], ciphertext, tag, record[0..header_len], nonce, self.key) catch return error.AuthenticationFailed;
+                if (self.aes_gcm) |*context| context.decrypt(
+                    plaintext[0..ciphertext_len],
+                    ciphertext,
+                    tag,
+                    record[0..header_len],
+                    nonce,
+                ) catch return error.AuthenticationFailed else Aes256Gcm.decrypt(
+                    plaintext[0..ciphertext_len],
+                    ciphertext,
+                    tag,
+                    record[0..header_len],
+                    nonce,
+                    self.key,
+                ) catch return error.AuthenticationFailed;
             },
             .chacha20_poly1305_sha256 => ChaCha20Poly1305.decrypt(plaintext[0..ciphertext_len], ciphertext, tag, record[0..header_len], nonce, self.key) catch return error.AuthenticationFailed,
             .sm4_gcm_sm3 => sm4.Gcm.decrypt(plaintext[0..ciphertext_len], ciphertext, tag, record[0..header_len], nonce, self.key[0..16].*) catch return error.AuthenticationFailed,

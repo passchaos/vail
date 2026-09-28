@@ -81,50 +81,35 @@ The current foundation provides:
   exposes allocation-free block and 96-bit-nonce GCM APIs, and TLS/QUIC can
   negotiate the RFC 8998 TLS_SM4_GCM_SM3 (`0x00c6`) suite with SM3
   HKDF/transcripts, PSK binders, tickets, packet protection, and SM4 header
-  protection. These are intentionally present even though the local
-  `~/Work/aws-lc` checkout currently defines `OPENSSL_NO_SM2`, `OPENSSL_NO_SM3`,
-  and `OPENSSL_NO_SM4`, so higher-level TLS/GMSSL work can proceed while an
-  AWS-LC provider/backend is developed.
+  protection.
 
-## AWS-LC backend configuration
+## Pure-Zig cryptography
 
-Vail defaults to its pure-Zig primitives, including SM2/SM3/SM4. Builds can
-record an AWS-LC checkout with `-Daws-lc-path=/home/passchaos/Work/aws-lc`;
-`vail.crypto.backend` then reports `.aws_lc` and whether that checkout exposes
-ShangMi support. Passing `-Daws-lc-link=true` additionally links
-`<aws-lc-path>/build/crypto/libcrypto.a` and enables the
-`vail.crypto.backend.sha256AwsLc` smoke API; the public
-`vail.crypto.sha256.hash` helper routes through AWS-LC in linked builds and
-falls back to Zig otherwise. The build fails early if AWS-LC has not been built.
-The current local checkout defines `OPENSSL_NO_SM2`, `OPENSSL_NO_SM3`, and
-`OPENSSL_NO_SM4`, so SM2/SM3/SM4 continue to come from Vail's Zig modules
-until an AWS-LC provider/backend with those algorithms is available.
+Vail's cryptographic implementation is self-contained Zig and does not require
+an external crypto library. SHA-256 uses Zig's standard implementation. TLS and
+QUIC AES-128-GCM/AES-256-GCM keys retain a reusable pure-Zig context that caches
+the expanded AES key and GHASH table, avoiding per-record key-dependent setup.
+SM2, SM3, and SM4 are implemented in Vail.
 
-### Current AWS-LC performance evidence
+On x86_64 targets with AVX2, VAES, and VPCLMULQDQ, the prepared AES-GCM path
+uses two-lane AES-CTR and 16-block aggregated GHASH. Other targets retain the
+portable Zig standard-library path. On an Intel Core i9-13900K pinned to CPU 0,
+seven alternating ReleaseFast runs over 1,200-byte QUIC payloads produced these
+median times against the former AWS-LC backend:
 
-On this host, `zig build -Doptimize=ReleaseFast bench-quic-traffic-crypto` versus
-`zig build -Doptimize=ReleaseFast -Daws-lc-path=/home/passchaos/Work/aws-lc
--Daws-lc-link=true bench-quic-traffic-crypto` showed prepared AWS-LC QUIC AES
-keys improving AES-128-GCM from about 462 ns/op seal and 847 ns/op open+seal to
-241 ns/op and 478 ns/op. The unified AES-256-GCM-SHA384 path improved from about
-491 ns/op seal and 1000 ns/op open+seal to 272 ns/op and 545 ns/op. The
-`bench-aws-lc-rs-aead` Rust comparison harness measured aws-lc-rs on the same
-1200-byte shape at about 269/506 ns/op for AES-128-GCM and 289/570 ns/op for
-AES-256-GCM, so the prepared Vail AWS-LC path is faster for AES-128-GCM and for
-open+seal on both AES suites in this run, while AES-256 seal alone is comparable.
-ChaCha20-Poly1305 and the legacy standalone AES-256 SHA-384 helper remain
-reported as controls.
+| Operation | Pure Zig | AWS-LC | Speedup |
+| --- | ---: | ---: | ---: |
+| AES-128-GCM seal | 188 ns | 237 ns | 1.26x |
+| AES-128-GCM open+seal | 383 ns | 487 ns | 1.27x |
+| AES-256-GCM seal | 207 ns | 275 ns | 1.33x |
+| AES-256-GCM open+seal | 421 ns | 550 ns | 1.31x |
 
-Prepared QUIC keys now retain one optional AES-GCM backend context selected by
-the negotiated suite instead of separate mutually exclusive AES-128 and
-AES-256 slots. On the linked BoringSSL-compatible backend used above,
-`PreparedKeys` shrank from 1,344 to 752 bytes (44.0%). Default and linked test
-suites verify prepared/value-key equivalence for AES-128, AES-256, ChaCha20,
-and SM4. Seven fixed-binary, alternating-order 200,000-operation pairs were
-timing-neutral: AES-128 seal/open+seal medians moved from 651/1,205 to
-652/1,206 ns, while unified AES-256 moved from 672/1,331 to 672/1,329 ns.
-The retained result is the deterministic state-size reduction, not a speed
-claim.
+The reusable AES-GCM context is checked against NIST AES-128-GCM and
+AES-256-GCM vectors, Zig's one-shot implementations across block-boundary
+message lengths, authentication-failure cases, TLS record round trips, and
+QUIC packet vectors.
+Run `zig build -Doptimize=ReleaseFast bench-quic-traffic-crypto` for the local
+QUIC traffic-protection benchmark.
 
 ClientHello interop checks are available with `zig build interop-openssl-clienthello`
 and `zig build interop-rustls-clienthello`; both feed real OpenSSL/rustls
@@ -162,5 +147,5 @@ Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.
 
 Consumers that only need ShangMi primitives can import the lightweight
-`vail_sm` build module. It exposes `sm2` and `sm3` without pulling the TLS or
-optional AWS-LC backend graph into the consumer.
+`vail_sm` build module. It exposes `sm2` and `sm3` without pulling the TLS graph
+into the consumer.

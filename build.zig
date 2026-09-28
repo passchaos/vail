@@ -19,64 +19,17 @@ pub fn build(b: *std.Build) void {
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const aws_lc_path = b.option(
-        []const u8,
-        "aws-lc-path",
-        "Path to an AWS-LC checkout or install prefix for optional backend metadata/linking",
-    );
-    const aws_lc_link = b.option(
-        bool,
-        "aws-lc-link",
-        "Link libcrypto from -Daws-lc-path; requires built AWS-LC libraries",
-    ) orelse false;
-    const aws_lc_sm_available = if (aws_lc_path) |path|
-        awsLcHasShangMi(path)
-    else
-        false;
-
-    const build_options = b.addOptions();
-    build_options.addOption(?[]const u8, "aws_lc_path", aws_lc_path);
-    build_options.addOption(bool, "aws_lc_link", aws_lc_link);
-    build_options.addOption(bool, "aws_lc_sm_available", aws_lc_sm_available);
-
-    const aws_lc_translate = b.addTranslateC(.{
-        .root_source_file = b.path("src/crypto/aws_lc/sha256.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    if (aws_lc_path) |path| {
-        aws_lc_translate.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ path, "include" }) });
-    }
 
     const vail = b.addModule("vail", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{ .{
-            .name = "vail_build_options",
-            .module = build_options.createModule(),
-        }, .{
-            .name = "aws_lc_c",
-            .module = aws_lc_translate.createModule(),
-        } },
     });
     _ = b.addModule("vail_sm", .{
         .root_source_file = b.path("src/crypto/sm.zig"),
         .target = target,
         .optimize = optimize,
     });
-    if (aws_lc_path) |path| {
-        vail.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ path, "include" }) });
-        if (aws_lc_link) {
-            const lib_dir = b.pathJoin(&.{ path, "build", "crypto" });
-            if (!pathExists(b.pathJoin(&.{ lib_dir, "libcrypto.a" }))) {
-                @panic("-Daws-lc-link requires " ++
-                    "<aws-lc-path>/build/crypto/libcrypto.a; build AWS-LC first");
-            }
-            vail.addLibraryPath(.{ .cwd_relative = lib_dir });
-            vail.linkSystemLibrary("crypto", .{ .needed = true });
-        }
-    }
     const library = b.addLibrary(.{
         .name = "vail",
         .root_module = vail,
@@ -114,19 +67,6 @@ pub fn build(b: *std.Build) void {
         "Benchmark QUIC AES-GCM and ChaCha20 traffic protection",
     );
     bench_step.dependOn(&run_traffic_bench.step);
-
-    const aws_lc_rs_bench = b.addSystemCommand(&.{
-        "cargo",
-        "run",
-        "--release",
-        "--manifest-path",
-        "bench/rustls_aws_lc_rs_aead/Cargo.toml",
-    });
-    const aws_lc_rs_bench_step = b.step(
-        "bench-aws-lc-rs-aead",
-        "Benchmark aws-lc-rs AES-GCM for comparison",
-    );
-    aws_lc_rs_bench_step.dependOn(&aws_lc_rs_bench.step);
 
     const client_hello_check = b.addExecutable(.{
         .name = "vail-clienthello-check",
@@ -225,28 +165,4 @@ pub fn build(b: *std.Build) void {
         "Exercise Vail's minimal TLS 1.3 server flight with rustls client",
     );
     interop_rustls_min_step.dependOn(&check_rustls_min.step);
-}
-
-fn awsLcHasShangMi(path: []const u8) bool {
-    var buffer: [4096]u8 = undefined;
-    const conf_path = std.fmt.bufPrint(
-        &buffer,
-        "{s}/include/openssl/opensslconf.h",
-        .{path},
-    ) catch return false;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(
-        std.Options.debug_io,
-        conf_path,
-        std.heap.page_allocator,
-        .limited(64 * 1024),
-    ) catch return false;
-    defer std.heap.page_allocator.free(bytes);
-    return std.mem.indexOf(u8, bytes, "OPENSSL_NO_SM2") == null and
-        std.mem.indexOf(u8, bytes, "OPENSSL_NO_SM3") == null and
-        std.mem.indexOf(u8, bytes, "OPENSSL_NO_SM4") == null;
-}
-
-fn pathExists(path: []const u8) bool {
-    std.Io.Dir.cwd().access(std.Options.debug_io, path, .{}) catch return false;
-    return true;
 }

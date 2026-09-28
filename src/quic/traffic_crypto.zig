@@ -13,7 +13,7 @@ const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const ChaCha20IETF = std.crypto.stream.chacha.ChaCha20IETF;
-const backend = @import("../crypto/backend.zig");
+const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
 const sm3 = @import("../crypto/sm3.zig");
 const sm4 = @import("../crypto/sm4.zig");
 const cipher_suite = @import("../tls/cipher_suite.zig");
@@ -222,44 +222,22 @@ pub const Keys = struct {
         }
         const nonce = packetNonce(self.iv, packet_number);
         switch (self.suite) {
-            .aes_128_gcm_sha256 => {
-                if (protectAwsLcAesGcm(
-                    .aes_128_gcm,
-                    self.key[0..Aes128Gcm.key_length],
-                    nonce,
-                    associated_data,
-                    plaintext,
-                    ciphertext,
-                    tag,
-                )) return;
-                Aes128Gcm.encrypt(
-                    ciphertext,
-                    tag,
-                    plaintext,
-                    associated_data,
-                    nonce,
-                    self.key[0..Aes128Gcm.key_length].*,
-                );
-            },
-            .aes_256_gcm_sha384 => {
-                if (protectAwsLcAesGcm(
-                    .aes_256_gcm,
-                    &self.key,
-                    nonce,
-                    associated_data,
-                    plaintext,
-                    ciphertext,
-                    tag,
-                )) return;
-                Aes256Gcm.encrypt(
-                    ciphertext,
-                    tag,
-                    plaintext,
-                    associated_data,
-                    nonce,
-                    self.key,
-                );
-            },
+            .aes_128_gcm_sha256 => Aes128Gcm.encrypt(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                nonce,
+                self.key[0..Aes128Gcm.key_length].*,
+            ),
+            .aes_256_gcm_sha384 => Aes256Gcm.encrypt(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                nonce,
+                self.key,
+            ),
             .sm4_gcm_sm3 => sm4.Gcm.encrypt(
                 ciphertext,
                 tag,
@@ -293,44 +271,22 @@ pub const Keys = struct {
         }
         const nonce = packetNonce(self.iv, packet_number);
         switch (self.suite) {
-            .aes_128_gcm_sha256 => {
-                if (openAwsLcAesGcm(
-                    .aes_128_gcm,
-                    self.key[0..Aes128Gcm.key_length],
-                    nonce,
-                    associated_data,
-                    ciphertext,
-                    tag,
-                    plaintext,
-                )) return;
-                try Aes128Gcm.decrypt(
-                    plaintext,
-                    ciphertext,
-                    tag,
-                    associated_data,
-                    nonce,
-                    self.key[0..Aes128Gcm.key_length].*,
-                );
-            },
-            .aes_256_gcm_sha384 => {
-                if (openAwsLcAesGcm(
-                    .aes_256_gcm,
-                    &self.key,
-                    nonce,
-                    associated_data,
-                    ciphertext,
-                    tag,
-                    plaintext,
-                )) return;
-                try Aes256Gcm.decrypt(
-                    plaintext,
-                    ciphertext,
-                    tag,
-                    associated_data,
-                    nonce,
-                    self.key,
-                );
-            },
+            .aes_128_gcm_sha256 => try Aes128Gcm.decrypt(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                nonce,
+                self.key[0..Aes128Gcm.key_length].*,
+            ),
+            .aes_256_gcm_sha384 => try Aes256Gcm.decrypt(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                nonce,
+                self.key,
+            ),
             .sm4_gcm_sm3 => try sm4.Gcm.decrypt(
                 plaintext,
                 ciphertext,
@@ -434,31 +390,27 @@ pub fn nextTrafficSecret(
 
 pub const PreparedKeys = struct {
     keys: Keys,
-    aes_gcm: ?backend.AesGcmContext = null,
+    aes_gcm: ?prepared_aes_gcm.Context = null,
 
     /// Prepare packet-protection state for repeated operations with one key.
-    /// In AWS-LC linked builds this caches EVP_AEAD_CTX precomputation so the
-    /// hot packet path avoids per-packet context initialization. Non-AES suites
-    /// and non-linked builds retain the allocation-free Zig implementation.
+    /// AES suites cache the pure-Zig key schedule and GHASH table so the hot
+    /// packet path avoids repeating key-dependent initialization. Other suites
+    /// retain their allocation-free one-shot implementations.
     pub fn init(keys: Keys) PreparedKeys {
         return .{
             .keys = keys,
             .aes_gcm = switch (keys.suite) {
-                .aes_128_gcm_sha256 => backend.AesGcmContext.init(
-                    .aes_128_gcm,
-                    keys.key[0..Aes128Gcm.key_length],
+                .aes_128_gcm_sha256 => prepared_aes_gcm.Context.init128(
+                    keys.key[0..Aes128Gcm.key_length].*,
                 ),
-                .aes_256_gcm_sha384 => backend.AesGcmContext.init(
-                    .aes_256_gcm,
-                    &keys.key,
-                ),
+                .aes_256_gcm_sha384 => prepared_aes_gcm.Context.init256(keys.key),
                 else => null,
             },
         };
     }
 
     pub fn deinit(self: *PreparedKeys) void {
-        if (self.aes_gcm) |*ctx| ctx.deinit();
+        if (self.aes_gcm) |*context| context.deinit();
         self.* = undefined;
     }
 
@@ -474,13 +426,15 @@ pub const PreparedKeys = struct {
             return error.InvalidPayloadLength;
         }
         const nonce = packetNonce(self.keys.iv, packet_number);
-        switch (self.keys.suite) {
-            .aes_128_gcm_sha256, .aes_256_gcm_sha384 => if (self.aes_gcm) |*ctx| {
-                if (ctx.seal(&nonce, associated_data, plaintext, ciphertext, tag)) {
-                    return;
-                }
-            },
-            else => {},
+        if (self.aes_gcm) |*context| {
+            context.encrypt(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                nonce,
+            );
+            return;
         }
         try self.keys.protect(
             packet_number,
@@ -504,14 +458,15 @@ pub const PreparedKeys = struct {
             return error.InvalidPayloadLength;
         }
         const nonce = packetNonce(self.keys.iv, packet_number);
-        switch (self.keys.suite) {
-            .aes_128_gcm_sha256, .aes_256_gcm_sha384 => if (self.aes_gcm) |*ctx| {
-                if (ctx.open(&nonce, associated_data, ciphertext, &tag, plaintext)) {
-                    return;
-                }
-                return error.AuthenticationFailed;
-            },
-            else => {},
+        if (self.aes_gcm) |*context| {
+            try context.decrypt(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                nonce,
+            );
+            return;
         }
         try self.keys.open(
             packet_number,
@@ -532,32 +487,4 @@ pub const PreparedKeys = struct {
 
 pub fn packetNonce(iv: [iv_len]u8, packet_number: u64) [iv_len]u8 {
     return common.packetNonce(iv, packet_number);
-}
-
-fn protectAwsLcAesGcm(
-    suite: backend.AesGcmSuite,
-    key: []const u8,
-    nonce: [iv_len]u8,
-    associated_data: []const u8,
-    plaintext: []const u8,
-    ciphertext: []u8,
-    tag: *[tag_len]u8,
-) bool {
-    var ctx = backend.AesGcmContext.init(suite, key) orelse return false;
-    defer ctx.deinit();
-    return ctx.seal(&nonce, associated_data, plaintext, ciphertext, tag);
-}
-
-fn openAwsLcAesGcm(
-    suite: backend.AesGcmSuite,
-    key: []const u8,
-    nonce: [iv_len]u8,
-    associated_data: []const u8,
-    ciphertext: []const u8,
-    tag: [tag_len]u8,
-    plaintext: []u8,
-) bool {
-    var ctx = backend.AesGcmContext.init(suite, key) orelse return false;
-    defer ctx.deinit();
-    return ctx.open(&nonce, associated_data, ciphertext, &tag, plaintext);
 }

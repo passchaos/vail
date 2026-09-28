@@ -1,14 +1,12 @@
 //! Fixed-length SHA-256 digest and constant-time comparison helpers.
 
 const std = @import("std");
-const backend = @import("backend.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 pub const digest_len = Sha256.digest_length;
 pub const Digest = [digest_len]u8;
 
 pub fn hash(bytes: []const u8) Digest {
-    if (backend.sha256AwsLc(bytes)) |digest| return digest;
     var output: Digest = undefined;
     Sha256.hash(bytes, &output, .{});
     return output;
@@ -18,7 +16,7 @@ pub fn eql(expected: Digest, received: Digest) bool {
     return std.crypto.timing_safe.eql(Digest, expected, received);
 }
 
-test "SHA-256 helper uses a stable digest across backends" {
+test "SHA-256 helper produces a stable digest" {
     var expected: Digest = undefined;
     _ = try std.fmt.hexToBytes(
         &expected,

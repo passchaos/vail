@@ -1,7 +1,6 @@
 //! SM2 public-key signature verification (GB/T 32918.2-2016).
 //!
-//! The local AWS-LC checkout currently defines `OPENSSL_NO_SM2`, so Vail keeps
-//! a portable verifier here as the first SM2 building block.  The code covers
+//! Vail keeps a portable verifier here as its SM2 building block. The code covers
 //! the SM2-specific ZA binding (`user_id || curve || public key`) and the SM2
 //! verification equation; secret-key signing is intentionally left for a later
 //! constant-time/provider-backed slice.

@@ -1,6 +1,6 @@
 //! Reusable authenticated cryptographic primitives.
 
-pub const backend = @import("backend.zig");
+pub const aes_gcm = @import("aes_gcm.zig");
 pub const mac = @import("mac.zig");
 pub const memory = @import("memory.zig");
 pub const sha256 = @import("sha256.zig");
@@ -10,7 +10,7 @@ pub const sm4 = @import("sm4.zig");
 
 test {
     _ = @import("tests.zig");
-    _ = backend;
+    _ = aes_gcm;
     _ = sm2;
     _ = sm3;
     _ = sm4;
