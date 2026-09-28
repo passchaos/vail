@@ -160,3 +160,7 @@ record reassembly remain downstream transport concerns.
 
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.
+
+Consumers that only need ShangMi primitives can import the lightweight
+`vail_sm` build module. It exposes `sm2` and `sm3` without pulling the TLS or
+optional AWS-LC backend graph into the consumer.

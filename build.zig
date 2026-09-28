@@ -60,6 +60,11 @@ pub fn build(b: *std.Build) void {
             .module = aws_lc_translate.createModule(),
         } },
     });
+    _ = b.addModule("vail_sm", .{
+        .root_source_file = b.path("src/crypto/sm.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     if (aws_lc_path) |path| {
         vail.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ path, "include" }) });
         if (aws_lc_link) {
