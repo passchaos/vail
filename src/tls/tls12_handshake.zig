@@ -20,6 +20,7 @@ const ext_server_name: u16 = 0x0000;
 const ext_ec_point_formats: u16 = 0x000b;
 const ext_application_layer_protocol_negotiation: u16 = 0x0010;
 const ext_extended_master_secret: u16 = 0x0017;
+const ext_session_ticket: u16 = 0x0023;
 const ext_renegotiation_info: u16 = 0xff01;
 const named_curve_type: u8 = 3;
 
@@ -59,6 +60,9 @@ pub const Policy = struct {
     client_certificate_authorities: ?[]const []const u8 = null,
     /// Non-empty ID issued by a full handshake for later stateful resumption.
     new_session_id: []const u8 = &.{},
+    /// Acknowledge RFC 5077 when the client offers the session_ticket
+    /// extension. Ticket issuance remains owned by the connection state.
+    issue_session_ticket: bool = false,
 };
 
 pub const Selection = struct {
@@ -66,6 +70,7 @@ pub const Selection = struct {
     group: u16,
     alpn_protocol: ?[]const u8,
     extended_master_secret: bool,
+    session_ticket_acknowledged: bool = false,
 };
 
 pub const ServerFlight = struct {
@@ -80,6 +85,7 @@ pub const ParsedServerHello = struct {
     alpn_protocol: ?[]const u8,
     extended_master_secret: bool,
     secure_renegotiation: bool,
+    session_ticket_acknowledged: bool,
 };
 
 pub const ParsedServerKeyExchange = struct {
@@ -189,6 +195,7 @@ pub fn parseServerHello(
     var seen_alpn = false;
     var seen_ems = false;
     var seen_renegotiation = false;
+    var seen_session_ticket = false;
     var selected_alpn: ?[]const u8 = null;
     while (ext_pos < extensions.len) {
         const extension_type = try readInt(u16, extensions, &ext_pos);
@@ -233,6 +240,13 @@ pub fn parseServerHello(
                     return error.InvalidServerHello;
                 }
             },
+            ext_session_ticket => {
+                if (seen_session_ticket) {
+                    return error.DuplicateServerExtension;
+                }
+                seen_session_ticket = true;
+                if (payload.len != 0) return error.InvalidServerHello;
+            },
             else => return error.UnsupportedServerExtension,
         }
     }
@@ -249,6 +263,7 @@ pub fn parseServerHello(
         .alpn_protocol = selected_alpn,
         .extended_master_secret = seen_ems,
         .secure_renegotiation = seen_renegotiation,
+        .session_ticket_acknowledged = seen_session_ticket,
     };
 }
 
@@ -428,6 +443,9 @@ pub fn select(
             policy.alpn_protocols,
         ),
         .extended_master_secret = client.offers_extended_master_secret,
+        .session_ticket_acknowledged = policy.issue_session_ticket and
+            client.session_ticket != null and
+            client.offers_extended_master_secret,
     };
 }
 
@@ -598,6 +616,14 @@ fn writeServerHello(
             alpn.items,
         );
     }
+    if (selection.session_ticket_acknowledged) {
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_session_ticket,
+            &.{},
+        );
+    }
 
     const body_len = 2 + 32 + 1 + session_id.len + 2 + 1 + 2 +
         extensions.items.len;
@@ -644,6 +670,9 @@ pub fn writeResumedServerHello(
         else
             session.alpn(),
         .extended_master_secret = true,
+        .session_ticket_acknowledged = policy.issue_session_ticket and
+            client.session_ticket != null and
+            client.offers_extended_master_secret,
     };
     try writeServerHello(
         out,
@@ -918,7 +947,7 @@ fn parseSelectedAlpn(
     return error.ServerSelectedUnofferedAlpn;
 }
 
-fn selectAlpn(
+pub fn selectAlpn(
     client_protocols: []const u8,
     server_protocols: []const []const u8,
 ) Error!?[]const u8 {

@@ -18,6 +18,7 @@ pub const ext_application_layer_protocol_negotiation: u16 = 0x0010;
 pub const ext_client_certificate_type: u16 = 0x0013;
 pub const ext_server_certificate_type: u16 = 0x0014;
 pub const ext_extended_master_secret: u16 = 0x0017;
+pub const ext_session_ticket: u16 = 0x0023;
 pub const ext_compress_certificate: u16 =
     certificate_compression.extension_type_compress_certificate;
 pub const ext_early_data: u16 = 0x002a;
@@ -55,6 +56,9 @@ pub const WriteOptions = struct {
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_certificate_types: []const auth.CertificateType = &.{},
     client_certificate_types: []const auth.CertificateType = &.{},
+    /// Null omits RFC 5077. A non-null empty slice requests a new ticket;
+    /// non-empty bytes offer a cached ticket for TLS 1.2 resumption.
+    session_ticket: ?[]const u8 = null,
 };
 
 pub const OfferedKeyShare = struct {
@@ -82,6 +86,7 @@ pub const FlexibleWriteOptions = struct {
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_certificate_types: []const auth.CertificateType = &.{},
     client_certificate_types: []const auth.CertificateType = &.{},
+    session_ticket: ?[]const u8 = null,
 };
 
 /// Write a standards-focused TLS 1.3 ClientHello for stream transports.
@@ -112,6 +117,7 @@ pub fn write(
         .certificate_compression_algorithms = options.certificate_compression_algorithms,
         .server_certificate_types = options.server_certificate_types,
         .client_certificate_types = options.client_certificate_types,
+        .session_ticket = options.session_ticket,
     });
 }
 
@@ -213,6 +219,14 @@ pub fn writeWithKeyShare(
         ext_client_certificate_type,
         options.client_certificate_types,
     );
+    if (options.session_ticket) |ticket| {
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_session_ticket,
+            ticket,
+        );
+    }
 
     var default_group: [1]u16 = undefined;
     const offered_groups: []const u16 = if (options.supported_groups.len != 0)
@@ -436,6 +450,7 @@ pub const Parsed = struct {
     certificate_compression_algorithms: []const u8 = &.{},
     server_certificate_types: []const u8 = &.{},
     client_certificate_types: []const u8 = &.{},
+    session_ticket: ?[]const u8 = null,
     supported_groups: []const u8 = &.{},
     signature_algorithms: []const u8 = &.{},
     alpn_protocols: []const u8 = &.{},
@@ -657,6 +672,7 @@ pub fn parse(bytes: []const u8) Error!Parsed {
                 parsed.client_certificate_types =
                     try parseCertificateTypes(payload);
             },
+            ext_session_ticket => parsed.session_ticket = payload,
             ext_compress_certificate => {
                 parsed.certificate_compression_algorithms =
                     try parseCertificateCompressionAlgorithms(payload);
@@ -918,6 +934,29 @@ test "RFC 7250 certificate type lists round-trip and validate structure" {
     );
     const future_type = try parseCertificateTypes(&.{ 1, 254 });
     try std.testing.expectEqualSlices(u8, &.{254}, future_type);
+}
+
+test "RFC 5077 session ticket request and offer round-trip" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try write(&encoded, allocator, .{
+        .random = [_]u8{0x7d} ** 32,
+        .x25519_public_key = [_]u8{0x7e} ** 32,
+        .session_ticket = &.{},
+    });
+    const request = try parse(encoded.items);
+    try std.testing.expect(request.session_ticket != null);
+    try std.testing.expectEqual(@as(usize, 0), request.session_ticket.?.len);
+
+    encoded.clearRetainingCapacity();
+    try write(&encoded, allocator, .{
+        .random = [_]u8{0x7f} ** 32,
+        .x25519_public_key = [_]u8{0x80} ** 32,
+        .session_ticket = "opaque-ticket",
+    });
+    const offer = try parse(encoded.items);
+    try std.testing.expectEqualStrings("opaque-ticket", offer.session_ticket.?);
 }
 
 test "TLS 1.2 ClientHello omits the TLS 1.3 key_share extension" {

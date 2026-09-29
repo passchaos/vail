@@ -70,9 +70,46 @@ test "public modules are reachable" {
         vail.tls,
         "tls12_server_connection",
     ));
+    try std.testing.expect(@hasDecl(vail.tls, "tls12_ticket"));
     try std.testing.expect(@hasDecl(
         vail.tls.tls12_server_connection,
         "ServerConnection",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.tls12_ticket,
+        "Cached",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.tls12_client_connection.Config,
+        "ticket_resumption",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.tls12_client_connection.Config,
+        "request_session_ticket",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.tls12_client_connection.Established,
+        "createTicketSession",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.tls12_server_connection.Config,
+        "session_tickets",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.client_connection.Config,
+        "tls12_session_ticket",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.ticket_keyring.Keyring,
+        "sealTls12",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.ticket_keyring.Keyring,
+        "openTls12",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.tls12_server_connection,
+        "SessionTicketPolicy",
     ));
     try std.testing.expect(@hasDecl(vail.tls, "transcript"));
     try std.testing.expect(@hasDecl(

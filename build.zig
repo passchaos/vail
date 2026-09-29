@@ -563,8 +563,8 @@ pub fn build(b: *std.Build) void {
         "work=$(mktemp -d /tmp/vail-openssl-tls12-resume.XXXXXX); " ++
             "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
             "openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
-            "openssl s_server -accept 127.0.0.1:24448 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-256 -no_ticket -cert \"$work/cert.pem\" -key \"$work/key.pem\" -alpn http/1.1 -www -naccept 2 >\"$work/server.log\" 2>&1 & pid=$!; " ++
-            "sleep 0.2; timeout 12s $1 >\"$work/client.log\" 2>&1; wait $pid; " ++
+            "timeout 20s openssl s_server -accept 127.0.0.1:24448 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-256 -no_ticket -cert \"$work/cert.pem\" -key \"$work/key.pem\" -alpn http/1.1 -www -naccept 2 >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.5; timeout 12s $1 >\"$work/client.log\" 2>&1; wait $pid; " ++
             "grep -q 'TLS 1.2 session resumption verified' \"$work/client.log\" && " ++
             "grep -q '2 server accepts that finished' \"$work/server.log\" && " ++
             "grep -q '1 session cache hits' \"$work/server.log\"",
@@ -592,7 +592,7 @@ pub fn build(b: *std.Build) void {
     check_vail_tls12_server_resumption.addArg(
         "work=$(mktemp -d /tmp/vail-openssl-tls12-resume-server.XXXXXX); " ++
             "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
-            "$1 >\"$work/server.log\" 2>&1 & pid=$!; sleep 0.2; " ++
+            "timeout 20s $1 >\"$work/server.log\" 2>&1 & pid=$!; sleep 0.5; " ++
             "printf one | timeout 8s openssl s_client -connect 127.0.0.1:24449 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-256 -no_ticket -sess_out \"$work/session.pem\" -ign_eof >\"$work/client1.log\" 2>&1 || true; " ++
             "printf two | timeout 8s openssl s_client -connect 127.0.0.1:24449 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-256 -no_ticket -sess_in \"$work/session.pem\" -ign_eof >\"$work/client2.log\" 2>&1 || true; " ++
             "wait $pid; " ++
@@ -614,8 +614,8 @@ pub fn build(b: *std.Build) void {
     const check_rustls_tls12_server_resumption = b.addSystemCommand(&.{ "sh", "-c" });
     check_rustls_tls12_server_resumption.step.dependOn(&build_rustls_min.step);
     check_rustls_tls12_server_resumption.addArg(
-        "$1 > /tmp/vail-rustls-tls12-resume-server.log 2>&1 & pid=$!; " ++
-            "sleep 0.2; timeout 12s bench/rustls_min_client/target/release/vail-rustls-tls12-resume-client > /tmp/vail-rustls-tls12-resume-client.log 2>&1; wait $pid; " ++
+        "timeout 20s $1 > /tmp/vail-rustls-tls12-resume-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.5; timeout 12s bench/rustls_min_client/target/release/vail-rustls-tls12-resume-client > /tmp/vail-rustls-tls12-resume-client.log 2>&1; wait $pid; " ++
             "grep -q 'TLS 1.2 server session resumption verified' /tmp/vail-rustls-tls12-resume-server.log && " ++
             "grep -q 'rustls TLS 1.2 session resumption verified' /tmp/vail-rustls-tls12-resume-client.log",
     );
@@ -637,8 +637,8 @@ pub fn build(b: *std.Build) void {
         "work=$(mktemp -d /tmp/vail-rustls-tls12-resume-client.XXXXXX); " ++
             "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
             "openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
-            "bench/rustls_min_server/target/release/vail-rustls-tls12-resume-server \"$work/cert.pem\" \"$work/key.pem\" >\"$work/server.log\" 2>&1 & pid=$!; " ++
-            "sleep 0.2; timeout 12s $1 >\"$work/client.log\" 2>&1; wait $pid; " ++
+            "timeout 20s bench/rustls_min_server/target/release/vail-rustls-tls12-resume-server \"$work/cert.pem\" \"$work/key.pem\" >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.5; timeout 12s $1 >\"$work/client.log\" 2>&1; wait $pid; " ++
             "grep -q 'rustls TLS 1.2 session resumption verified' \"$work/server.log\" && " ++
             "grep -q 'TLS 1.2 session resumption verified' \"$work/client.log\"",
     );
@@ -652,6 +652,105 @@ pub fn build(b: *std.Build) void {
     );
     interop_rustls_tls12_client_resumption_step.dependOn(
         &check_rustls_tls12_client_resumption.step,
+    );
+
+    const min_tls12_ticket_server = b.addExecutable(.{
+        .name = "vail-min-tls12-ticket-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/min_tls12_ticket_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_openssl_tls12_ticket_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_openssl_tls12_ticket_server.addArg(
+        "work=$(mktemp -d /tmp/vail-openssl-tls12-ticket-server.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "timeout 20s $1 >\"$work/server.log\" 2>&1 & pid=$!; sleep 0.5; " ++
+            "printf ping | timeout 8s openssl s_client -connect 127.0.0.1:24454 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-256 -alpn http/1.1 -sess_out \"$work/session.pem\" -ign_eof >\"$work/client1.log\" 2>&1 || true; " ++
+            "test -s \"$work/session.pem\"; " ++
+            "printf ping | timeout 8s openssl s_client -connect 127.0.0.1:24454 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-256 -alpn http/1.1 -sess_in \"$work/session.pem\" -ign_eof >\"$work/client2.log\" 2>&1 || true; " ++
+            "wait $pid; " ++
+            "grep -q 'Vail TLS 1.2 stateless ticket resumption verified' \"$work/server.log\" && " ++
+            "grep -q 'Reused, TLSv1.2' \"$work/client2.log\"",
+    );
+    check_openssl_tls12_ticket_server.addArg("sh");
+    check_openssl_tls12_ticket_server.addArtifactArg(min_tls12_ticket_server);
+    const interop_openssl_tls12_ticket_server_step = b.step(
+        "interop-openssl-tls12-ticket-server",
+        "Exercise Vail's TLS 1.2 stateless-ticket server against OpenSSL",
+    );
+    interop_openssl_tls12_ticket_server_step.dependOn(
+        &check_openssl_tls12_ticket_server.step,
+    );
+
+    const check_rustls_tls12_ticket_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_tls12_ticket_server.step.dependOn(&build_rustls_min.step);
+    check_rustls_tls12_ticket_server.addArg(
+        "timeout 20s $1 > /tmp/vail-rustls-tls12-ticket-server.log 2>&1 & pid=$!; sleep 0.5; " ++
+            "timeout 18s bench/rustls_min_client/target/release/vail-rustls-tls12-ticket-client > /tmp/vail-rustls-tls12-ticket-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'Vail TLS 1.2 stateless ticket resumption verified' /tmp/vail-rustls-tls12-ticket-server.log && " ++
+            "grep -q 'rustls/AWS-LC TLS 1.2 ticket resumption verified' /tmp/vail-rustls-tls12-ticket-client.log",
+    );
+    check_rustls_tls12_ticket_server.addArg("sh");
+    check_rustls_tls12_ticket_server.addArtifactArg(min_tls12_ticket_server);
+    const interop_rustls_tls12_ticket_server_step = b.step(
+        "interop-rustls-tls12-ticket-server",
+        "Exercise Vail's TLS 1.2 stateless-ticket server against rustls/AWS-LC",
+    );
+    interop_rustls_tls12_ticket_server_step.dependOn(
+        &check_rustls_tls12_ticket_server.step,
+    );
+
+    const min_tls12_ticket_client = b.addExecutable(.{
+        .name = "vail-min-tls12-ticket-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/min_tls12_ticket_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_openssl_tls12_ticket_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_openssl_tls12_ticket_client.addArg(
+        "timeout 20s openssl s_server -accept 127.0.0.1:24455 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-256 -cert src/crypto/testdata/rsa_signing_cert.pem -key src/crypto/testdata/rsa_signing_key.pem -alpn http/1.1 -www -naccept 2 -no_cache > /tmp/vail-openssl-tls12-ticket-client-server.log 2>&1 & pid=$!; sleep 0.5; " ++
+            "timeout 18s $1 > /tmp/vail-openssl-tls12-ticket-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'Vail TLS 1.2 ticket resumption verified' /tmp/vail-openssl-tls12-ticket-client.log && " ++
+            "grep -q '1 session cache hits' /tmp/vail-openssl-tls12-ticket-client-server.log",
+    );
+    check_openssl_tls12_ticket_client.addArg("sh");
+    check_openssl_tls12_ticket_client.addArtifactArg(min_tls12_ticket_client);
+    const interop_openssl_tls12_ticket_client_step = b.step(
+        "interop-openssl-tls12-ticket-client",
+        "Exercise Vail's TLS 1.2 ticket client against OpenSSL",
+    );
+    interop_openssl_tls12_ticket_client_step.dependOn(
+        &check_openssl_tls12_ticket_client.step,
+    );
+
+    const check_rustls_tls12_ticket_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_tls12_ticket_client.step.dependOn(&build_rustls_server.step);
+    check_rustls_tls12_ticket_client.addArg(
+        "timeout 20s bench/rustls_min_server/target/release/vail-rustls-tls12-ticket-server src/crypto/testdata/rsa_signing_cert.pem src/crypto/testdata/rsa_signing_key.pem > /tmp/vail-rustls-tls12-ticket-client-server.log 2>&1 & pid=$!; sleep 0.5; " ++
+            "timeout 18s $1 > /tmp/vail-rustls-tls12-ticket-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'Vail TLS 1.2 ticket resumption verified' /tmp/vail-rustls-tls12-ticket-client.log && " ++
+            "grep -q 'rustls/AWS-LC TLS 1.2 ticket resumption verified' /tmp/vail-rustls-tls12-ticket-client-server.log",
+    );
+    check_rustls_tls12_ticket_client.addArg("sh");
+    check_rustls_tls12_ticket_client.addArtifactArg(min_tls12_ticket_client);
+    const interop_rustls_tls12_ticket_client_step = b.step(
+        "interop-rustls-tls12-ticket-client",
+        "Exercise Vail's TLS 1.2 ticket client against rustls/AWS-LC",
+    );
+    interop_rustls_tls12_ticket_client_step.dependOn(
+        &check_rustls_tls12_ticket_client.step,
     );
 
     const min_versioned_server = b.addExecutable(.{

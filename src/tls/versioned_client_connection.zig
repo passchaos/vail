@@ -85,12 +85,30 @@ pub fn ClientConnection(
             config: Config,
             output: *std.ArrayList(u8),
         ) Error!Self {
-            if (config.tls12.resumption != null) {
+            if (config.tls12.resumption != null and
+                config.tls12.ticket_resumption != null)
+            {
                 return error.InvalidUnifiedClientHello;
             }
             const output_start = output.items.len;
             errdefer output.shrinkRetainingCapacity(output_start);
-            var tls13 = try Tls13.init(config.tls13, output);
+            var tls13_config = config.tls13;
+            const ticket_session_id = client12.deriveTicketSessionId(
+                config.tls13.random,
+            );
+            if (config.tls12.ticket_resumption) |cached| {
+                tls13_config.session_id = &ticket_session_id;
+                tls13_config.tls12_session_ticket = cached.ticket();
+            } else if (config.tls12.resumption) |*session| {
+                tls13_config.session_id = session.id();
+                tls13_config.tls12_session_ticket = if (config.tls12.request_session_ticket)
+                    &.{}
+                else
+                    null;
+            } else if (config.tls12.request_session_ticket) {
+                tls13_config.tls12_session_ticket = &.{};
+            }
+            var tls13 = try Tls13.init(tls13_config, output);
             errdefer tls13.deinit();
             if (output.items.len - output_start < record.header_len) {
                 return error.InvalidUnifiedClientHello;
@@ -279,4 +297,69 @@ fn replayPrefix(
         }
     }
     return last;
+}
+
+test "versioned ClientHello carries a TLS 1.2 session ticket" {
+    const allocator = std.testing.allocator;
+    const tls12 = @import("tls12.zig");
+    const tls12_ticket = @import("tls12_ticket.zig");
+    const key_exchange = @import("key_exchange.zig");
+    var cached = try tls12_ticket.Cached.init(
+        allocator,
+        "opaque-rfc5077-ticket",
+        &.{},
+        .ecdhe_rsa_aes_128_gcm_sha256,
+        [_]u8{0x61} ** tls12.master_secret_len,
+        "example.com",
+        "h2",
+        100,
+        60,
+    );
+    defer cached.deinit();
+    var tls13_key = key_exchange.ClientKeyMaterial{
+        .x25519 = [_]u8{0x62} ** key_exchange.secret_len,
+    };
+    var tls13_retry_key = key_exchange.ClientKeyMaterial{
+        .secp256r1 = [_]u8{0} ** (key_exchange.p256.secret_len - 1) ++ .{2},
+    };
+    var tls12_key = [_]u8{0} ** key_exchange.p256.secret_len;
+    tls12_key[tls12_key.len - 1] = 1;
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var client = try ClientConnection(4096, 4096).init(.{
+        .tls13 = .{
+            .allocator = allocator,
+            .random = [_]u8{0x63} ** 32,
+            .server_name = "example.com",
+            .key_material = &tls13_key,
+            .retry_key_material = &tls13_retry_key,
+            .additional_cipher_suites = &.{ 0xc02f, 0x00ff },
+            .supported_versions = &.{ 0x0304, 0x0303 },
+            .offer_extended_master_secret = true,
+            .alpn_protocols = &.{"h2"},
+            .server_verifier = .{},
+        },
+        .tls12 = .{
+            .allocator = allocator,
+            .random = [_]u8{0x63} ** 32,
+            .server_name = "example.com",
+            .client_private_key = &tls12_key,
+            .policy = .{ .alpn_protocols = &.{"h2"} },
+            .server_verifier = .{},
+            .ticket_resumption = &cached,
+            .now_seconds = 101,
+        },
+    }, &output);
+    defer client.deinit();
+    const hello = try client_hello.parse(output.items[record.header_len..]);
+    try std.testing.expectEqualSlices(
+        u8,
+        cached.ticket(),
+        hello.session_ticket.?,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &client12.deriveTicketSessionId([_]u8{0x63} ** 32),
+        hello.session_id,
+    );
 }

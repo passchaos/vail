@@ -72,7 +72,55 @@ pub const Session = struct {
         created_at_seconds: u64,
         lifetime_seconds: u32,
     ) Error!Session {
-        if (session_id.len == 0 or session_id.len > max_session_id_len) {
+        return initInternal(
+            session_id,
+            suite,
+            master_secret,
+            identity,
+            alpn_protocol,
+            created_at_seconds,
+            lifetime_seconds,
+            false,
+        );
+    }
+
+    /// RFC 5077 tickets do not require the issuing ServerHello to allocate a
+    /// session ID. A fresh non-empty signaling ID is generated when the ticket
+    /// is offered for resumption.
+    pub fn initForTicket(
+        session_id: []const u8,
+        suite: Suite,
+        master_secret: [master_secret_len]u8,
+        identity: []const u8,
+        alpn_protocol: []const u8,
+        created_at_seconds: u64,
+        lifetime_seconds: u32,
+    ) Error!Session {
+        return initInternal(
+            session_id,
+            suite,
+            master_secret,
+            identity,
+            alpn_protocol,
+            created_at_seconds,
+            lifetime_seconds,
+            true,
+        );
+    }
+
+    fn initInternal(
+        session_id: []const u8,
+        suite: Suite,
+        master_secret: [master_secret_len]u8,
+        identity: []const u8,
+        alpn_protocol: []const u8,
+        created_at_seconds: u64,
+        lifetime_seconds: u32,
+        allow_empty_id: bool,
+    ) Error!Session {
+        if ((!allow_empty_id and session_id.len == 0) or
+            session_id.len > max_session_id_len)
+        {
             return error.InvalidSessionId;
         }
         if (identity.len == 0) return error.SessionContextMismatch;

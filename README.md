@@ -127,7 +127,9 @@ The current foundation provides:
   established server state. Stateful TLS 1.2 session-ID resumption uses the
   abbreviated ServerHello/CCS/Finished exchange and binds cached master
   secrets to their suite, server identity, ALPN, and expiration time. RFC 5077
-  TLS 1.2 session tickets are not yet included.
+  stateless session tickets are supported in both client and server roles,
+  including ticket renewal, invalid-ticket fallback, bounded lifetime and key
+  rotation, and AES-256-GCM sealing bound to the server identity and ALPN;
 - Compile-time-specialized SHA-256/SHA-384 TLS 1.3 schedules, runtime
   hash-bound secrets/transcripts, 32/48-byte PSK binders, CertificateVerify,
   Finished, exporter keying material, resumption PSKs, and stateless tickets.
@@ -251,6 +253,20 @@ keys.
 The equivalent `interop-rustls-tls12-resumption-client` and
 `interop-rustls-tls12-resumption-server` steps require rustls with AWS-LC to
 report the second connection as `Resumed`.
+`interop-openssl-tls12-ticket-client`,
+`interop-openssl-tls12-ticket-server`,
+`interop-rustls-tls12-ticket-client`, and
+`interop-rustls-tls12-ticket-server` repeat the two-connection check with RFC
+5077 stateless tickets and disable or omit server-side session-ID storage so a
+false-positive cache hit cannot satisfy the gate.
+Applications enable client-side RFC 5077 discovery with
+`tls12_client_connection.Config.request_session_ticket`, turn an authenticated
+ticket-bearing connection into owned cache state with
+`Established.createTicketSession`, and offer that state through
+`Config.ticket_resumption`. Servers configure a rotating
+`ticket_keyring.Keyring` through
+`tls12_server_connection.Config.session_tickets`. The unified client forwards
+the same ticket in its shared TLS 1.2/TLS 1.3 ClientHello.
 `interop-openssl-versioned-server-tls13`,
 `interop-openssl-versioned-server-tls12`,
 `interop-openssl-versioned-client-tls13`, and

@@ -18,13 +18,14 @@ const key_exchange = @import("key_exchange.zig");
 const record13 = @import("record.zig");
 const stream = @import("stream.zig");
 const tls12 = @import("tls12.zig");
+const tls12_ticket = @import("tls12_ticket.zig");
 const handshake = @import("tls12_handshake.zig");
 const transcript = @import("transcript.zig");
 
 pub const Error = std.mem.Allocator.Error || stream.Error ||
     stream.HandshakeError || client_hello.Error || handshake.Error ||
     key_exchange.Error || tls12.Error || auth.Error || client_auth.Error ||
-    alert.Error || error{
+    tls12_ticket.Error || alert.Error || error{
     ClientHelloTooLarge,
     ServerFlightTooLarge,
     UnsupportedProfile,
@@ -63,6 +64,10 @@ pub const Config = struct {
     server_verifier: auth.ClientVerifier,
     client_identity: ?client_auth.ClientIdentity = null,
     resumption: ?tls12.Session = null,
+    /// Request a new RFC 5077 ticket during a full or session-ID handshake.
+    request_session_ticket: bool = false,
+    /// Borrowed cached ticket; `init` deep-copies it before returning.
+    ticket_resumption: ?*const tls12_ticket.Cached = null,
     now_seconds: u64 = 0,
 };
 
@@ -103,6 +108,11 @@ const Pending = struct {
         [_]u8{0} ** tls12.max_session_id_len,
     negotiated_session_id_len: u8 = 0,
     resumption: ?tls12.Session = null,
+    ticket_resumption: ?tls12_ticket.Cached = null,
+    expect_new_session_ticket: bool = false,
+    received_new_session_ticket: bool = false,
+    new_session_ticket: ?[]u8 = null,
+    new_session_ticket_lifetime_hint_seconds: u32 = 0,
     resumed: bool = false,
 
     fn deinit(self: *Pending) void {
@@ -125,6 +135,11 @@ const Pending = struct {
         }
         if (self.selected_alpn) |protocol| self.allocator.free(protocol);
         if (self.resumption) |*session| session.deinit();
+        if (self.ticket_resumption) |*cached| cached.deinit();
+        if (self.new_session_ticket) |ticket| {
+            std.crypto.secureZero(u8, ticket);
+            self.allocator.free(ticket);
+        }
         self.* = undefined;
     }
 };
@@ -142,6 +157,10 @@ pub const Established = struct {
     resumed: bool,
     session_id: [tls12.max_session_id_len]u8,
     session_id_len: u8,
+    /// Most recently authenticated RFC 5077 ticket, or the prior ticket when
+    /// a resumed server elects not to renew it.
+    session_ticket: ?[]u8 = null,
+    session_ticket_lifetime_hint_seconds: u32 = 0,
     records: stream.RecordDeframer = .{},
     plaintext: [tls12.max_plaintext_len]u8 = undefined,
     local_closed: bool = false,
@@ -162,6 +181,10 @@ pub const Established = struct {
         }
         self.allocator.free(self.peer_certificate_chain);
         if (self.selected_alpn) |protocol| self.allocator.free(protocol);
+        if (self.session_ticket) |ticket| {
+            std.crypto.secureZero(u8, ticket);
+            self.allocator.free(ticket);
+        }
         self.* = undefined;
     }
 
@@ -222,6 +245,26 @@ pub const Established = struct {
         );
     }
 
+    pub fn createTicketSession(
+        self: *const Established,
+        identity: []const u8,
+        now_seconds: u64,
+    ) tls12_ticket.Error!tls12_ticket.Cached {
+        const ticket_bytes = self.session_ticket orelse
+            return error.InvalidTicket;
+        return tls12_ticket.Cached.init(
+            self.allocator,
+            ticket_bytes,
+            self.session_id[0..self.session_id_len],
+            self.suite,
+            self.master_secret,
+            identity,
+            self.selected_alpn orelse "",
+            now_seconds,
+            self.session_ticket_lifetime_hint_seconds,
+        );
+    }
+
     pub fn receive(
         self: *Established,
         input: []const u8,
@@ -274,6 +317,7 @@ pub fn ClientConnection(
         server_name: ?[]const u8,
         server_verifier: auth.ClientVerifier,
         client_identity: ?client_auth.ClientIdentity,
+        now_seconds: u64 = 0,
         stage: Stage = .server_flight,
         records: stream.RecordDeframer = .{},
         messages: stream.HandshakeReassembler(max_handshake_message_len) = .{},
@@ -286,6 +330,9 @@ pub fn ClientConnection(
             output: *std.ArrayList(u8),
         ) Error!Self {
             try validatePolicy(config.policy);
+            if (config.resumption != null and config.ticket_resumption != null) {
+                return error.UnsupportedProfile;
+            }
             var resumption = config.resumption;
             errdefer if (resumption) |*session| session.deinit();
             if (resumption) |*session| {
@@ -296,6 +343,26 @@ pub fn ClientConnection(
                 if (!containsSuite(config.policy.cipher_suites, session.suite) or
                     !containsAlpn(config.policy.alpn_protocols, session.alpn()))
                 {
+                    return error.SessionContextMismatch;
+                }
+            }
+            var ticket_resumption = if (config.ticket_resumption) |cached|
+                try cached.clone(config.allocator)
+            else
+                null;
+            errdefer if (ticket_resumption) |*cached| cached.deinit();
+            if (ticket_resumption) |*cached| {
+                if (config.session_id.len != 0 or config.server_name == null) {
+                    return error.SessionContextMismatch;
+                }
+                try cached.validate(config.now_seconds, config.server_name.?);
+                if (!containsSuite(
+                    config.policy.cipher_suites,
+                    cached.session.suite,
+                ) or !containsAlpn(
+                    config.policy.alpn_protocols,
+                    cached.alpn(),
+                )) {
                     return error.SessionContextMismatch;
                 }
             }
@@ -336,11 +403,14 @@ pub fn ClientConnection(
             // with an empty renegotiation_info extension.
             try suites.append(config.allocator, 0x00ff);
 
+            const ticket_session_id = deriveTicketSessionId(config.random);
             var hello: std.ArrayList(u8) = .empty;
             defer hello.deinit(config.allocator);
             try client_hello.writeWithKeyShare(&hello, config.allocator, .{
                 .random = config.random,
-                .session_id = if (resumption) |*session|
+                .session_id = if (ticket_resumption != null)
+                    &ticket_session_id
+                else if (resumption) |*session|
                     session.id()
                 else
                     config.session_id,
@@ -357,6 +427,12 @@ pub fn ClientConnection(
                 .request_ocsp = config.request_ocsp,
                 .offer_extended_master_secret = true,
                 .certificate_compression_algorithms = config.certificate_compression_algorithms,
+                .session_ticket = if (ticket_resumption) |*cached|
+                    cached.ticket()
+                else if (config.request_session_ticket)
+                    &.{}
+                else
+                    null,
             });
             if (hello.items.len > record13.max_plaintext_len) {
                 return error.ClientHelloTooLarge;
@@ -381,6 +457,7 @@ pub fn ClientConnection(
                 .server_name = config.server_name,
                 .server_verifier = config.server_verifier,
                 .client_identity = config.client_identity,
+                .now_seconds = config.now_seconds,
                 .pending = .{
                     .allocator = config.allocator,
                     .client_private_key = private_key,
@@ -388,6 +465,7 @@ pub fn ClientConnection(
                     .client_random = config.random,
                     .client_hello = owned_hello,
                     .resumption = resumption,
+                    .ticket_resumption = ticket_resumption,
                 },
             };
         }
@@ -401,9 +479,12 @@ pub fn ClientConnection(
             encoded_client_hello: []const u8,
         ) Error!Self {
             try validatePolicy(config.policy);
-            if (config.resumption != null) return error.UnsupportedProfile;
+            if (config.resumption != null and config.ticket_resumption != null) {
+                return error.UnsupportedProfile;
+            }
             const parsed = try client_hello.parse(encoded_client_hello);
-            if (!parsed.supportsVersion(0x0303) or
+            if (!std.mem.eql(u8, parsed.random, &config.random) or
+                !parsed.supportsVersion(0x0303) or
                 !parsed.offers_extended_master_secret or
                 !parsed.offers_secure_renegotiation)
             {
@@ -417,6 +498,55 @@ pub fn ClientConnection(
                 }
             }
             if (!has_suite) return error.UnsupportedProfile;
+
+            var resumption = config.resumption;
+            errdefer if (resumption) |*session| session.deinit();
+            if (resumption) |*session| {
+                if (config.server_name == null or
+                    !std.mem.eql(u8, parsed.session_id, session.id()))
+                {
+                    return error.SessionContextMismatch;
+                }
+                try session.validate(config.now_seconds, config.server_name.?);
+                if (!containsSuite(config.policy.cipher_suites, session.suite) or
+                    !containsAlpn(config.policy.alpn_protocols, session.alpn()))
+                {
+                    return error.SessionContextMismatch;
+                }
+            }
+            var ticket_resumption = if (config.ticket_resumption) |cached|
+                try cached.clone(config.allocator)
+            else
+                null;
+            errdefer if (ticket_resumption) |*cached| cached.deinit();
+            if (ticket_resumption) |*cached| {
+                if (config.server_name == null or
+                    parsed.session_id.len == 0 or
+                    parsed.session_ticket == null or
+                    !std.mem.eql(
+                        u8,
+                        parsed.session_ticket.?,
+                        cached.ticket(),
+                    ))
+                {
+                    return error.SessionContextMismatch;
+                }
+                try cached.validate(config.now_seconds, config.server_name.?);
+                if (!containsSuite(
+                    config.policy.cipher_suites,
+                    cached.session.suite,
+                ) or !containsAlpn(
+                    config.policy.alpn_protocols,
+                    cached.alpn(),
+                )) {
+                    return error.SessionContextMismatch;
+                }
+            }
+            if (config.request_session_ticket and
+                parsed.session_ticket == null)
+            {
+                return error.UnsupportedProfile;
+            }
 
             var private_key: ?[key_exchange.p256.secret_len]u8 =
                 if (config.client_private_key) |value| value.* else null;
@@ -463,12 +593,15 @@ pub fn ClientConnection(
                 .server_name = config.server_name,
                 .server_verifier = config.server_verifier,
                 .client_identity = config.client_identity,
+                .now_seconds = config.now_seconds,
                 .pending = .{
                     .allocator = config.allocator,
                     .client_private_key = private_key,
                     .client_private_key_p384 = private_key_p384,
                     .client_random = config.random,
                     .client_hello = owned_hello,
+                    .resumption = resumption,
+                    .ticket_resumption = ticket_resumption,
                 },
             };
         }
@@ -608,6 +741,8 @@ pub fn ClientConnection(
             );
             if (pending.resumption) |*session| session.deinit();
             pending.resumption = null;
+            if (pending.ticket_resumption) |*cached| cached.deinit();
+            pending.ticket_resumption = null;
             pending.negotiated_session_id = copySessionId(
                 server_hello.session_id,
             );
@@ -869,17 +1004,39 @@ pub fn ClientConnection(
             message: []const u8,
         ) Error!bool {
             const pending = &(self.pending orelse unreachable);
-            const session = &(pending.resumption orelse return false);
             const server_hello = try handshake.parseServerHello(
                 message,
                 self.policy,
                 self.server_name != null,
             );
+            const offered = try client_hello.parse(pending.client_hello);
+            if (server_hello.session_ticket_acknowledged and
+                offered.session_ticket == null)
+            {
+                return error.UnexpectedHandshakeMessage;
+            }
+            pending.expect_new_session_ticket =
+                server_hello.session_ticket_acknowledged;
+            const using_ticket = pending.ticket_resumption != null;
+            const session = if (pending.ticket_resumption) |*cached| blk: {
+                break :blk &cached.session;
+            } else if (pending.resumption) |*stored|
+                stored
+            else
+                return false;
             try checkDowngradeSentinel(
                 pending.client_hello,
                 server_hello.random,
             );
-            if (!std.mem.eql(u8, server_hello.session_id, session.id())) {
+            const expected_session_id = if (using_ticket)
+                offered.session_id
+            else
+                session.id();
+            if (!std.mem.eql(
+                u8,
+                server_hello.session_id,
+                expected_session_id,
+            )) {
                 return false;
             }
             if (server_hello.suite != session.suite or
@@ -924,11 +1081,28 @@ pub fn ClientConnection(
             pending.server_traffic = tls12.TrafficState.init(keys.server);
             pending.peer_certificate_chain = empty_chain;
             pending.selected_alpn = selected_alpn;
-            pending.negotiated_session_id = copySessionId(session.id());
-            pending.negotiated_session_id_len = @intCast(session.id().len);
+            pending.negotiated_session_id = copySessionId(
+                server_hello.session_id,
+            );
+            pending.negotiated_session_id_len = @intCast(
+                server_hello.session_id.len,
+            );
             pending.resumed = true;
-            session.deinit();
+            if (using_ticket) {
+                const cached = &pending.ticket_resumption.?;
+                pending.new_session_ticket = try self.allocator.dupe(
+                    u8,
+                    cached.ticket(),
+                );
+                const elapsed = self.now_seconds -
+                    cached.session.created_at_seconds;
+                pending.new_session_ticket_lifetime_hint_seconds =
+                    cached.session.lifetime_seconds - @as(u32, @intCast(elapsed));
+            }
+            if (pending.resumption) |*stored| stored.deinit();
             pending.resumption = null;
+            if (pending.ticket_resumption) |*cached| cached.deinit();
+            pending.ticket_resumption = null;
             self.messages.reset();
             self.stage = .server_change_cipher_spec;
             return true;
@@ -942,10 +1116,50 @@ pub fn ClientConnection(
             if (framed.content_type == 21) {
                 return self.acceptPlaintextAlert(consumed, framed.fragment);
             }
+            if (framed.content_type == 22) {
+                const pending = &(self.pending orelse unreachable);
+                if (!pending.expect_new_session_ticket or
+                    pending.received_new_session_ticket)
+                {
+                    return error.UnexpectedHandshakeMessage;
+                }
+                const message_result = try self.messages.push(framed.fragment);
+                const message = message_result.message orelse return .{
+                    .consumed = consumed,
+                    .event = null,
+                };
+                if (message_result.consumed != framed.fragment.len) {
+                    return error.UnexpectedHandshakeMessage;
+                }
+                const received = try tls12_ticket.parse(message);
+                if (received.ticket.len != 0) {
+                    const ticket_copy = try self.allocator.dupe(
+                        u8,
+                        received.ticket,
+                    );
+                    if (pending.new_session_ticket) |old_ticket| {
+                        std.crypto.secureZero(u8, old_ticket);
+                        self.allocator.free(old_ticket);
+                    }
+                    pending.new_session_ticket = ticket_copy;
+                    pending.new_session_ticket_lifetime_hint_seconds =
+                        received.lifetime_hint_seconds;
+                }
+                pending.received_new_session_ticket = true;
+                pending.transcript_state.?.update(message);
+                self.messages.reset();
+                return .{ .consumed = consumed, .event = null };
+            }
             if (framed.content_type != stream.content_type_change_cipher_spec or
                 !std.mem.eql(u8, framed.fragment, &.{1}))
             {
                 return error.InvalidChangeCipherSpec;
+            }
+            const pending = &(self.pending orelse unreachable);
+            if (pending.expect_new_session_ticket and
+                !pending.received_new_session_ticket)
+            {
+                return error.UnexpectedHandshakeMessage;
             }
             self.stage = .server_finished;
             return .{
@@ -1059,12 +1273,15 @@ pub fn ClientConnection(
                 .resumed = pending.resumed,
                 .session_id = pending.negotiated_session_id,
                 .session_id_len = pending.negotiated_session_id_len,
+                .session_ticket = pending.new_session_ticket,
+                .session_ticket_lifetime_hint_seconds = pending.new_session_ticket_lifetime_hint_seconds,
             };
             pending.server_traffic = null;
             pending.client_traffic = null;
             pending.master_secret = null;
             pending.selected_alpn = null;
             pending.peer_certificate_chain = null;
+            pending.new_session_ticket = null;
             pending.deinit();
             self.pending = null;
             self.stage = .established;
@@ -1112,6 +1329,15 @@ fn containsAlpn(protocols: []const []const u8, target: []const u8) bool {
 fn copySessionId(id: []const u8) [tls12.max_session_id_len]u8 {
     var result = [_]u8{0} ** tls12.max_session_id_len;
     @memcpy(result[0..id.len], id);
+    return result;
+}
+
+pub fn deriveTicketSessionId(random: [32]u8) [tls12.max_session_id_len]u8 {
+    var result: [tls12.max_session_id_len]u8 = undefined;
+    var state = std.crypto.hash.sha2.Sha256.init(.{});
+    state.update("vail tls12 ticket session id\x00");
+    state.update(&random);
+    state.final(&result);
     return result;
 }
 
@@ -1200,6 +1426,12 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
     const private_key = try rsa.PrivateKey.fromDer(&private_key_der);
     var prepared_key = try private_key.prepare();
     defer prepared_key.deinit();
+    const ticket_keyring = @import("ticket_keyring.zig");
+    var ticket_keys = try ticket_keyring.Keyring.init(.{
+        .id = 1,
+        .secret = [_]u8{0x8f} ** ticket_keyring.key_len,
+    });
+    defer ticket_keys.deinit();
 
     var client_private = [_]u8{0} ** key_exchange.p256.secret_len;
     client_private[client_private.len - 1] = 3;
@@ -1218,6 +1450,7 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
         .client_private_key = &client_private,
         .policy = policy,
         .server_verifier = .{ .verify_trust = acceptTestCertificate },
+        .request_session_ticket = true,
     }, &client_wire);
     defer client.deinit();
     try std.testing.expectEqualSlices(
@@ -1239,6 +1472,13 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
             .prepared_key = &prepared_key,
             .io = std.testing.io,
         } },
+        .session_tickets = .{
+            .keyring = &ticket_keys,
+            .server_id = "server-identity",
+            .now_seconds = 100,
+            .lifetime_seconds = 60,
+            .sealing_nonce = [_]u8{0x8e} ** ticket_keyring.nonce_len,
+        },
     });
     defer server.deinit();
 
@@ -1311,6 +1551,13 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
         established_client.?.selected_alpn.?,
     );
     try std.testing.expectEqual(@as(usize, 1), established_client.?.peer_certificate_chain.len);
+    try std.testing.expect(established_client.?.session_ticket != null);
+
+    var client_ticket = try established_client.?.createTicketSession(
+        "localhost",
+        100,
+    );
+    defer client_ticket.deinit();
 
     var client_exporter: [48]u8 = undefined;
     var server_exporter: [48]u8 = undefined;
@@ -1452,6 +1699,185 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
     try std.testing.expectEqualStrings(
         "resumed",
         resumed_application.event.?.application_data,
+    );
+
+    client_wire.clearRetainingCapacity();
+    server_wire.clearRetainingCapacity();
+    var ticket_client_private = [_]u8{0} ** key_exchange.p256.secret_len;
+    ticket_client_private[ticket_client_private.len - 1] = 13;
+    var ticket_client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0xd4} ** 32,
+        .server_name = "localhost",
+        .client_private_key = &ticket_client_private,
+        .policy = policy,
+        .server_verifier = .{ .verify_trust = acceptTestCertificate },
+        .ticket_resumption = &client_ticket,
+        .now_seconds = 101,
+    }, &client_wire);
+    defer ticket_client.deinit();
+    const ticket_offer = try client_hello.parse(
+        client_wire.items[record13.header_len..],
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        client_ticket.ticket(),
+        ticket_offer.session_ticket.?,
+    );
+
+    var ticket_server_private = [_]u8{0} ** key_exchange.p256.secret_len;
+    ticket_server_private[ticket_server_private.len - 1] = 14;
+    var ticket_server = Server.init(.{
+        .allocator = allocator,
+        .policy = policy,
+        .server_random = [_]u8{0xd5} ** 32,
+        .server_private_key = &ticket_server_private,
+        .certificate_chain = &.{&certificate},
+        .signer = .{ .rsa_pss = .{
+            .prepared_key = &prepared_key,
+            .io = std.testing.io,
+        } },
+        .session_tickets = .{
+            .keyring = &ticket_keys,
+            .server_id = "server-identity",
+            .now_seconds = 101,
+            .lifetime_seconds = 60,
+            .sealing_nonce = [_]u8{0x8d} ** ticket_keyring.nonce_len,
+        },
+    });
+    defer ticket_server.deinit();
+    _ = try ticket_server.receive(client_wire.items, &server_wire);
+    client_wire.clearRetainingCapacity();
+
+    var ticket_client_established: ?Established = null;
+    resume_offset = 0;
+    while (resume_offset < server_wire.items.len) {
+        const received = try ticket_client.receive(
+            server_wire.items[resume_offset..],
+            &client_wire,
+        );
+        if (received.consumed == 0 and received.event == null) {
+            return error.TicketClientStalled;
+        }
+        resume_offset += received.consumed;
+        if (received.event) |event| switch (event) {
+            .change_cipher_spec => {},
+            .established => |value| ticket_client_established = value,
+            else => return error.UnexpectedTicketResumptionEvent,
+        };
+    }
+    var ticket_client_connection = ticket_client_established orelse
+        return error.TicketClientDidNotEstablish;
+    defer ticket_client_connection.deinit();
+    try std.testing.expect(ticket_client_connection.resumed);
+    try std.testing.expect(ticket_client_connection.session_ticket != null);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        client_ticket.ticket(),
+        ticket_client_connection.session_ticket.?,
+    ));
+
+    server_wire.clearRetainingCapacity();
+    var ticket_server_established: ?server_module.Established = null;
+    resume_offset = 0;
+    while (resume_offset < client_wire.items.len) {
+        const received = try ticket_server.receive(
+            client_wire.items[resume_offset..],
+            &server_wire,
+        );
+        if (received.consumed == 0 and received.event == null) {
+            return error.TicketServerStalled;
+        }
+        resume_offset += received.consumed;
+        if (received.event) |event| switch (event) {
+            .change_cipher_spec => {},
+            .established => |value| ticket_server_established = value,
+            else => return error.UnexpectedTicketResumptionEvent,
+        };
+    }
+    var ticket_server_connection = ticket_server_established orelse
+        return error.TicketServerDidNotEstablish;
+    defer ticket_server_connection.deinit();
+    try std.testing.expect(ticket_server_connection.resumed);
+
+    const ticket_application_len = try ticket_client_connection
+        .sealApplicationData("ticket resumed", &application_record);
+    const ticket_application = try ticket_server_connection.receive(
+        application_record[0..ticket_application_len],
+    );
+    try std.testing.expectEqualStrings(
+        "ticket resumed",
+        ticket_application.event.?.application_data,
+    );
+
+    var tampered_ticket = try client_ticket.clone(allocator);
+    defer tampered_ticket.deinit();
+    tampered_ticket.ticket_storage[tampered_ticket.ticket_storage.len - 1] ^=
+        1;
+    client_wire.clearRetainingCapacity();
+    server_wire.clearRetainingCapacity();
+    var fallback_client_private = [_]u8{0} ** key_exchange.p256.secret_len;
+    fallback_client_private[fallback_client_private.len - 1] = 15;
+    var fallback_client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0xd6} ** 32,
+        .server_name = "localhost",
+        .client_private_key = &fallback_client_private,
+        .policy = policy,
+        .server_verifier = .{ .verify_trust = acceptTestCertificate },
+        .ticket_resumption = &tampered_ticket,
+        .now_seconds = 101,
+    }, &client_wire);
+    defer fallback_client.deinit();
+    var fallback_server_private = [_]u8{0} ** key_exchange.p256.secret_len;
+    fallback_server_private[fallback_server_private.len - 1] = 16;
+    var fallback_server = Server.init(.{
+        .allocator = allocator,
+        .policy = policy,
+        .server_random = [_]u8{0xd7} ** 32,
+        .server_private_key = &fallback_server_private,
+        .certificate_chain = &.{&certificate},
+        .signer = .{ .rsa_pss = .{
+            .prepared_key = &prepared_key,
+            .io = std.testing.io,
+        } },
+        .session_tickets = .{
+            .keyring = &ticket_keys,
+            .server_id = "server-identity",
+            .now_seconds = 101,
+            .lifetime_seconds = 60,
+            .sealing_nonce = [_]u8{0x8c} ** ticket_keyring.nonce_len,
+        },
+    });
+    defer fallback_server.deinit();
+    const fallback_result = try fallback_server.receive(
+        client_wire.items,
+        &server_wire,
+    );
+    try std.testing.expectEqual(
+        std.meta.Tag(server_module.Event).server_flight,
+        std.meta.activeTag(fallback_result.event.?),
+    );
+    try std.testing.expectEqual(
+        server_module.Stage.client_key_exchange,
+        fallback_server.stage,
+    );
+    const fallback_payload = server_wire.items[record13.header_len..];
+    const fallback_server_hello_len = 4 +
+        (@as(usize, fallback_payload[1]) << 16) +
+        (@as(usize, fallback_payload[2]) << 8) +
+        fallback_payload[3];
+    const fallback_server_hello = try handshake.parseServerHello(
+        fallback_payload[0..fallback_server_hello_len],
+        policy,
+        true,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        fallback_server_hello.session_id.len,
+    );
+    try std.testing.expect(
+        fallback_server_hello.session_ticket_acknowledged,
     );
 }
 

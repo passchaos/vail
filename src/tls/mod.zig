@@ -30,6 +30,7 @@ pub const tls12 = @import("tls12.zig");
 pub const tls12_client_connection = @import("tls12_client_connection.zig");
 pub const tls12_handshake = @import("tls12_handshake.zig");
 pub const tls12_server_connection = @import("tls12_server_connection.zig");
+pub const tls12_ticket = @import("tls12_ticket.zig");
 pub const transcript = @import("transcript.zig");
 
 test {
@@ -51,6 +52,7 @@ test {
     _ = tls12_client_connection;
     _ = tls12_handshake;
     _ = tls12_server_connection;
+    _ = tls12_ticket;
     _ = server_hello;
     _ = server_handshake;
     _ = server_connection;

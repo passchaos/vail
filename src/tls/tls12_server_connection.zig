@@ -15,11 +15,14 @@ const record13 = @import("record.zig");
 const stream = @import("stream.zig");
 const tls12 = @import("tls12.zig");
 const handshake = @import("tls12_handshake.zig");
+const ticket_keyring = @import("ticket_keyring.zig");
+const tls12_ticket = @import("tls12_ticket.zig");
 const transcript = @import("transcript.zig");
 
 pub const Error = std.mem.Allocator.Error || stream.Error ||
     stream.HandshakeError || handshake.Error || key_exchange.Error ||
-    tls12.Error || alert.Error || auth.Error || client_auth.Error || error{
+    tls12.Error || tls12_ticket.Error || ticket_keyring.Error || alert.Error ||
+    auth.Error || client_auth.Error || error{
     UnexpectedRecord,
     UnexpectedHandshakeMessage,
     InvalidChangeCipherSpec,
@@ -28,6 +31,7 @@ pub const Error = std.mem.Allocator.Error || stream.Error ||
     ConnectionFailed,
     PeerAbortedHandshake,
     InvalidClientAuthConfiguration,
+    InvalidSessionTicketConfiguration,
 };
 
 pub const Stage = enum {
@@ -54,12 +58,26 @@ pub const Config = struct {
     signer: auth.Signer,
     client_auth_policy: ?client_auth.ServerPolicy = null,
     resumption: ?Resumption = null,
+    /// Stateless RFC 5077 tickets. This is currently mutually exclusive with
+    /// TLS 1.2 client authentication, matching the session-ID resume policy.
+    session_tickets: ?SessionTicketPolicy = null,
 };
 
 pub const Resumption = struct {
     session: *const tls12.Session,
     identity: []const u8,
     now_seconds: u64,
+};
+
+pub const SessionTicketPolicy = struct {
+    keyring: *const ticket_keyring.Keyring,
+    /// Authentication context shared by all connections for one server
+    /// identity. It is bound into the ticket AEAD associated data.
+    server_id: []const u8,
+    now_seconds: u64,
+    lifetime_seconds: u32,
+    /// Must be unique for every ticket encrypted under the current key.
+    sealing_nonce: [ticket_keyring.nonce_len]u8,
 };
 
 pub const Event = union(enum) {
@@ -357,16 +375,40 @@ pub fn ServerConnection(
             {
                 return error.InvalidClientAuthConfiguration;
             }
+            if (self.config.session_tickets != null and
+                self.config.client_auth_policy != null)
+            {
+                return error.InvalidSessionTicketConfiguration;
+            }
+            if (self.config.session_tickets) |ticket_policy| {
+                if (ticket_policy.server_id.len == 0 or
+                    ticket_policy.server_id.len > std.math.maxInt(u16) or
+                    ticket_policy.lifetime_seconds == 0 or
+                    ticket_policy.lifetime_seconds >
+                        tls12_ticket.max_lifetime_seconds)
+                {
+                    return error.InvalidSessionTicketConfiguration;
+                }
+            }
+            var policy = self.config.policy;
+            policy.issue_session_ticket = self.config.session_tickets != null;
             if (try self.tryResume(
                 consumed,
                 message,
                 parsed,
+                policy,
                 output,
             )) |result| return result;
+            // A non-empty ticket that cannot be resumed must fall back to a
+            // full handshake without echoing the client's signaling ID;
+            // otherwise the client could mistake the fallback for resumption.
+            if (parsed.session_ticket) |offered_ticket| {
+                if (offered_ticket.len != 0) policy.new_session_id = &.{};
+            }
             const selection = try handshake.select(
                 parsed,
                 self.config.signer,
-                self.config.policy,
+                policy,
             );
             var private_key: PrivateKey = undefined;
             var public_key_storage: [key_exchange.p384.public_len]u8 = undefined;
@@ -403,7 +445,7 @@ pub fn ServerConnection(
                 self.config.allocator,
                 message,
                 parsed,
-                self.config.policy,
+                policy,
                 self.config.server_random,
                 public_key_storage[0..public_key_len],
                 self.config.certificate_chain,
@@ -431,9 +473,9 @@ pub fn ServerConnection(
                 .selection = result.selection,
                 .transcript_state = result.transcript_state,
                 .transcript_bytes = transcript_bytes,
-                .session_id = copySessionId(self.config.policy.new_session_id),
+                .session_id = copySessionId(policy.new_session_id),
                 .session_id_len = @intCast(
-                    self.config.policy.new_session_id.len,
+                    policy.new_session_id.len,
                 ),
             };
             self.messages.reset();
@@ -452,12 +494,52 @@ pub fn ServerConnection(
             consumed: usize,
             client_hello_bytes: []const u8,
             parsed: client_hello.Parsed,
+            policy: handshake.Policy,
             output: *std.ArrayList(u8),
         ) Error!?ReceiveResult {
-            const configured = self.config.resumption orelse return null;
-            if (self.config.client_auth_policy != null or
-                !std.mem.eql(u8, parsed.session_id, configured.session.id()))
-            {
+            if (self.config.client_auth_policy != null) return null;
+            var ticket_session: ?tls12.Session = null;
+            defer if (ticket_session) |*session| session.deinit();
+            const configured = blk: {
+                if (parsed.session_ticket) |offered_ticket| {
+                    if (offered_ticket.len != 0) {
+                        const ticket_policy = self.config.session_tickets orelse
+                            return null;
+                        const selected_alpn = try handshake.selectAlpn(
+                            parsed.alpn_protocols,
+                            policy.alpn_protocols,
+                        );
+                        var opened = ticket_policy.keyring.openTls12(
+                            offered_ticket,
+                            ticket_policy.server_id,
+                            selected_alpn orelse "",
+                            ticket_policy.now_seconds,
+                        ) catch return null;
+                        defer opened.deinit();
+                        if (!opened.extended_master_secret or
+                            parsed.session_id.len == 0)
+                        {
+                            return null;
+                        }
+                        ticket_session = tls12.Session.init(
+                            parsed.session_id,
+                            opened.suite,
+                            opened.master_secret,
+                            ticket_policy.server_id,
+                            selected_alpn orelse "",
+                            opened.issued_at_seconds,
+                            opened.lifetime_seconds,
+                        ) catch return null;
+                        break :blk Resumption{
+                            .session = &ticket_session.?,
+                            .identity = ticket_policy.server_id,
+                            .now_seconds = ticket_policy.now_seconds,
+                        };
+                    }
+                }
+                break :blk self.config.resumption orelse return null;
+            };
+            if (!std.mem.eql(u8, parsed.session_id, configured.session.id())) {
                 return null;
             }
             configured.session.validate(
@@ -470,7 +552,7 @@ pub fn ServerConnection(
                 &server_hello,
                 self.config.allocator,
                 parsed,
-                self.config.policy,
+                policy,
                 self.config.server_random,
                 configured.session,
             ) catch return null;
@@ -488,6 +570,16 @@ pub fn ServerConnection(
             errdefer server_traffic.deinit();
             var client_traffic = tls12.TrafficState.init(keys.client);
             errdefer client_traffic.deinit();
+            var new_session_ticket: std.ArrayList(u8) = .empty;
+            defer new_session_ticket.deinit(self.config.allocator);
+            if (selection.session_ticket_acknowledged) {
+                try self.writeNewSessionTicket(
+                    &new_session_ticket,
+                    &configured.session.master_secret,
+                    selection,
+                );
+                state.update(new_session_ticket.items);
+            }
             const server_verify = try tls12.finishedVerifyData(
                 selection.suite,
                 &configured.session.master_secret,
@@ -516,6 +608,10 @@ pub fn ServerConnection(
             );
             try transcript_bytes.appendSlice(
                 self.config.allocator,
+                new_session_ticket.items,
+            );
+            try transcript_bytes.appendSlice(
+                self.config.allocator,
                 &server_finished,
             );
 
@@ -527,6 +623,14 @@ pub fn ServerConnection(
                 22,
                 server_hello.items,
             );
+            if (new_session_ticket.items.len != 0) {
+                try appendPlaintextRecord(
+                    output,
+                    self.config.allocator,
+                    22,
+                    new_session_ticket.items,
+                );
+            }
             try appendPlaintextRecord(
                 output,
                 self.config.allocator,
@@ -775,6 +879,17 @@ pub fn ServerConnection(
                 };
             }
 
+            var new_session_ticket: std.ArrayList(u8) = .empty;
+            defer new_session_ticket.deinit(self.config.allocator);
+            if (pending.selection.session_ticket_acknowledged) {
+                try self.writeNewSessionTicket(
+                    &new_session_ticket,
+                    &pending.master_secret.?,
+                    pending.selection,
+                );
+                pending.transcript_state.update(new_session_ticket.items);
+            }
+
             const server_verify = try tls12.finishedVerifyData(
                 pending.selection.suite,
                 &(pending.master_secret orelse unreachable),
@@ -792,6 +907,14 @@ pub fn ServerConnection(
             );
             const output_start = output.items.len;
             errdefer output.items.len = output_start;
+            if (new_session_ticket.items.len != 0) {
+                try appendPlaintextRecord(
+                    output,
+                    self.config.allocator,
+                    22,
+                    new_session_ticket.items,
+                );
+            }
             try appendPlaintextRecord(
                 output,
                 self.config.allocator,
@@ -806,6 +929,34 @@ pub fn ServerConnection(
                 .consumed = consumed,
                 .event = .{ .established = self.establish() },
             };
+        }
+
+        fn writeNewSessionTicket(
+            self: *const Self,
+            output: *std.ArrayList(u8),
+            master_secret: *const [tls12.master_secret_len]u8,
+            selection: handshake.Selection,
+        ) Error!void {
+            const policy = self.config.session_tickets orelse
+                return error.InvalidSessionTicketConfiguration;
+            const ticket_bytes = try policy.keyring.sealTls12(
+                policy.sealing_nonce,
+                policy.server_id,
+                selection.alpn_protocol orelse "",
+                .{
+                    .master_secret = master_secret,
+                    .suite = selection.suite,
+                    .issued_at_seconds = policy.now_seconds,
+                    .lifetime_seconds = policy.lifetime_seconds,
+                    .extended_master_secret = selection.extended_master_secret,
+                },
+            );
+            try tls12_ticket.write(
+                output,
+                self.config.allocator,
+                policy.lifetime_seconds,
+                &ticket_bytes,
+            );
         }
 
         fn establish(self: *Self) Established {

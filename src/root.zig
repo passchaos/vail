@@ -53,6 +53,7 @@ test {
     _ = tls.tls12_client_connection;
     _ = tls.tls12_handshake;
     _ = tls.tls12_server_connection;
+    _ = tls.tls12_ticket;
     _ = tls.transcript;
     _ = x509.trust;
     _ = x509.ocsp;

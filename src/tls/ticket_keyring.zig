@@ -1,4 +1,4 @@
-//! Stateless TLS 1.3 ticket sealing with bounded key rotation.
+//! Stateless TLS 1.2 and TLS 1.3 ticket sealing with bounded key rotation.
 //!
 //! Wire identities carry an authenticated key identifier and nonce, so open is
 //! O(1) for the current key and O(history) only across the small retained key
@@ -9,8 +9,11 @@ const std = @import("std");
 const codec = @import("ticket.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const secret = @import("secret.zig");
+const tls12 = @import("tls12.zig");
+const tls12_ticket = @import("tls12_ticket.zig");
 
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
+const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 pub const key_len = Aes256Gcm.key_length;
 pub const nonce_len = Aes256Gcm.nonce_length;
 pub const tag_len = Aes256Gcm.tag_length;
@@ -23,6 +26,12 @@ const secret_len_offset = early_data_size_offset + @sizeOf(u32);
 const secret_offset = secret_len_offset + @sizeOf(u8);
 const plaintext_len = secret_offset + secret.max_len;
 pub const sealed_len = header_len + plaintext_len + tag_len;
+const tls12_format_version: u8 = 5;
+const tls12_master_secret_offset =
+    @sizeOf(u64) + @sizeOf(u32) + @sizeOf(u16) + @sizeOf(u8);
+const tls12_plaintext_len = tls12_master_secret_offset +
+    tls12.master_secret_len;
+pub const tls12_sealed_len = header_len + tls12_plaintext_len + tag_len;
 
 pub const Error = error{
     InvalidKeyId,
@@ -58,6 +67,27 @@ pub const OpenedSecret = struct {
     /// negotiation publishes that suite, but validates its SHA-384 binding.
     cipher_suite_wire: u16,
     max_early_data_size: ?u32 = null,
+};
+
+pub const Tls12Opened = struct {
+    master_secret: [tls12.master_secret_len]u8,
+    suite: tls12.Suite,
+    issued_at_seconds: u64,
+    lifetime_seconds: u32,
+    extended_master_secret: bool,
+
+    pub fn deinit(self: *Tls12Opened) void {
+        std.crypto.secureZero(u8, &self.master_secret);
+        self.* = undefined;
+    }
+};
+
+pub const Tls12SealInput = struct {
+    master_secret: *const [tls12.master_secret_len]u8,
+    suite: tls12.Suite,
+    issued_at_seconds: u64,
+    lifetime_seconds: u32,
+    extended_master_secret: bool,
 };
 
 pub const Keyring = struct {
@@ -280,6 +310,107 @@ pub const Keyring = struct {
         return opened;
     }
 
+    /// Seal TLS 1.2 resumption state into an opaque RFC 5077 ticket. The
+    /// server identity and negotiated ALPN are authenticated as associated
+    /// data and are never exposed in the ticket plaintext.
+    pub fn sealTls12(
+        self: *const Keyring,
+        nonce: [nonce_len]u8,
+        server_id: []const u8,
+        alpn: []const u8,
+        input: Tls12SealInput,
+    ) Error![tls12_sealed_len]u8 {
+        try validateContext(server_id, alpn);
+        try validateTls12Lifetime(input.lifetime_seconds);
+        const current = &self.keys[0];
+
+        var output: [tls12_sealed_len]u8 = undefined;
+        output[0] = tls12_format_version;
+        std.mem.writeInt(u32, output[1..5], current.id, .big);
+        @memcpy(output[5..header_len], &nonce);
+
+        var plaintext: [tls12_plaintext_len]u8 = undefined;
+        defer std.crypto.secureZero(u8, &plaintext);
+        std.mem.writeInt(u64, plaintext[0..8], input.issued_at_seconds, .big);
+        std.mem.writeInt(u32, plaintext[8..12], input.lifetime_seconds, .big);
+        std.mem.writeInt(u16, plaintext[12..14], @intFromEnum(input.suite), .big);
+        plaintext[14] = @intFromBool(input.extended_master_secret);
+        @memcpy(
+            plaintext[tls12_master_secret_offset..],
+            input.master_secret,
+        );
+
+        var aad: [512]u8 = undefined;
+        const aad_len = try writeContext(&aad, server_id, alpn);
+        var tls12_key = deriveTls12Key(&current.secret);
+        defer std.crypto.secureZero(u8, &tls12_key);
+        Aes256Gcm.encrypt(
+            output[header_len .. header_len + tls12_plaintext_len],
+            output[header_len + tls12_plaintext_len ..][0..tag_len],
+            &plaintext,
+            aad[0..aad_len],
+            nonce,
+            tls12_key,
+        );
+        return output;
+    }
+
+    pub fn openTls12(
+        self: *const Keyring,
+        ticket_bytes: []const u8,
+        server_id: []const u8,
+        alpn: []const u8,
+        now_seconds: u64,
+    ) Error!Tls12Opened {
+        try validateContext(server_id, alpn);
+        if (ticket_bytes.len != tls12_sealed_len or
+            ticket_bytes[0] != tls12_format_version)
+        {
+            return error.InvalidTicket;
+        }
+        const key_id = std.mem.readInt(u32, ticket_bytes[1..5], .big);
+        const key = self.find(key_id) orelse return error.UnknownKey;
+        const nonce = ticket_bytes[5..header_len][0..nonce_len].*;
+        const ciphertext = ticket_bytes[header_len .. header_len + tls12_plaintext_len];
+        const tag = ticket_bytes[header_len + tls12_plaintext_len ..][0..tag_len].*;
+        var aad: [512]u8 = undefined;
+        const aad_len = try writeContext(&aad, server_id, alpn);
+        var tls12_key = deriveTls12Key(&key.secret);
+        defer std.crypto.secureZero(u8, &tls12_key);
+        var plaintext: [tls12_plaintext_len]u8 = undefined;
+        defer std.crypto.secureZero(u8, &plaintext);
+        Aes256Gcm.decrypt(
+            &plaintext,
+            ciphertext,
+            tag,
+            aad[0..aad_len],
+            nonce,
+            tls12_key,
+        ) catch return error.AuthenticationFailed;
+
+        const suite = tls12.Suite.fromWire(std.mem.readInt(
+            u16,
+            plaintext[12..14],
+            .big,
+        )) orelse return error.InvalidTicket;
+        if (plaintext[14] > 1) return error.InvalidTicket;
+        var opened = Tls12Opened{
+            .master_secret = plaintext[tls12_master_secret_offset..][0..tls12.master_secret_len].*,
+            .suite = suite,
+            .issued_at_seconds = std.mem.readInt(u64, plaintext[0..8], .big),
+            .lifetime_seconds = std.mem.readInt(u32, plaintext[8..12], .big),
+            .extended_master_secret = plaintext[14] == 1,
+        };
+        errdefer opened.deinit();
+        try validateTls12Lifetime(opened.lifetime_seconds);
+        if (now_seconds < opened.issued_at_seconds or
+            now_seconds - opened.issued_at_seconds >= opened.lifetime_seconds)
+        {
+            return error.ExpiredTicket;
+        }
+        return opened;
+    }
+
     fn find(self: *const Keyring, id: u32) ?*const Key {
         for (self.keys[0..self.len]) |*key| {
             if (key.id == id) return key;
@@ -306,6 +437,24 @@ fn validateOpenedFields(
     if (expected_hash != hash) return error.InvalidTicket;
 }
 
+fn validateTls12Lifetime(lifetime_seconds: u32) Error!void {
+    if (lifetime_seconds == 0 or
+        lifetime_seconds > tls12_ticket.max_lifetime_seconds)
+    {
+        return error.InvalidTicketLifetime;
+    }
+}
+
+fn deriveTls12Key(base_key: *const [key_len]u8) [key_len]u8 {
+    var derived: [key_len]u8 = undefined;
+    HmacSha256.create(
+        &derived,
+        "vail tls12 session ticket key\x00",
+        base_key,
+    );
+    return derived;
+}
+
 fn expectedHashForSuite(suite_wire: u16) Error!secret.Hash {
     return switch (suite_wire) {
         0x1301, 0x1303 => .sha256,
@@ -316,7 +465,7 @@ fn expectedHashForSuite(suite_wire: u16) Error!secret.Hash {
 }
 
 fn validateContext(server_id: []const u8, alpn: []const u8) Error!void {
-    if (server_id.len == 0 or alpn.len == 0 or
+    if (server_id.len == 0 or
         server_id.len > std.math.maxInt(u16) or
         alpn.len > std.math.maxInt(u8))
     {
@@ -339,4 +488,82 @@ fn writeContext(
     output[alpn_len_offset] = @intCast(alpn.len);
     @memcpy(output[alpn_len_offset + 1 ..][0..alpn.len], alpn);
     return alpn_len_offset + 1 + alpn.len;
+}
+
+test "TLS 1.2 stateless ticket round trip binds context and lifetime" {
+    var keyring = try Keyring.init(.{
+        .id = 7,
+        .secret = [_]u8{0xa1} ** key_len,
+    });
+    defer keyring.deinit();
+    const original = Tls12Opened{
+        .master_secret = [_]u8{0xa2} ** tls12.master_secret_len,
+        .suite = .ecdhe_rsa_aes_256_gcm_sha384,
+        .issued_at_seconds = 100,
+        .lifetime_seconds = 60,
+        .extended_master_secret = true,
+    };
+    var ticket_bytes = try keyring.sealTls12(
+        [_]u8{0xa3} ** nonce_len,
+        "example.com",
+        "h2",
+        .{
+            .master_secret = &original.master_secret,
+            .suite = original.suite,
+            .issued_at_seconds = original.issued_at_seconds,
+            .lifetime_seconds = original.lifetime_seconds,
+            .extended_master_secret = original.extended_master_secret,
+        },
+    );
+    var opened = try keyring.openTls12(
+        &ticket_bytes,
+        "example.com",
+        "h2",
+        159,
+    );
+    defer opened.deinit();
+    try std.testing.expectEqual(original.suite, opened.suite);
+    try std.testing.expectEqual(
+        original.master_secret,
+        opened.master_secret,
+    );
+    try std.testing.expect(opened.extended_master_secret);
+    try std.testing.expectError(
+        error.AuthenticationFailed,
+        keyring.openTls12(&ticket_bytes, "other.example", "h2", 159),
+    );
+    try std.testing.expectError(
+        error.ExpiredTicket,
+        keyring.openTls12(&ticket_bytes, "example.com", "h2", 160),
+    );
+    ticket_bytes[ticket_bytes.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.AuthenticationFailed,
+        keyring.openTls12(&ticket_bytes, "example.com", "h2", 159),
+    );
+
+    const no_alpn_ticket = try keyring.sealTls12(
+        [_]u8{0xa4} ** nonce_len,
+        "example.com",
+        "",
+        .{
+            .master_secret = &original.master_secret,
+            .suite = original.suite,
+            .issued_at_seconds = original.issued_at_seconds,
+            .lifetime_seconds = original.lifetime_seconds,
+            .extended_master_secret = original.extended_master_secret,
+        },
+    );
+    try keyring.rotate(.{
+        .id = 8,
+        .secret = [_]u8{0xa5} ** key_len,
+    });
+    var no_alpn = try keyring.openTls12(
+        &no_alpn_ticket,
+        "example.com",
+        "",
+        159,
+    );
+    defer no_alpn.deinit();
+    try std.testing.expectEqual(original.master_secret, no_alpn.master_secret);
 }

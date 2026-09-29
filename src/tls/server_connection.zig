@@ -1231,6 +1231,7 @@ fn validateSecondClientHello(
             first.client_certificate_types,
             second.client_certificate_types,
         ) or
+        !optionalBytesEql(first.session_ticket, second.session_ticket) or
         !std.mem.eql(u8, first.supported_groups, second.supported_groups) or
         !std.mem.eql(u8, first.signature_algorithms, second.signature_algorithms) or
         !std.mem.eql(u8, first.alpn_protocols, second.alpn_protocols) or

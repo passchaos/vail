@@ -70,6 +70,9 @@ pub const Config = struct {
         &cipher_suite.default_preference,
     additional_cipher_suites: []const u16 = &.{},
     supported_versions: []const u16 = &.{0x0304},
+    /// Legacy RFC 5077 extension carried only when a version-negotiating
+    /// caller also offers TLS 1.2. Null omits it; an empty slice requests one.
+    tls12_session_ticket: ?[]const u8 = null,
     offer_extended_master_secret: bool = false,
     alpn_protocols: []const []const u8 = &.{},
     request_ocsp: bool = false,
@@ -234,7 +237,6 @@ pub fn ClientConnection(
         server_name: ?[]const u8,
         client_identity: ?client_auth.ClientIdentity,
         random: [32]u8,
-        session_id: []const u8,
         cipher_suites: []const cipher_suite.Suite,
         additional_cipher_suites: []const u16,
         supported_versions: []const u16,
@@ -304,6 +306,7 @@ pub fn ClientConnection(
                 .request_ocsp = config.request_ocsp,
                 .offer_extended_master_secret = config.offer_extended_master_secret,
                 .certificate_compression_algorithms = config.certificate_compression_algorithms,
+                .session_ticket = config.tls12_session_ticket,
                 .server_certificate_types = if (config.server_certificate_type == .raw_public_key)
                     &.{.raw_public_key}
                 else
@@ -382,7 +385,6 @@ pub fn ClientConnection(
                 .server_name = config.server_name,
                 .client_identity = config.client_identity,
                 .random = config.random,
-                .session_id = config.session_id,
                 .cipher_suites = config.cipher_suites,
                 .additional_cipher_suites = config.additional_cipher_suites,
                 .supported_versions = config.supported_versions,
@@ -557,7 +559,7 @@ pub fn ClientConnection(
                 self.allocator,
                 .{
                     .random = self.random,
-                    .session_id = self.session_id,
+                    .session_id = parsed_client.session_id,
                     .server_name = self.server_name,
                     .key_share = .{
                         .group = retry_exchange.namedGroup(),
@@ -572,6 +574,7 @@ pub fn ClientConnection(
                     .request_ocsp = self.request_ocsp,
                     .offer_extended_master_secret = self.offer_extended_master_secret,
                     .certificate_compression_algorithms = self.certificate_compression_algorithms,
+                    .session_ticket = parsed_client.session_ticket,
                     .server_certificate_types = if (self.server_certificate_type == .raw_public_key)
                         &.{.raw_public_key}
                     else
