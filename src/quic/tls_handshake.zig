@@ -15,6 +15,7 @@ const cipher_suite = @import("../tls/cipher_suite.zig");
 const client_auth = @import("../tls/client_auth.zig");
 const client_handshake = @import("../tls/client_handshake.zig");
 const client_hello = @import("../tls/client_hello.zig");
+const ech = @import("../tls/ech.zig");
 const key_schedule = @import("../tls/key_schedule.zig");
 const psk = @import("../tls/psk.zig");
 const secret = @import("../tls/secret.zig");
@@ -28,7 +29,7 @@ pub const handshake_type_finished: u8 = 0x14;
 
 pub const Error = std.mem.Allocator.Error || server_flight.Error ||
     server_hello.Error || client_handshake.Error || key_schedule.Error ||
-    psk.Error || auth.Error || error{
+    psk.Error || ech.Error || auth.Error || error{
     InvalidFinished,
     InvalidSecondClientHello,
     InvalidRetryCookie,
@@ -40,6 +41,7 @@ pub const Error = std.mem.Allocator.Error || server_flight.Error ||
     ServerSelectedUnofferedAlpn,
     SessionIdMismatch,
     UnsupportedEch,
+    EchRejected,
     UnsupportedEarlyData,
     InvalidEarlyDataConfiguration,
     MissingPskConfiguration,
@@ -60,6 +62,7 @@ pub const Result = struct {
     early_data_limit: ?u32,
     client_auth: ?ClientAuthState,
     resumed: bool,
+    ech_accepted: bool,
 
     pub fn deinit(self: *Result) void {
         if (self.client_auth) |state| {
@@ -90,6 +93,9 @@ pub const Options = struct {
     /// Set only after the transport's anti-replay policy authorizes this
     /// ClientHello. The ticket limit remains an independent upper bound.
     accept_early_data: bool = false,
+    /// The caller sets this only after authenticating and reconstructing a
+    /// ClientHelloInner with the ECH server context.
+    ech_accepted: bool = false,
     retry: ?RetryState = null,
     labels: traffic.Labels = traffic.labels_v1,
 };
@@ -100,6 +106,7 @@ pub const RetryState = struct {
     transcript_prefix: transcript.State,
     binder_prefix: transcript.State,
     second_client_hello_hash: transcript.Digest,
+    ech_accepted: bool,
 };
 
 pub const ResumptionPsk = struct {
@@ -123,10 +130,35 @@ pub fn prepareRetryState(
         return error.MissingQuicTransportParameters;
     }
     if (first.alpn_protocols.len == 0) return error.MissingAlpn;
-    if (first.encrypted_client_hello != null) return error.UnsupportedEch;
-
     const retry = try server_hello.parseHelloRetryRequest(hello_retry_request);
-    if (retry.ech_confirmation != null) return error.UnsupportedEch;
+    const ech_accepted = if (first.encrypted_client_hello) |encoded| blk: {
+        if (try ech.parseClientHelloExtension(encoded) != .inner) {
+            return error.UnsupportedEch;
+        }
+        const confirmation = retry.ech_confirmation orelse
+            return error.EchRejected;
+        const confirmation_transcript =
+            try ech.helloRetryRequestConfirmationTranscript(
+                retry.cipher_suite.hash(),
+                first_client_hello,
+                hello_retry_request,
+                confirmation,
+            );
+        const expected = try ech.hrrAcceptConfirmation(
+            retry.cipher_suite.hash(),
+            first.random.*,
+            confirmation_transcript,
+        );
+        if (!std.crypto.timing_safe.eql(
+            [ech.confirmation_len]u8,
+            confirmation[0..ech.confirmation_len].*,
+            expected,
+        )) return error.EchRejected;
+        break :blk true;
+    } else blk: {
+        if (retry.ech_confirmation != null) return error.InvalidServerHello;
+        break :blk false;
+    };
     if (!first.hasCipherSuite(retry.cipher_suite.wireValue())) {
         return error.ServerSelectedUnofferedSuite;
     }
@@ -175,6 +207,7 @@ pub fn prepareRetryState(
             retry.cipher_suite.hash(),
             &.{second_client_hello},
         ),
+        .ech_accepted = ech_accepted,
     };
 }
 
@@ -235,6 +268,7 @@ pub const ClientResult = struct {
     handshake_packet_keys: tls_secrets.DirectionalKeys,
     application_packet_keys: tls_secrets.DirectionalKeys,
     resumed: bool,
+    ech_accepted: bool,
 
     pub fn deinit(self: *ClientResult) void {
         self.allocator.free(self.selected_alpn);
@@ -308,9 +342,7 @@ pub fn writeClientCryptoFlight(
         return error.MissingQuicTransportParameters;
     }
     if (parsed_client.alpn_protocols.len == 0) return error.MissingAlpn;
-    if (parsed_client.encrypted_client_hello != null) {
-        return error.UnsupportedEch;
-    }
+    const ech_accepted = try isInnerEch(parsed_client);
     if (options.resumption) |resumption| {
         if (parsed_client.pre_shared_key == null) return error.MissingPskOffer;
         const offer = try psk.parseClientOfferForHash(
@@ -372,7 +404,33 @@ pub fn writeClientCryptoFlight(
             parsed_server.cipher_suite,
             parsed_server.key_share_group,
             options.client_hello_bytes,
+            ech_accepted,
         );
+    }
+    if (ech_accepted) {
+        const confirmation_prefix = if (options.retry) |retry|
+            retry.transcript_prefix
+        else blk: {
+            var state = transcript.State.init(parsed_server.cipher_suite.hash());
+            state.update(options.client_hello_bytes);
+            break :blk state;
+        };
+        const confirmation_transcript =
+            try ech.serverHelloConfirmationTranscript(
+                confirmation_prefix,
+                options.server_hello_bytes,
+            );
+        const expected = try ech.acceptConfirmation(
+            parsed_server.cipher_suite.hash(),
+            parsed_client.random.*,
+            confirmation_transcript,
+        );
+        if (!std.crypto.timing_safe.eql(
+            [ech.confirmation_len]u8,
+            parsed_server.random[parsed_server.random.len -
+                ech.confirmation_len ..][0..ech.confirmation_len].*,
+            expected,
+        )) return error.EchRejected;
     }
 
     const flight = try client_handshake.splitServerFlightForMode(
@@ -438,6 +496,8 @@ pub fn writeClientCryptoFlight(
             .psk_resumed = resumed,
             .early_data_offered = parsed_client.early_data,
             .send_end_of_early_data = false,
+            .ech_accepted = ech_accepted,
+            .ech_offered = ech_accepted,
             .server_verifier = options.server_verifier,
             .server_certificate_type = options.server_certificate_type,
             .server_name = options.server_name,
@@ -474,6 +534,7 @@ pub fn writeClientCryptoFlight(
         .handshake_packet_keys = handshake_packet_keys,
         .application_packet_keys = application_packet_keys,
         .resumed = resumed,
+        .ech_accepted = ech_accepted,
     };
 }
 
@@ -498,7 +559,8 @@ pub fn writeServerCryptoFlight(
     {
         return error.MissingAlpn;
     }
-    if (options.parsed_client_hello.encrypted_client_hello != null) {
+    const ech_accepted = try isInnerEch(options.parsed_client_hello);
+    if (ech_accepted != options.ech_accepted) {
         return error.UnsupportedEch;
     }
     const selection = try server_flight.select(
@@ -514,6 +576,7 @@ pub fn writeServerCryptoFlight(
             selection.suite,
             selection.key_share_group,
             options.client_hello_bytes,
+            ech_accepted,
         );
     }
     const selected_psk: ?secret.Secret = if (options.resumption) |resumption| blk: {
@@ -566,8 +629,12 @@ pub fn writeServerCryptoFlight(
 
     var server_hello_msg: std.ArrayList(u8) = .empty;
     defer server_hello_msg.deinit(allocator);
+    var server_random = options.server_random;
+    if (ech_accepted) {
+        @memset(server_random[server_random.len - ech.confirmation_len ..], 0);
+    }
     try server_hello.writeServerHello(&server_hello_msg, allocator, .{
-        .random = options.server_random,
+        .random = server_random,
         .session_id_echo = options.parsed_client_hello.session_id,
         .cipher_suite = selection.suite,
         .key_share_group = selection.key_share_group,
@@ -577,6 +644,26 @@ pub fn writeServerCryptoFlight(
         else
             null,
     });
+    if (ech_accepted) {
+        const confirmation_prefix = if (options.retry) |retry|
+            retry.transcript_prefix
+        else blk: {
+            var state = transcript.State.init(selection.suite.hash());
+            state.update(options.client_hello_bytes);
+            break :blk state;
+        };
+        const confirmation_transcript =
+            try ech.serverHelloConfirmationTranscript(
+                confirmation_prefix,
+                server_hello_msg.items,
+            );
+        const confirmation = try ech.acceptConfirmation(
+            selection.suite.hash(),
+            options.parsed_client_hello.random.*,
+            confirmation_transcript,
+        );
+        server_hello_msg.items[4 + 2 + 32 - ech.confirmation_len ..][0..ech.confirmation_len].* = confirmation;
+    }
     // The QUIC transport wraps these bytes in Initial CRYPTO frames, then
     // packet-protects those frames with Initial keys derived from the DCID.
     try initial_crypto.appendSlice(allocator, server_hello_msg.items);
@@ -736,6 +823,7 @@ pub fn writeServerCryptoFlight(
             null,
         .client_auth = retained_client_auth,
         .resumed = selected_psk != null,
+        .ech_accepted = ech_accepted,
     };
 }
 
@@ -822,9 +910,11 @@ fn validateRetryState(
     suite: cipher_suite.Suite,
     selected_group: u16,
     second_client_hello: []const u8,
+    ech_accepted: bool,
 ) Error!void {
     if (retry.cipher_suite != suite or
         retry.selected_group != selected_group or
+        retry.ech_accepted != ech_accepted or
         retry.transcript_prefix.digest().hash != suite.hash())
     {
         return error.InvalidRetryState;
@@ -838,6 +928,14 @@ fn validateRetryState(
         retry.second_client_hello_hash.bytes(),
         actual_hash.bytes(),
     )) return error.InvalidRetryState;
+}
+
+fn isInnerEch(parsed: client_hello.Parsed) Error!bool {
+    const encoded = parsed.encrypted_client_hello orelse return false;
+    return switch (try ech.parseClientHelloExtension(encoded)) {
+        .inner => true,
+        .outer => error.UnsupportedEch,
+    };
 }
 
 fn verifyClientFinished(
@@ -1037,6 +1135,7 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
         .quic_transport_parameters = &client_parameters,
         .server_certificate_types = &.{.raw_public_key},
         .client_certificate_types = &.{.raw_public_key},
+        .encrypted_client_hello = &.{ech.inner_type},
     });
     const parsed_client = try client_hello.parse(client_hello_bytes.items);
 
@@ -1071,9 +1170,11 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
                 },
                 .request_context = "quic-mtls",
             },
+            .ech_accepted = true,
         },
     );
     defer server_result.deinit();
+    try std.testing.expect(server_result.ech_accepted);
 
     var client_crypto: std.ArrayList(u8) = .empty;
     defer client_crypto.deinit(allocator);
@@ -1094,6 +1195,7 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
         },
     );
     defer client_result.deinit();
+    try std.testing.expect(client_result.ech_accepted);
 
     try std.testing.expectEqualStrings("h3", client_result.selected_alpn);
     try std.testing.expectEqualSlices(
@@ -1147,6 +1249,28 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
         client_result.verified.transcript_after_client_finished.bytes(),
         client_flight.transcript_after_client_finished.bytes(),
     );
+
+    const forged_server_hello = try allocator.dupe(u8, initial_crypto.items);
+    defer allocator.free(forged_server_hello);
+    forged_server_hello[4 + 2 + 31] ^= 1;
+    var forged_output: std.ArrayList(u8) = .empty;
+    defer forged_output.deinit(allocator);
+    try std.testing.expectError(
+        error.EchRejected,
+        writeClientCryptoFlight(&forged_output, allocator, .{
+            .client_hello_bytes = client_hello_bytes.items,
+            .server_hello_bytes = forged_server_hello,
+            .server_handshake_crypto = server_crypto.items,
+            .shared_secret = &shared_secret,
+            .server_verifier = .{
+                .pinned_raw_public_key = &public_key_spki,
+            },
+            .server_name = "quic.example",
+            .server_certificate_type = .raw_public_key,
+            .client_identity = client_identity,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), forged_output.items.len);
 
     const encrypted_extensions_len = 4 +
         ((@as(usize, server_crypto.items[1]) << 16) |
@@ -1322,6 +1446,7 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
         .alpn_protocols = &.{"h3"},
         .quic_transport_parameters = &.{ 1, 2, 3 },
         .server_certificate_types = &.{.raw_public_key},
+        .encrypted_client_hello = &.{ech.inner_type},
     });
     var retry_bytes: std.ArrayList(u8) = .empty;
     defer retry_bytes.deinit(allocator);
@@ -1330,7 +1455,18 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
         .cipher_suite = .aes_128_gcm_sha256,
         .selected_group = 0x0017,
         .cookie = "quic-cookie",
+        .ech_confirmation = [_]u8{0} ** ech.confirmation_len,
     });
+    const hrr_confirmation = try ech.hrrAcceptConfirmation(
+        .sha256,
+        (try client_hello.parse(first_hello.items)).random.*,
+        transcript.afterHelloRetryRequest(
+            .sha256,
+            first_hello.items,
+            retry_bytes.items,
+        ).digest(),
+    );
+    retry_bytes.items[retry_bytes.items.len - ech.confirmation_len ..][0..ech.confirmation_len].* = hrr_confirmation;
     var second_hello: std.ArrayList(u8) = .empty;
     defer second_hello.deinit(allocator);
     try client_hello.writeWithKeyShare(&second_hello, allocator, .{
@@ -1347,11 +1483,23 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
         .alpn_protocols = &.{"h3"},
         .quic_transport_parameters = &.{ 1, 2, 3 },
         .server_certificate_types = &.{.raw_public_key},
+        .encrypted_client_hello = &.{ech.inner_type},
     });
     const retry = try prepareRetryState(
         first_hello.items,
         retry_bytes.items,
         second_hello.items,
+    );
+    const forged_retry_bytes = try allocator.dupe(u8, retry_bytes.items);
+    defer allocator.free(forged_retry_bytes);
+    forged_retry_bytes[forged_retry_bytes.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.EchRejected,
+        prepareRetryState(
+            first_hello.items,
+            forged_retry_bytes,
+            second_hello.items,
+        ),
     );
 
     var initial_crypto: std.ArrayList(u8) = .empty;
@@ -1377,10 +1525,12 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
             .shared_secret = &shared_secret,
             .certificate_chain = &.{&public_key_spki},
             .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+            .ech_accepted = true,
             .retry = retry,
         },
     );
     defer server_result.deinit();
+    try std.testing.expect(server_result.ech_accepted);
 
     var client_crypto: std.ArrayList(u8) = .empty;
     defer client_crypto.deinit(allocator);
@@ -1401,6 +1551,7 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
         },
     );
     defer client_result.deinit();
+    try std.testing.expect(client_result.ech_accepted);
     var verified_client = try verifyClientCryptoFlight(
         allocator,
         &server_result,
@@ -1422,7 +1573,7 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
     var wrong_transcript_output: std.ArrayList(u8) = .empty;
     defer wrong_transcript_output.deinit(allocator);
     try std.testing.expectError(
-        error.BadCertificateVerify,
+        error.EchRejected,
         writeClientCryptoFlight(&wrong_transcript_output, allocator, .{
             .client_hello_bytes = second_hello.items,
             .server_hello_bytes = initial_crypto.items,
@@ -1452,6 +1603,7 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
         .alpn_protocols = &.{"h3"},
         .quic_transport_parameters = &.{ 9, 9, 9 },
         .server_certificate_types = &.{.raw_public_key},
+        .encrypted_client_hello = &.{ech.inner_type},
     });
     try std.testing.expectError(
         error.InvalidSecondClientHello,
@@ -1499,10 +1651,29 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
         true,
         null,
     );
+    var psk_retry_bytes = try retry_bytes.clone(allocator);
+    defer psk_retry_bytes.deinit(allocator);
+    @memset(
+        psk_retry_bytes.items[psk_retry_bytes.items.len -
+            ech.confirmation_len ..],
+        0,
+    );
+    const psk_hrr_confirmation = try ech.hrrAcceptConfirmation(
+        .sha256,
+        (try client_hello.parse(first_psk.items)).random.*,
+        transcript.afterHelloRetryRequest(
+            .sha256,
+            first_psk.items,
+            psk_retry_bytes.items,
+        ).digest(),
+    );
+    psk_retry_bytes.items[psk_retry_bytes.items.len -
+        ech.confirmation_len ..][0..ech.confirmation_len].* =
+        psk_hrr_confirmation;
     const binder_prefix = transcript.afterHelloRetryRequest(
         .sha256,
         first_psk.items,
-        retry_bytes.items,
+        psk_retry_bytes.items,
     );
     var second_psk = try second_hello.clone(allocator);
     defer second_psk.deinit(allocator);
@@ -1517,7 +1688,7 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
     );
     const psk_retry = try prepareRetryState(
         first_psk.items,
-        retry_bytes.items,
+        psk_retry_bytes.items,
         second_psk.items,
     );
     try std.testing.expectError(
@@ -1555,6 +1726,7 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
                 .certificate_chain = &.{&public_key_spki},
                 .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
                 .resumption = resumption,
+                .ech_accepted = true,
                 .accept_early_data = true,
                 .retry = psk_retry,
             },
@@ -1587,6 +1759,7 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
             .certificate_chain = &.{&public_key_spki},
             .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
             .resumption = resumption,
+            .ech_accepted = true,
             .retry = psk_retry,
         },
     );

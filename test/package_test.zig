@@ -55,6 +55,14 @@ test "public modules are reachable" {
         vail.quic.tls_handshake.Result,
         "client_early_packet_keys",
     ));
+    try std.testing.expect(@hasField(
+        vail.quic.tls_handshake.Result,
+        "ech_accepted",
+    ));
+    try std.testing.expect(@hasField(
+        vail.quic.tls_handshake.ClientResult,
+        "ech_accepted",
+    ));
     try std.testing.expect(@hasDecl(vail.quic, "tls_secrets"));
     try std.testing.expect(@hasDecl(vail.quic.tls_secrets, "applicationKeys"));
     try std.testing.expect(@hasDecl(

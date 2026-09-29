@@ -172,9 +172,11 @@ The current foundation provides:
   the ticket byte limit for transport enforcement without emitting TLS's
   stream-only EndOfEarlyData message. Validated HelloRetryRequest state
   preserves the synthetic `message_hash` transcript, verifies the second
-  binder, disables 0-RTT, and
-  enforces ClientHello2 consistency on both endpoints. The server can request
-  and authenticate mTLS and verifies the client's Finished before returning an
+  binder, disables 0-RTT, and enforces ClientHello2 consistency on both
+  endpoints. Accepted ECH uses the reconstructed ClientHelloInner transcript
+  and authenticates both ordinary and HRR acceptance confirmations, including
+  combinations with PSK and rejected 0-RTT. The server can request and
+  authenticate mTLS and verifies the client's Finished before returning an
   owned peer chain. Both sides require QUIC transport parameters and a common
   ALPN, while packetization, retransmission, packet-number spaces, and
   congestion/recovery remain transport responsibilities.
