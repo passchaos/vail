@@ -25,12 +25,14 @@ pub const Error = std.mem.Allocator.Error || auth.Error ||
 pub const ClientIdentity = struct {
     certificate_chain: []const []const u8,
     signer: auth.Signer,
+    certificate_type: auth.CertificateType = .x509,
     compressed_certificates: []const certificate_compression.PreparedView = &.{},
 
     pub fn validate(self: ClientIdentity) auth.Error!void {
         try (auth.ServerIdentity{
             .certificate_chain = self.certificate_chain,
             .signer = self.signer,
+            .certificate_type = self.certificate_type,
         }).validate();
     }
 };
@@ -47,6 +49,7 @@ pub const ServerPolicy = struct {
     verifier: auth.ClientVerifier,
     certificate_authorities: []const []const u8 = &.{},
     requirement: Requirement = .required,
+    certificate_type: auth.CertificateType = .x509,
 };
 
 pub const ParsedRequest = struct {
@@ -183,7 +186,14 @@ pub fn verifyClientFlightWithCompression(
             return error.InvalidClientFlight;
         }
     } else {
-        try policy.verifier.verifyTrust(null, certificate.entries);
+        if (policy.certificate_type == .raw_public_key) {
+            if (certificate.ocsp_response != null) {
+                return error.InvalidClientFlight;
+            }
+            try policy.verifier.verifyRawPublicKey(null, certificate.entries);
+        } else {
+            try policy.verifier.verifyTrust(null, certificate.entries);
+        }
         const verify_bytes = certificate_verify_bytes orelse
             return error.InvalidClientFlight;
         const parsed_verify = try auth.parseCertificateVerify(

@@ -33,16 +33,18 @@ pub const Error = std.mem.Allocator.Error || stream.Error ||
     ConnectionFailed,
 };
 
+/// `max_handshake_message_len` bounds both the ClientHello and the TLS 1.3
+/// encrypted client authentication messages.
 pub fn ServerConnection(
-    comptime max_client_hello_len: usize,
+    comptime max_handshake_message_len: usize,
     comptime max_post_handshake_len: usize,
 ) type {
     const Tls13 = server13.ServerConnection(
-        max_client_hello_len,
+        max_handshake_message_len,
         max_post_handshake_len,
     );
     const Tls12 = server12.ServerConnection(
-        max_client_hello_len,
+        max_handshake_message_len,
         max_post_handshake_len,
     );
     return struct {
@@ -68,7 +70,7 @@ pub fn ServerConnection(
         config: Config,
         state: State = .initial,
         records: stream.RecordDeframer = .{},
-        messages: stream.HandshakeReassembler(max_client_hello_len) = .{},
+        messages: stream.HandshakeReassembler(max_handshake_message_len) = .{},
 
         pub fn init(config: Config) Self {
             return .{ .config = config };

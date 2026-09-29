@@ -5,6 +5,7 @@
 //! the negotiation core that OpenSSL/rustls interop will exercise next.
 
 const std = @import("std");
+const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const client_hello = @import("client_hello.zig");
@@ -20,6 +21,7 @@ pub const Error = std.mem.Allocator.Error || client_hello.Error || error{
     InvalidAlpn,
     InvalidServerHello,
     InvalidEncryptedExtensions,
+    NoSupportedCertificateType,
 };
 
 pub const RetrySelection = struct {
@@ -33,6 +35,7 @@ pub fn selectHelloRetryRequest(
     requested_group: u16,
 ) Error!RetrySelection {
     if (!client.offersTls13()) return error.NoTls13;
+    _ = try selectCertificateTypes(client, policy);
     if (policy.quic_transport_parameters != null and
         client.quic_transport_parameters == null)
     {
@@ -58,6 +61,10 @@ pub const Selection = struct {
     suite: cipher_suite.Suite,
     key_share_group: u16,
     alpn_protocol: ?[]const u8,
+    server_certificate_type: auth.CertificateType,
+    send_server_certificate_type: bool,
+    client_certificate_type: auth.CertificateType,
+    send_client_certificate_type: bool,
 };
 
 pub const Policy = struct {
@@ -71,6 +78,8 @@ pub const Policy = struct {
     /// Precomputed compressed Certificate messages. The first entry matching
     /// both the actual Certificate body and a client-offered algorithm wins.
     compressed_certificates: []const certificate_compression.PreparedView = &.{},
+    server_certificate_type: auth.CertificateType = .x509,
+    client_certificate_type: auth.CertificateType = .x509,
 };
 
 pub fn select(client: client_hello.Parsed, policy: Policy) Error!Selection {
@@ -85,11 +94,44 @@ pub fn select(client: client_hello.Parsed, policy: Policy) Error!Selection {
     } else return error.NoSharedCipherSuite;
     const key_share = try firstSupportedShare(client, policy.groups) orelse
         return error.NoSupportedKeyShare;
+    const certificate_types = try selectCertificateTypes(client, policy);
     return .{
         .suite = suite,
         .key_share_group = key_share.group,
         .alpn_protocol = try selectAlpn(client.alpn_protocols, policy.alpn_protocols),
+        .server_certificate_type = policy.server_certificate_type,
+        .send_server_certificate_type = certificate_types.send_server,
+        .client_certificate_type = policy.client_certificate_type,
+        .send_client_certificate_type = certificate_types.send_client,
     };
+}
+
+const CertificateTypeSelection = struct {
+    send_server: bool,
+    send_client: bool,
+};
+
+fn selectCertificateTypes(
+    client: client_hello.Parsed,
+    policy: Policy,
+) Error!CertificateTypeSelection {
+    const sent_server = client.server_certificate_types.len != 0;
+    if (sent_server) {
+        if (!client.supportsServerCertificateType(
+            policy.server_certificate_type,
+        )) return error.NoSupportedCertificateType;
+    } else if (policy.server_certificate_type != .x509) {
+        return error.NoSupportedCertificateType;
+    }
+    const sent_client = client.client_certificate_types.len != 0;
+    if (sent_client) {
+        if (!client.supportsClientCertificateType(
+            policy.client_certificate_type,
+        )) return error.NoSupportedCertificateType;
+    } else if (policy.client_certificate_type != .x509) {
+        return error.NoSupportedCertificateType;
+    }
+    return .{ .send_server = sent_server, .send_client = sent_client };
 }
 
 pub fn writeFirstFlight(
@@ -111,6 +153,14 @@ pub fn writeFirstFlight(
     try server_hello.writeEncryptedExtensions(out, allocator, .{
         .alpn_protocol = chosen.alpn_protocol,
         .quic_transport_parameters = policy.quic_transport_parameters,
+        .server_certificate_type = if (chosen.send_server_certificate_type)
+            chosen.server_certificate_type
+        else
+            null,
+        .client_certificate_type = if (chosen.send_client_certificate_type)
+            chosen.client_certificate_type
+        else
+            null,
     });
     return chosen;
 }
@@ -213,4 +263,50 @@ test "server first flight selects from a parsed ClientHello" {
     try std.testing.expectEqualStrings("h2", chosen.alpn_protocol.?);
     try std.testing.expectEqual(server_hello.handshake_type_server_hello, out.items[0]);
     try std.testing.expect(std.mem.indexOf(u8, out.items, &.{server_hello.handshake_type_encrypted_extensions}) != null);
+}
+
+test "RFC 7250 selection rejects incompatible certificate formats" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try client_hello.write(&encoded, allocator, .{
+        .random = [_]u8{0x31} ** 32,
+        .x25519_public_key = [_]u8{0x32} ** 32,
+        .server_certificate_types = &.{.raw_public_key},
+        .client_certificate_types = &.{.raw_public_key},
+    });
+    const offered = try client_hello.parse(encoded.items);
+    const selected = try select(offered, .{
+        .server_certificate_type = .raw_public_key,
+        .client_certificate_type = .raw_public_key,
+    });
+    try std.testing.expectEqual(
+        auth.CertificateType.raw_public_key,
+        selected.server_certificate_type,
+    );
+    try std.testing.expectEqual(
+        auth.CertificateType.raw_public_key,
+        selected.client_certificate_type,
+    );
+    try std.testing.expect(selected.send_server_certificate_type);
+    try std.testing.expect(selected.send_client_certificate_type);
+    try std.testing.expectError(
+        error.NoSupportedCertificateType,
+        select(offered, .{}),
+    );
+
+    encoded.clearRetainingCapacity();
+    try client_hello.write(&encoded, allocator, .{
+        .random = [_]u8{0x33} ** 32,
+        .x25519_public_key = [_]u8{0x34} ** 32,
+    });
+    const default_x509 = try client_hello.parse(encoded.items);
+    try std.testing.expectError(
+        error.NoSupportedCertificateType,
+        select(default_x509, .{ .server_certificate_type = .raw_public_key }),
+    );
+    try std.testing.expectError(
+        error.NoSupportedCertificateType,
+        select(default_x509, .{ .client_certificate_type = .raw_public_key }),
+    );
 }

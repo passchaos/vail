@@ -38,6 +38,11 @@ pub const signature_scheme_rsa_pss_pss_sha512: u16 = 0x080b;
 pub const signature_scheme_sm2sig_sm3: u16 = 0x0708;
 pub const handshake_type_certificate: u8 = 0x0b;
 pub const handshake_type_certificate_verify: u8 = 0x0f;
+
+pub const CertificateType = enum(u8) {
+    x509 = 0,
+    raw_public_key = 2,
+};
 const server_certificate_verify_context =
     "TLS 1.3, server CertificateVerify";
 const client_certificate_verify_context =
@@ -66,10 +71,17 @@ pub const ServerIdentity = struct {
     /// P-256 SEC1 public keys are accepted for compact pinned-key deployments.
     certificate_chain: []const []const u8,
     signer: Signer,
+    certificate_type: CertificateType = .x509,
 
     pub fn validate(self: ServerIdentity) Error!void {
         if (self.certificate_chain.len == 0) {
             return error.EmptyCertificateChain;
+        }
+        if (self.certificate_type == .raw_public_key and
+            (self.certificate_chain.len != 1 or
+                (try parseRawSpki(self.certificate_chain[0])) == null))
+        {
+            return error.InvalidCertificate;
         }
         try self.signer.validateCertificate(self.certificate_chain[0]);
     }
@@ -375,6 +387,8 @@ pub const ClientVerifier = struct {
     /// payload (not the complete SubjectPublicKeyInfo). The caller retains
     /// ownership.
     pinned_rsa_public_key: ?[]const u8 = null,
+    /// Exact DER SubjectPublicKeyInfo pin used with RFC 7250.
+    pinned_raw_public_key: ?[]const u8 = null,
 
     pub fn verifyTrust(
         self: ClientVerifier,
@@ -454,6 +468,23 @@ pub const ClientVerifier = struct {
             return;
         }
         return error.CertificateUntrusted;
+    }
+
+    pub fn verifyRawPublicKey(
+        self: ClientVerifier,
+        server_name: ?[]const u8,
+        chain: []const []const u8,
+    ) Error!void {
+        if (chain.len != 1 or (try parseRawSpki(chain[0])) == null) {
+            return error.InvalidCertificate;
+        }
+        if (self.pinned_raw_public_key) |pinned| {
+            if (!timingSafeEqlBytes(chain[0], pinned)) {
+                return error.CertificateUntrusted;
+            }
+            return;
+        }
+        return self.verifyTrustWithOcsp(server_name, chain, null);
     }
 };
 
@@ -987,6 +1018,13 @@ fn certificateCurve(certificate: []const u8) Error!CertificateCurve {
             return error.InvalidCertificate;
         return .p384;
     }
+    if (try parseRawSpki(certificate)) |spki| {
+        return switch (spki.kind) {
+            .p256 => .p256,
+            .p384 => .p384,
+            else => error.UnsupportedCertificateKey,
+        };
+    }
     const parsed_certificate = try parseX509(certificate);
     if (parsed_certificate.pub_key_algo != .X9_62_id_ecPublicKey) {
         return error.UnsupportedCertificateKey;
@@ -1332,6 +1370,14 @@ fn ed25519CertificatePublicKey(certificate: []const u8) Error![32]u8 {
         ) catch return error.InvalidCertificate;
         return certificate[0..Ed25519.PublicKey.encoded_length].*;
     }
+    if (try parseRawSpki(certificate)) |spki| {
+        if (spki.kind != .ed25519 or
+            spki.public_key.len != Ed25519.PublicKey.encoded_length)
+        {
+            return error.UnsupportedCertificateKey;
+        }
+        return spki.public_key[0..Ed25519.PublicKey.encoded_length].*;
+    }
     const parsed = try parseX509(certificate);
     if (parsed.pub_key_algo != .curveEd25519) {
         return error.UnsupportedCertificateKey;
@@ -1352,6 +1398,15 @@ fn p256CertificatePublicKey(
         _ = EcdsaP256Sha256.PublicKey.fromSec1(certificate) catch
             return error.InvalidCertificate;
         return certificate[0..EcdsaP256Sha256.PublicKey
+            .uncompressed_sec1_encoded_length].*;
+    }
+    if (try parseRawSpki(certificate)) |spki| {
+        if (spki.kind != .p256 or spki.public_key.len !=
+            EcdsaP256Sha256.PublicKey.uncompressed_sec1_encoded_length)
+        {
+            return error.UnsupportedCertificateKey;
+        }
+        return spki.public_key[0..EcdsaP256Sha256.PublicKey
             .uncompressed_sec1_encoded_length].*;
     }
     const parsed = try parseX509(certificate);
@@ -1381,6 +1436,15 @@ fn p384CertificatePublicKey(
         return certificate[0..EcdsaP384Sha384.PublicKey
             .uncompressed_sec1_encoded_length].*;
     }
+    if (try parseRawSpki(certificate)) |spki| {
+        if (spki.kind != .p384 or spki.public_key.len !=
+            EcdsaP384Sha384.PublicKey.uncompressed_sec1_encoded_length)
+        {
+            return error.UnsupportedCertificateKey;
+        }
+        return spki.public_key[0..EcdsaP384Sha384.PublicKey
+            .uncompressed_sec1_encoded_length].*;
+    }
     const parsed = try parseX509(certificate);
     if (parsed.pub_key_algo != .X9_62_id_ecPublicKey or
         parsed.pub_key_algo.X9_62_id_ecPublicKey != .secp384r1)
@@ -1404,6 +1468,14 @@ fn sm2CertificatePublicKey(
         _ = sm2.PublicKey.fromUncompressedSec1(certificate) catch
             return error.InvalidCertificate;
         return certificate[0..sm2.public_key_len].*;
+    }
+    if (try parseRawSpki(certificate)) |spki| {
+        if (spki.kind != .sm2 or spki.public_key.len != sm2.public_key_len) {
+            return error.UnsupportedCertificateKey;
+        }
+        _ = sm2.PublicKey.fromUncompressedSec1(spki.public_key) catch
+            return error.InvalidCertificate;
+        return spki.public_key[0..sm2.public_key_len].*;
     }
     return sm2X509PublicKey(certificate);
 }
@@ -1496,6 +1568,79 @@ fn oidEquals(bytes: []const u8, elem: DerElement, expected: []const u8) bool {
 
 const oid_id_ec_public_key = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01 };
 const oid_sm2 = [_]u8{ 0x2a, 0x81, 0x1c, 0xcf, 0x55, 0x01, 0x82, 0x2d };
+const oid_rsa_encryption = [_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01 };
+const oid_rsassa_pss = [_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a };
+const oid_ed25519 = [_]u8{ 0x2b, 0x65, 0x70 };
+const oid_p256 = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+const oid_p384 = [_]u8{ 0x2b, 0x81, 0x04, 0x00, 0x22 };
+
+const RawSpkiKind = enum {
+    rsa_encryption,
+    rsa_pss,
+    ed25519,
+    p256,
+    p384,
+    sm2,
+};
+
+const RawSpki = struct {
+    kind: RawSpkiKind,
+    public_key: []const u8,
+};
+
+fn parseRawSpki(bytes: []const u8) Error!?RawSpki {
+    const top = DerElement.parse(bytes, 0) catch return null;
+    if (top.tag != 0x30 or top.end != bytes.len) return null;
+    const algorithm = DerElement.parse(bytes, top.content_start) catch
+        return null;
+    if (algorithm.tag != 0x30) return null;
+    const key_bits = DerElement.parse(bytes, algorithm.end) catch return null;
+    if (key_bits.tag != 0x03 or key_bits.end != top.end or
+        key_bits.content_start >= key_bits.end or
+        bytes[key_bits.content_start] != 0)
+    {
+        return null;
+    }
+    var pos = algorithm.content_start;
+    const oid = DerElement.parse(bytes, pos) catch return null;
+    if (oid.tag != 0x06) return null;
+    pos = oid.end;
+    const kind: RawSpkiKind = if (oidEquals(bytes, oid, &oid_rsa_encryption))
+        .rsa_encryption
+    else if (oidEquals(bytes, oid, &oid_rsassa_pss))
+        .rsa_pss
+    else if (oidEquals(bytes, oid, &oid_ed25519))
+        .ed25519
+    else if (oidEquals(bytes, oid, &oid_id_ec_public_key)) blk: {
+        const parameters = DerElement.parse(bytes, pos) catch
+            return error.InvalidCertificate;
+        if (parameters.tag != 0x06) return error.InvalidCertificate;
+        pos = parameters.end;
+        if (oidEquals(bytes, parameters, &oid_p256)) break :blk .p256;
+        if (oidEquals(bytes, parameters, &oid_p384)) break :blk .p384;
+        if (oidEquals(bytes, parameters, &oid_sm2)) break :blk .sm2;
+        return error.UnsupportedCertificateKey;
+    } else return null;
+    while (pos < algorithm.end) {
+        const parameter = try DerElement.parse(bytes, pos);
+        pos = parameter.end;
+        if (kind == .ed25519 or kind == .p256 or kind == .p384 or
+            kind == .sm2)
+        {
+            return error.InvalidCertificate;
+        }
+        if (kind == .rsa_encryption and
+            (parameter.tag != 0x05 or parameter.content_start != parameter.end))
+        {
+            return error.InvalidCertificate;
+        }
+    }
+    if (pos != algorithm.end) return error.InvalidCertificate;
+    return .{
+        .kind = kind,
+        .public_key = bytes[key_bits.content_start + 1 .. key_bits.end],
+    };
+}
 
 fn rsaCertificatePublicKey(certificate: []const u8) Error![]const u8 {
     return rsaCertificatePublicKeyForAlgorithm(
@@ -1512,6 +1657,17 @@ fn rsaCertificatePublicKeyForAlgorithm(
     certificate: []const u8,
     expected: Certificate.AlgorithmCategory,
 ) Error![]const u8 {
+    if (try parseRawSpki(certificate)) |spki| {
+        const matches = switch (expected) {
+            .rsaEncryption => spki.kind == .rsa_encryption,
+            .rsassa_pss => spki.kind == .rsa_pss,
+            else => false,
+        };
+        if (!matches) return error.UnsupportedCertificateKey;
+        _ = Certificate.rsa.PublicKey.parseDer(spki.public_key) catch
+            return error.InvalidCertificate;
+        return spki.public_key;
+    }
     const parsed = try parseX509(certificate);
     if (std.meta.activeTag(parsed.pub_key_algo) != expected) {
         return error.UnsupportedCertificateKey;
@@ -1710,4 +1866,190 @@ test "custom signer preserves CertificateVerify construction and validation" {
             .signer = signer,
         }).validate(),
     );
+}
+
+test "RFC 7250 RSA SubjectPublicKeyInfo signs and verifies" {
+    const allocator = std.testing.allocator;
+    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    const private_der = decodeHex(vectors.private_key_pkcs8_hex);
+    const spki = decodeHex(vectors.public_key_spki_hex);
+    const private = try rsa.PrivateKey.fromDer(&private_der);
+    var prepared = try private.prepare();
+    defer prepared.deinit();
+    const signer = Signer{ .rsa_pss = .{
+        .prepared_key = &prepared,
+        .io = std.testing.io,
+    } };
+    try (ServerIdentity{
+        .certificate_chain = &.{&spki},
+        .signer = signer,
+        .certificate_type = .raw_public_key,
+    }).validate();
+    const message = "rfc7250 possession";
+    var signature: [max_certificate_verify_signature_len]u8 = undefined;
+    const signature_len = try signer.sign(message, &signature);
+    try verifySignedContent(
+        &spki,
+        .{
+            .scheme = signer.scheme(),
+            .signature = signature[0..signature_len],
+        },
+        message,
+    );
+    try (ClientVerifier{ .pinned_raw_public_key = &spki })
+        .verifyRawPublicKey("localhost", &.{&spki});
+    var wrong = spki;
+    wrong[wrong.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.CertificateUntrusted,
+        (ClientVerifier{ .pinned_raw_public_key = &spki })
+            .verifyRawPublicKey("localhost", &.{&wrong}),
+    );
+    _ = allocator;
+}
+
+test "RFC 7250 elliptic-curve SubjectPublicKeyInfo signs and verifies" {
+    const message = "rfc7250 elliptic curve possession";
+    var signature: [max_certificate_verify_signature_len]u8 = undefined;
+
+    const p256_key = try EcdsaP256Sha256.KeyPair.generateDeterministic(
+        [_]u8{0xa1} ** EcdsaP256Sha256.KeyPair.seed_length,
+    );
+    const p256_spki = p256SubjectPublicKeyInfo(
+        p256_key.public_key.toUncompressedSec1(),
+    );
+    const p256_signer = Signer{ .ecdsa_p256_sha256 = .{
+        .key_pair = p256_key,
+    } };
+    try (ServerIdentity{
+        .certificate_chain = &.{&p256_spki},
+        .signer = p256_signer,
+        .certificate_type = .raw_public_key,
+    }).validate();
+    const p256_signature_len = try p256_signer.sign(message, &signature);
+    try verifySignedContent(
+        &p256_spki,
+        .{
+            .scheme = p256_signer.scheme(),
+            .signature = signature[0..p256_signature_len],
+        },
+        message,
+    );
+
+    const p384_key = try EcdsaP384Sha384.KeyPair.generateDeterministic(
+        [_]u8{0xa2} ** EcdsaP384Sha384.KeyPair.seed_length,
+    );
+    const p384_spki = p384SubjectPublicKeyInfo(
+        p384_key.public_key.toUncompressedSec1(),
+    );
+    const p384_signer = Signer{ .ecdsa_p384_sha384 = .{
+        .key_pair = p384_key,
+    } };
+    try (ServerIdentity{
+        .certificate_chain = &.{&p384_spki},
+        .signer = p384_signer,
+        .certificate_type = .raw_public_key,
+    }).validate();
+    const p384_signature_len = try p384_signer.sign(message, &signature);
+    try verifySignedContent(
+        &p384_spki,
+        .{
+            .scheme = p384_signer.scheme(),
+            .signature = signature[0..p384_signature_len],
+        },
+        message,
+    );
+
+    const sm2_secret = try sm2.SecretKey.fromBytes(decodeHex(
+        "3945208f7b2133b13f36e38ac6d39f95889393692860b51a42fb81ef4df7c5b8",
+    ));
+    const sm2_key = try sm2.KeyPair.fromSecretKey(sm2_secret);
+    const sm2_spki = sm2SubjectPublicKeyInfo(
+        sm2_key.public_key.toUncompressedSec1(),
+    );
+    const sm2_signer = Signer{ .sm2sig_sm3 = .{
+        .key_pair = sm2_key,
+        .nonce = decodeHex(
+            "59276e27d506861a16680f3ad9c02dccccef3cc1fa3cdbe4ce6d54b80deac1bc",
+        ),
+    } };
+    try (ServerIdentity{
+        .certificate_chain = &.{&sm2_spki},
+        .signer = sm2_signer,
+        .certificate_type = .raw_public_key,
+    }).validate();
+    const sm2_signature_len = try sm2_signer.sign(message, &signature);
+    try verifySignedContent(
+        &sm2_spki,
+        .{
+            .scheme = sm2_signer.scheme(),
+            .signature = signature[0..sm2_signature_len],
+        },
+        message,
+    );
+}
+
+fn p256SubjectPublicKeyInfo(public_key: [65]u8) [91]u8 {
+    var spki = [_]u8{
+        0x30, 0x59,
+        0x30, 0x13,
+        0x06, 0x07,
+        0x2a, 0x86,
+        0x48, 0xce,
+        0x3d, 0x02,
+        0x01, 0x06,
+        0x08, 0x2a,
+        0x86, 0x48,
+        0xce, 0x3d,
+        0x03, 0x01,
+        0x07, 0x03,
+        0x42, 0x00,
+    } ++ ([_]u8{0} ** 65);
+    @memcpy(spki[26..], &public_key);
+    return spki;
+}
+
+fn p384SubjectPublicKeyInfo(public_key: [97]u8) [120]u8 {
+    var spki = [_]u8{
+        0x30, 0x76,
+        0x30, 0x10,
+        0x06, 0x07,
+        0x2a, 0x86,
+        0x48, 0xce,
+        0x3d, 0x02,
+        0x01, 0x06,
+        0x05, 0x2b,
+        0x81, 0x04,
+        0x00, 0x22,
+        0x03, 0x62,
+        0x00,
+    } ++ ([_]u8{0} ** 97);
+    @memcpy(spki[23..], &public_key);
+    return spki;
+}
+
+fn sm2SubjectPublicKeyInfo(public_key: [65]u8) [91]u8 {
+    var spki = [_]u8{
+        0x30, 0x59,
+        0x30, 0x13,
+        0x06, 0x07,
+        0x2a, 0x86,
+        0x48, 0xce,
+        0x3d, 0x02,
+        0x01, 0x06,
+        0x08, 0x2a,
+        0x81, 0x1c,
+        0xcf, 0x55,
+        0x01, 0x82,
+        0x2d, 0x03,
+        0x42, 0x00,
+    } ++ ([_]u8{0} ** 65);
+    @memcpy(spki[26..], &public_key);
+    return spki;
+}
+
+fn decodeHex(comptime encoded: []const u8) [encoded.len / 2]u8 {
+    var decoded: [encoded.len / 2]u8 = undefined;
+    _ = std.fmt.hexToBytes(&decoded, encoded) catch unreachable;
+    return decoded;
 }

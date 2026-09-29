@@ -76,6 +76,7 @@ pub const Config = struct {
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{.zlib},
     max_decompressed_certificate_len: usize = 64 * 1024,
     server_verifier: auth.ClientVerifier,
+    server_certificate_type: auth.CertificateType = .x509,
     client_identity: ?client_auth.ClientIdentity = null,
     resumption: ?ClientPsk = null,
 };
@@ -122,6 +123,8 @@ pub fn ClientConnection(
             early_data_accepted: bool,
             certificate_compression: ?certificate_compression.Algorithm,
             client_certificate_compression: ?certificate_compression.Algorithm,
+            server_certificate_type: auth.CertificateType,
+            client_certificate_type: auth.CertificateType,
 
             pub fn cacheNewSessionTicket(
                 self: *const Established,
@@ -227,6 +230,7 @@ pub fn ClientConnection(
 
         allocator: std.mem.Allocator,
         server_verifier: auth.ClientVerifier,
+        server_certificate_type: auth.CertificateType,
         server_name: ?[]const u8,
         client_identity: ?client_auth.ClientIdentity,
         random: [32]u8,
@@ -300,6 +304,17 @@ pub fn ClientConnection(
                 .request_ocsp = config.request_ocsp,
                 .offer_extended_master_secret = config.offer_extended_master_secret,
                 .certificate_compression_algorithms = config.certificate_compression_algorithms,
+                .server_certificate_types = if (config.server_certificate_type == .raw_public_key)
+                    &.{.raw_public_key}
+                else
+                    &.{},
+                .client_certificate_types = if (config.client_identity) |identity|
+                    if (identity.certificate_type == .raw_public_key)
+                        &.{.raw_public_key}
+                    else
+                        &.{}
+                else
+                    &.{},
             });
             var resumption: ?StoredPsk = if (config.resumption) |value|
                 try StoredPsk.init(config.allocator, value)
@@ -363,6 +378,7 @@ pub fn ClientConnection(
             return .{
                 .allocator = config.allocator,
                 .server_verifier = config.server_verifier,
+                .server_certificate_type = config.server_certificate_type,
                 .server_name = config.server_name,
                 .client_identity = config.client_identity,
                 .random = config.random,
@@ -556,6 +572,17 @@ pub fn ClientConnection(
                     .request_ocsp = self.request_ocsp,
                     .offer_extended_master_secret = self.offer_extended_master_secret,
                     .certificate_compression_algorithms = self.certificate_compression_algorithms,
+                    .server_certificate_types = if (self.server_certificate_type == .raw_public_key)
+                        &.{.raw_public_key}
+                    else
+                        &.{},
+                    .client_certificate_types = if (self.client_identity) |identity|
+                        if (identity.certificate_type == .raw_public_key)
+                            &.{.raw_public_key}
+                        else
+                            &.{}
+                    else
+                        &.{},
                 },
             );
             const retry_prefix = transcript.afterHelloRetryRequest(
@@ -789,6 +816,7 @@ pub fn ClientConnection(
                     .psk_resumed = pending.resumed,
                     .early_data_offered = pending.early_data_offered,
                     .server_verifier = self.server_verifier,
+                    .server_certificate_type = self.server_certificate_type,
                     .server_name = self.server_name,
                     .certificate_compression_algorithms = self.certificate_compression_algorithms,
                     .max_decompressed_certificate_len = self.max_decompressed_certificate_len,
@@ -851,6 +879,8 @@ pub fn ClientConnection(
                 .early_data_accepted = verified.early_data_accepted,
                 .certificate_compression = verified.certificate_compression,
                 .client_certificate_compression = verified.client_certificate_compression,
+                .server_certificate_type = verified.server_certificate_type,
+                .client_certificate_type = verified.client_certificate_type,
             };
             verified_owned = false;
             pending.deinit();
@@ -899,6 +929,19 @@ fn appendPlaintextHandshakeRecord(
         @truncate(message.len),
     });
     try output.appendSlice(allocator, message);
+}
+
+fn ed25519SubjectPublicKeyInfo(public_key: [32]u8) [44]u8 {
+    var spki = [_]u8{
+        0x30, 0x2a,
+        0x30, 0x05,
+        0x06, 0x03,
+        0x2b, 0x65,
+        0x70, 0x03,
+        0x21, 0x00,
+    } ++ ([_]u8{0} ** 32);
+    @memcpy(spki[12..], &public_key);
+    return spki;
 }
 
 test "client and server states establish over one-byte transport reads" {
@@ -1192,6 +1235,188 @@ test "client and server states establish over one-byte transport reads" {
     try std.testing.expect(cached.psk.eql(&opened_ticket.secret));
 }
 
+test "client and server establish mutual RFC 7250 raw public keys" {
+    const allocator = std.testing.allocator;
+    const Client = ClientConnection(64 * 1024, 256);
+    const Server = @import("server_connection.zig").ServerConnection(
+        64 * 1024,
+        256,
+    );
+    const server_signing_key = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0xd1} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const client_signing_key = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0xd2} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const server_spki = ed25519SubjectPublicKeyInfo(
+        server_signing_key.public_key.toBytes(),
+    );
+    const client_spki = ed25519SubjectPublicKeyInfo(
+        client_signing_key.public_key.toBytes(),
+    );
+
+    var client_material = key_exchange.ClientKeyMaterial{
+        .x25519 = [_]u8{0xd3} ** key_exchange.secret_len,
+    };
+    var client_wire: std.ArrayList(u8) = .empty;
+    defer client_wire.deinit(allocator);
+    var client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0xd4} ** 32,
+        .server_name = "rpk.example",
+        .key_material = &client_material,
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .server_verifier = .{ .pinned_raw_public_key = &server_spki },
+        .server_certificate_type = .raw_public_key,
+        .client_identity = .{
+            .certificate_chain = &.{&client_spki},
+            .signer = .{
+                .ed25519 = .{ .key_pair = client_signing_key },
+            },
+            .certificate_type = .raw_public_key,
+        },
+    }, &client_wire);
+    defer client.deinit();
+    const offered = try client_hello.parse(
+        client_wire.items[record.header_len..],
+    );
+    try std.testing.expect(offered.supportsServerCertificateType(
+        .raw_public_key,
+    ));
+    try std.testing.expect(offered.supportsClientCertificateType(
+        .raw_public_key,
+    ));
+
+    var server_material = key_exchange.ServerKeyMaterial{
+        .x25519 = [_]u8{0xd5} ** key_exchange.secret_len,
+    };
+    var server = Server.init(.{
+        .allocator = allocator,
+        .policy = .{
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .groups = &.{key_exchange.named_group_x25519},
+        },
+        .server_random = [_]u8{0xd6} ** 32,
+        .key_material = &server_material,
+        .certificate_chain = &.{&server_spki},
+        .signer = .{
+            .ed25519 = .{ .key_pair = server_signing_key },
+        },
+        .server_certificate_type = .raw_public_key,
+        .client_auth = .{},
+        .client_auth_policy = .{
+            .verifier = .{ .pinned_raw_public_key = &client_spki },
+            .requirement = .required,
+            .certificate_type = .raw_public_key,
+        },
+    });
+    defer server.deinit();
+
+    var server_flight_bytes: std.ArrayList(u8) = .empty;
+    defer server_flight_bytes.deinit(allocator);
+    const server_result = try server.receive(
+        client_wire.items,
+        &server_flight_bytes,
+    );
+    switch (server_result.event.?) {
+        .server_flight => {},
+        else => return error.ExpectedServerFlight,
+    }
+    const server_hello_len = 4 +
+        ((@as(usize, server_flight_bytes.items[1]) << 16) |
+            (@as(usize, server_flight_bytes.items[2]) << 8) |
+            server_flight_bytes.items[3]);
+    var server_wire: std.ArrayList(u8) = .empty;
+    defer server_wire.deinit(allocator);
+    try appendPlaintextHandshakeRecord(
+        &server_wire,
+        allocator,
+        server_flight_bytes.items[0..server_hello_len],
+    );
+    try server_wire.appendSlice(
+        allocator,
+        server_flight_bytes.items[server_hello_len..],
+    );
+
+    var client_flight_bytes: std.ArrayList(u8) = .empty;
+    defer client_flight_bytes.deinit(allocator);
+    var client_established: ?Client.Established = null;
+    var offset: usize = 0;
+    while (offset < server_wire.items.len) {
+        const received = try client.receive(
+            server_wire.items[offset..],
+            &client_flight_bytes,
+        );
+        if (received.consumed == 0 and received.event == null) {
+            return error.ClientStateStalled;
+        }
+        offset += received.consumed;
+        if (received.event) |event| switch (event) {
+            .server_hello,
+            .compatibility_change_cipher_spec,
+            => {},
+            .established => |established| client_established = established,
+            .hello_retry_request => return error.UnexpectedHelloRetryRequest,
+            .peer_alert => return error.PeerAbortedHandshake,
+        };
+    }
+    var established_client = client_established orelse
+        return error.ClientDidNotEstablish;
+    defer established_client.deinit();
+    try std.testing.expectEqual(
+        auth.CertificateType.raw_public_key,
+        established_client.server_certificate_type,
+    );
+    try std.testing.expectEqual(
+        auth.CertificateType.raw_public_key,
+        established_client.client_certificate_type,
+    );
+    try std.testing.expectEqual(@as(usize, 1), established_client
+        .peer_certificate_chain.len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &server_spki,
+        established_client.peer_certificate_chain[0],
+    );
+
+    var server_established: ?Server.Established = null;
+    offset = 0;
+    while (offset < client_flight_bytes.items.len) {
+        const received = try server.receive(
+            client_flight_bytes.items[offset..],
+            &server_flight_bytes,
+        );
+        if (received.consumed == 0 and received.event == null) {
+            return error.ServerStateStalled;
+        }
+        offset += received.consumed;
+        if (received.event) |event| switch (event) {
+            .established => |established| server_established = established,
+            else => {},
+        };
+    }
+    var established_server = server_established orelse
+        return error.ServerDidNotEstablish;
+    defer established_server.deinit();
+    try std.testing.expectEqual(
+        auth.CertificateType.raw_public_key,
+        established_server.server_certificate_type,
+    );
+    try std.testing.expectEqual(
+        auth.CertificateType.raw_public_key,
+        established_server.client_certificate_type,
+    );
+    try std.testing.expectEqual(@as(usize, 1), established_server
+        .peer_certificate_chain.?.len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &client_spki,
+        established_server.peer_certificate_chain.?[0],
+    );
+}
+
 test "client and server complete P-256 HelloRetryRequest transcript" {
     const allocator = std.testing.allocator;
     const Client = ClientConnection(64 * 1024, 256);
@@ -1203,7 +1428,9 @@ test "client and server complete P-256 HelloRetryRequest transcript" {
         .generateDeterministic(
         [_]u8{0xe1} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
     );
-    const certificate = signing_key.public_key.toBytes();
+    const certificate = ed25519SubjectPublicKeyInfo(
+        signing_key.public_key.toBytes(),
+    );
     const ServerModule = @import("server_connection.zig");
     const ResolverContext = struct {
         calls: usize = 0,
@@ -1247,9 +1474,8 @@ test "client and server complete P-256 HelloRetryRequest transcript" {
         .retry_key_material = &retry_material,
         .cipher_suites = &.{.aes_128_gcm_sha256},
         .alpn_protocols = &.{"h2"},
-        .server_verifier = .{
-            .pinned_ed25519_public_key = certificate,
-        },
+        .server_verifier = .{ .pinned_raw_public_key = &certificate },
+        .server_certificate_type = .raw_public_key,
         .resumption = client_psk,
     }, &client_output);
     client_psk.secret.deinit();
@@ -1280,6 +1506,7 @@ test "client and server complete P-256 HelloRetryRequest transcript" {
         .identity = .{
             .certificate_chain = &.{&certificate},
             .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+            .certificate_type = .raw_public_key,
         },
     };
     var server = Server.init(.{
@@ -1293,6 +1520,7 @@ test "client and server complete P-256 HelloRetryRequest transcript" {
         .key_material = &server_material,
         .certificate_chain = &.{&certificate},
         .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+        .server_certificate_type = .raw_public_key,
         .identity_resolver = .{
             .context = @ptrCast(&resolver_context),
             .resolve_fn = ResolverContext.resolve,
@@ -1357,6 +1585,9 @@ test "client and server complete P-256 HelloRetryRequest transcript" {
     try std.testing.expect(
         second_client_hello.supportsCertificateCompression(.zlib),
     );
+    try std.testing.expect(second_client_hello.supportsServerCertificateType(
+        .raw_public_key,
+    ));
 
     server_output.clearRetainingCapacity();
     const flight_result = try server.receive(

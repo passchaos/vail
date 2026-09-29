@@ -34,6 +34,11 @@ The current foundation provides:
   pinned-key client verification; the server can select identities by exact or
   one-label wildcard SNI and client signature-scheme compatibility, while
   keeping per-identity OCSP and precompressed Certificate variants together;
+- TLS 1.3 RFC 7250 Raw Public Key authentication in both directions, including
+  strict ClientHello/EncryptedExtensions certificate-type negotiation, exact
+  DER SubjectPublicKeyInfo pins, single-key Certificate messages, RPK mTLS,
+  HelloRetryRequest consistency, and RSA, Ed25519, P-256, P-384, and SM2 SPKI
+  decoding without an external PKI or crypto library;
 - CertificateRequest codec and mTLS policy types;
 - RFC 8879 TLS 1.3 certificate compression in both directions using Zig std's
   zlib implementation, with reusable server/client precompression, transcript-
@@ -214,6 +219,12 @@ HelloRetryRequest, covering both directions of the retry state machine.
 `zig build interop-rustls-min-client` exercises Vail's client against a
 zlib-enabled rustls server and requires Vail to authenticate a compressed
 Certificate message before exchanging application data.
+`zig build interop-rustls-rpk-server` and
+`zig build interop-rustls-rpk-client` exercise mutual TLS 1.3 RFC 7250 Raw
+Public Key authentication in both directions against rustls 0.23 with its
+AWS-LC provider. Both peers send a single DER SubjectPublicKeyInfo, verify
+RSA-PSS CertificateVerify possession, pin the peer SPKI exactly, and exchange
+encrypted application data.
 `zig build interop-openssl-tls12-server` and
 `zig build interop-rustls-tls12-server` exercise Vail's incremental TLS 1.2
 server, requiring ECDHE-RSA-AES128-GCM-SHA256, Extended Master Secret,

@@ -739,4 +739,62 @@ pub fn build(b: *std.Build) void {
     interop_versioned_client_tls12_step.dependOn(
         &check_versioned_client_tls12.step,
     );
+
+    const min_rpk_server = b.addExecutable(.{
+        .name = "vail-min-rpk-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/min_rpk_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_rustls_rpk_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_rpk_client.step.dependOn(&build_rustls_min.step);
+    check_rustls_rpk_client.addArg(
+        "timeout 15s $1 > /tmp/vail-rpk-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 12s bench/rustls_min_client/target/release/vail-rustls-rpk-client src/crypto/testdata/rsa_signing_key.pem > /tmp/rustls-rpk-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'Vail server verified mutual RFC 7250 RPK' /tmp/vail-rpk-server.log && " ++
+            "grep -q 'rustls/AWS-LC client verified mutual RFC 7250 RPK' /tmp/rustls-rpk-client.log",
+    );
+    check_rustls_rpk_client.addArg("sh");
+    check_rustls_rpk_client.addArtifactArg(min_rpk_server);
+    const interop_rustls_rpk_server_step = b.step(
+        "interop-rustls-rpk-server",
+        "Exercise Vail's mutual-RPK server against rustls/AWS-LC",
+    );
+    interop_rustls_rpk_server_step.dependOn(
+        &check_rustls_rpk_client.step,
+    );
+
+    const min_rpk_client = b.addExecutable(.{
+        .name = "vail-min-rpk-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/min_rpk_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_rustls_rpk_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_rpk_server.step.dependOn(&build_rustls_server.step);
+    check_rustls_rpk_server.addArg(
+        "timeout 15s bench/rustls_min_server/target/release/vail-rustls-rpk-server src/crypto/testdata/rsa_signing_key.pem > /tmp/rustls-rpk-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 12s $1 > /tmp/vail-rpk-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'rustls/AWS-LC server verified mutual RFC 7250 RPK' /tmp/rustls-rpk-server.log && " ++
+            "grep -q 'Vail client verified mutual RFC 7250 RPK' /tmp/vail-rpk-client.log",
+    );
+    check_rustls_rpk_server.addArg("sh");
+    check_rustls_rpk_server.addArtifactArg(min_rpk_client);
+    const interop_rustls_rpk_client_step = b.step(
+        "interop-rustls-rpk-client",
+        "Exercise Vail's mutual-RPK client against rustls/AWS-LC",
+    );
+    interop_rustls_rpk_client_step.dependOn(
+        &check_rustls_rpk_server.step,
+    );
 }

@@ -5,6 +5,7 @@
 //! from parsed ClientHello state without duplicating extension encoding logic.
 
 const std = @import("std");
+const auth = @import("auth.zig");
 const cipher_suite = @import("cipher_suite.zig");
 
 pub const handshake_type_server_hello: u8 = 0x02;
@@ -16,6 +17,8 @@ pub const ext_key_share: u16 = 0x0033;
 pub const ext_server_name: u16 = 0x0000;
 pub const ext_supported_groups: u16 = 0x000a;
 pub const ext_application_layer_protocol_negotiation: u16 = 0x0010;
+pub const ext_client_certificate_type: u16 = 0x0013;
+pub const ext_server_certificate_type: u16 = 0x0014;
 pub const ext_early_data: u16 = 0x002a;
 pub const ext_pre_shared_key: u16 = 0x0029;
 pub const ext_quic_transport_parameters: u16 = 0x0039;
@@ -330,12 +333,16 @@ pub const EncryptedExtensions = struct {
     alpn_protocol: ?[]const u8 = null,
     quic_transport_parameters: ?[]const u8 = null,
     accept_early_data: bool = false,
+    client_certificate_type: ?auth.CertificateType = null,
+    server_certificate_type: ?auth.CertificateType = null,
 };
 
 pub const ParsedEncryptedExtensions = struct {
     alpn_protocol: ?[]const u8 = null,
     supported_groups: []const u8 = &.{},
     early_data_accepted: bool = false,
+    client_certificate_type: ?auth.CertificateType = null,
+    server_certificate_type: ?auth.CertificateType = null,
 };
 
 pub fn parseEncryptedExtensions(
@@ -402,6 +409,14 @@ pub fn parseEncryptedExtensions(
         } else if (typ == ext_early_data) {
             if (payload.len != 0) return error.InvalidEncryptedExtensions;
             result.early_data_accepted = true;
+        } else if (typ == ext_client_certificate_type) {
+            if (payload.len != 1) return error.InvalidEncryptedExtensions;
+            result.client_certificate_type = parseCertificateType(payload[0]) catch
+                return error.InvalidEncryptedExtensions;
+        } else if (typ == ext_server_certificate_type) {
+            if (payload.len != 1) return error.InvalidEncryptedExtensions;
+            result.server_certificate_type = parseCertificateType(payload[0]) catch
+                return error.InvalidEncryptedExtensions;
         } else {
             // A stream TLS adapter does not understand QUIC extensions or
             // early-data acceptance and must fail closed rather than silently
@@ -454,11 +469,43 @@ pub fn writeEncryptedExtensions(
             0,
         );
     }
+    if (extensions.client_certificate_type) |certificate_type| {
+        try appendExtensionHeader(
+            &extension_bytes,
+            allocator,
+            ext_client_certificate_type,
+            1,
+        );
+        try extension_bytes.append(
+            allocator,
+            @intFromEnum(certificate_type),
+        );
+    }
+    if (extensions.server_certificate_type) |certificate_type| {
+        try appendExtensionHeader(
+            &extension_bytes,
+            allocator,
+            ext_server_certificate_type,
+            1,
+        );
+        try extension_bytes.append(
+            allocator,
+            @intFromEnum(certificate_type),
+        );
+    }
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
     try appendInt(&body, allocator, u16, extension_bytes.items.len);
     try body.appendSlice(allocator, extension_bytes.items);
     try writeHandshake(out, allocator, handshake_type_encrypted_extensions, body.items);
+}
+
+fn parseCertificateType(value: u8) error{InvalidCertificateType}!auth.CertificateType {
+    return switch (value) {
+        0 => .x509,
+        2 => .raw_public_key,
+        else => error.InvalidCertificateType,
+    };
 }
 
 fn writeHandshake(
@@ -588,8 +635,25 @@ test "ServerHello and EncryptedExtensions encode TLS 1.3 extensions" {
     try writeEncryptedExtensions(&out, std.testing.allocator, .{
         .alpn_protocol = "h2",
         .quic_transport_parameters = &.{ 0x00, 0x01, 0x00 },
+        .client_certificate_type = .raw_public_key,
+        .server_certificate_type = .raw_public_key,
     });
     try std.testing.expectEqual(handshake_type_encrypted_extensions, out.items[0]);
     try std.testing.expect(std.mem.indexOf(u8, out.items, &.{ 0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, 'h', '2' }) != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, &.{ 0x00, 0x39, 0x00, 0x03, 0x00, 0x01, 0x00 }) != null);
+
+    out.clearRetainingCapacity();
+    try writeEncryptedExtensions(&out, std.testing.allocator, .{
+        .client_certificate_type = .raw_public_key,
+        .server_certificate_type = .raw_public_key,
+    });
+    const parsed_extensions = try parseEncryptedExtensions(out.items);
+    try std.testing.expectEqual(
+        auth.CertificateType.raw_public_key,
+        parsed_extensions.client_certificate_type.?,
+    );
+    try std.testing.expectEqual(
+        auth.CertificateType.raw_public_key,
+        parsed_extensions.server_certificate_type.?,
+    );
 }

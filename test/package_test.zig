@@ -109,6 +109,7 @@ test "public modules are reachable" {
         "validateClientCertificateRevocationListIssuer",
     ));
     try std.testing.expect(@hasDecl(vail.tls.auth, "ServerIdentity"));
+    try std.testing.expect(@hasDecl(vail.tls.auth, "CertificateType"));
     try std.testing.expect(@hasDecl(vail.tls.auth, "Signer"));
     try std.testing.expect(@hasDecl(vail.tls.auth, "CustomSigner"));
     try std.testing.expect(@hasDecl(vail.tls.auth, "RsaPssSigner"));
@@ -135,6 +136,30 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         vail.tls.client_auth,
         "verifyClientFlight",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.auth.ClientVerifier,
+        "verifyRawPublicKey",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.auth.ClientVerifier,
+        "pinned_raw_public_key",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.client_auth.ClientIdentity,
+        "certificate_type",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.client_auth.ServerPolicy,
+        "certificate_type",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.client_connection.Config,
+        "server_certificate_type",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.server_connection.Config,
+        "server_certificate_type",
     ));
     try std.testing.expect(@hasDecl(
         vail.tls.client_hello,

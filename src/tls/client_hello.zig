@@ -15,6 +15,8 @@ pub const ext_status_request: u16 = 0x0005;
 pub const ext_supported_groups: u16 = 0x000a;
 pub const ext_signature_algorithms: u16 = 0x000d;
 pub const ext_application_layer_protocol_negotiation: u16 = 0x0010;
+pub const ext_client_certificate_type: u16 = 0x0013;
+pub const ext_server_certificate_type: u16 = 0x0014;
 pub const ext_extended_master_secret: u16 = 0x0017;
 pub const ext_compress_certificate: u16 =
     certificate_compression.extension_type_compress_certificate;
@@ -51,6 +53,8 @@ pub const WriteOptions = struct {
     request_ocsp: bool = false,
     offer_extended_master_secret: bool = false,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
+    server_certificate_types: []const auth.CertificateType = &.{},
+    client_certificate_types: []const auth.CertificateType = &.{},
 };
 
 pub const OfferedKeyShare = struct {
@@ -76,6 +80,8 @@ pub const FlexibleWriteOptions = struct {
     request_ocsp: bool = false,
     offer_extended_master_secret: bool = false,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
+    server_certificate_types: []const auth.CertificateType = &.{},
+    client_certificate_types: []const auth.CertificateType = &.{},
 };
 
 /// Write a standards-focused TLS 1.3 ClientHello for stream transports.
@@ -104,6 +110,8 @@ pub fn write(
         .request_ocsp = options.request_ocsp,
         .offer_extended_master_secret = options.offer_extended_master_secret,
         .certificate_compression_algorithms = options.certificate_compression_algorithms,
+        .server_certificate_types = options.server_certificate_types,
+        .client_certificate_types = options.client_certificate_types,
     });
 }
 
@@ -192,6 +200,19 @@ pub fn writeWithKeyShare(
             &.{},
         );
     }
+
+    try appendCertificateTypes(
+        &extensions,
+        allocator,
+        ext_server_certificate_type,
+        options.server_certificate_types,
+    );
+    try appendCertificateTypes(
+        &extensions,
+        allocator,
+        ext_client_certificate_type,
+        options.client_certificate_types,
+    );
 
     var default_group: [1]u16 = undefined;
     const offered_groups: []const u16 = if (options.supported_groups.len != 0)
@@ -413,6 +434,8 @@ pub const Parsed = struct {
     offers_extended_master_secret: bool = false,
     offers_secure_renegotiation: bool = false,
     certificate_compression_algorithms: []const u8 = &.{},
+    server_certificate_types: []const u8 = &.{},
+    client_certificate_types: []const u8 = &.{},
     supported_groups: []const u8 = &.{},
     signature_algorithms: []const u8 = &.{},
     alpn_protocols: []const u8 = &.{},
@@ -533,6 +556,26 @@ pub const Parsed = struct {
         return false;
     }
 
+    pub fn supportsServerCertificateType(
+        self: Parsed,
+        certificate_type: auth.CertificateType,
+    ) bool {
+        return containsCertificateType(
+            self.server_certificate_types,
+            certificate_type,
+        );
+    }
+
+    pub fn supportsClientCertificateType(
+        self: Parsed,
+        certificate_type: auth.CertificateType,
+    ) bool {
+        return containsCertificateType(
+            self.client_certificate_types,
+            certificate_type,
+        );
+    }
+
     pub fn firstKeyShare(self: Parsed) Error!?KeyShare {
         var pos: usize = 0;
         if (self.key_shares.len == 0) return null;
@@ -605,6 +648,14 @@ pub fn parse(bytes: []const u8) Error!Parsed {
             ext_extended_master_secret => {
                 if (payload.len != 0) return error.InvalidClientHello;
                 parsed.offers_extended_master_secret = true;
+            },
+            ext_server_certificate_type => {
+                parsed.server_certificate_types =
+                    try parseCertificateTypes(payload);
+            },
+            ext_client_certificate_type => {
+                parsed.client_certificate_types =
+                    try parseCertificateTypes(payload);
             },
             ext_compress_certificate => {
                 parsed.certificate_compression_algorithms =
@@ -719,6 +770,57 @@ fn parseCookie(payload: []const u8) Error![]const u8 {
     return cookie;
 }
 
+fn appendCertificateTypes(
+    extensions: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    extension_type: u16,
+    certificate_types: []const auth.CertificateType,
+) (std.mem.Allocator.Error || Error)!void {
+    if (certificate_types.len == 0) return;
+    if (certificate_types.len > std.math.maxInt(u8)) {
+        return error.InvalidClientHello;
+    }
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try payload.append(allocator, @intCast(certificate_types.len));
+    for (certificate_types, 0..) |certificate_type, index| {
+        for (certificate_types[0..index]) |previous| {
+            if (previous == certificate_type) return error.InvalidClientHello;
+        }
+        try payload.append(allocator, @intFromEnum(certificate_type));
+    }
+    try appendExtension(
+        extensions,
+        allocator,
+        extension_type,
+        payload.items,
+    );
+}
+
+fn parseCertificateTypes(payload: []const u8) Error![]const u8 {
+    var pos: usize = 0;
+    const values = try readU8Vector(payload, &pos);
+    if (values.len == 0 or pos != payload.len) {
+        return error.InvalidClientHello;
+    }
+    for (values, 0..) |value, index| {
+        for (values[0..index]) |previous| {
+            if (previous == value) return error.InvalidClientHello;
+        }
+    }
+    return values;
+}
+
+fn containsCertificateType(
+    values: []const u8,
+    target: auth.CertificateType,
+) bool {
+    for (values) |value| {
+        if (value == @intFromEnum(target)) return true;
+    }
+    return false;
+}
+
 fn readByte(bytes: []const u8, pos: *usize) Error!u8 {
     const out = try readSlice(bytes, pos, 1);
     return out[0];
@@ -784,6 +886,38 @@ test "ClientHello writer carries an arbitrary single key share" {
     try std.testing.expect(try parsed.supportsGroup(0x11ec));
     try std.testing.expect(try parsed.supportsGroup(0x001d));
     try std.testing.expectEqualStrings("retry-cookie", parsed.cookie.?);
+}
+
+test "RFC 7250 certificate type lists round-trip and validate structure" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try write(&encoded, allocator, .{
+        .random = [_]u8{0x7b} ** 32,
+        .x25519_public_key = [_]u8{0x7c} ** 32,
+        .server_certificate_types = &.{.raw_public_key},
+        .client_certificate_types = &.{ .raw_public_key, .x509 },
+    });
+    const parsed = try parse(encoded.items);
+    try std.testing.expect(parsed.supportsServerCertificateType(
+        .raw_public_key,
+    ));
+    try std.testing.expect(!parsed.supportsServerCertificateType(.x509));
+    try std.testing.expect(parsed.supportsClientCertificateType(
+        .raw_public_key,
+    ));
+    try std.testing.expect(parsed.supportsClientCertificateType(.x509));
+
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        parseCertificateTypes(&.{}),
+    );
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        parseCertificateTypes(&.{ 2, 2, 2 }),
+    );
+    const future_type = try parseCertificateTypes(&.{ 1, 254 });
+    try std.testing.expectEqualSlices(u8, &.{254}, future_type);
 }
 
 test "TLS 1.2 ClientHello omits the TLS 1.3 key_share extension" {

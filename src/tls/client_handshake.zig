@@ -10,6 +10,7 @@ const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const client_auth = @import("client_auth.zig");
+const client_hello = @import("client_hello.zig");
 const key_schedule = @import("key_schedule.zig");
 const secret = @import("secret.zig");
 const server_handshake = @import("server_handshake.zig");
@@ -19,7 +20,7 @@ const transcript = @import("transcript.zig");
 pub const handshake_type_end_of_early_data: u8 = 0x05;
 
 pub const Error = std.mem.Allocator.Error || auth.Error ||
-    certificate_compression.Error || client_auth.Error ||
+    certificate_compression.Error || client_auth.Error || client_hello.Error ||
     key_schedule.Error || secret.Error ||
     server_hello.Error || error{
     BadServerFinished,
@@ -48,6 +49,7 @@ pub const Options = struct {
     psk_resumed: bool = false,
     early_data_offered: bool = false,
     server_verifier: auth.ClientVerifier,
+    server_certificate_type: auth.CertificateType = .x509,
     server_name: ?[]const u8,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     max_decompressed_certificate_len: usize = 64 * 1024,
@@ -73,6 +75,8 @@ pub const Result = struct {
     certificate_compression: ?certificate_compression.Algorithm,
     /// Compression used for this client's Certificate response.
     client_certificate_compression: ?certificate_compression.Algorithm,
+    server_certificate_type: auth.CertificateType,
+    client_certificate_type: auth.CertificateType,
 
     pub fn deinit(self: *Result) void {
         self.application.master_secret.deinit();
@@ -103,6 +107,35 @@ pub fn verifyServerAndWriteClientFlight(
         try server_hello.parseEncryptedExtensions(
             flight.encrypted_extensions,
         );
+    const parsed_client_hello = try client_hello.parse(
+        options.client_hello_bytes,
+    );
+    const negotiated_server_certificate_type =
+        encrypted_extensions.server_certificate_type orelse .x509;
+    if ((encrypted_extensions.server_certificate_type != null and
+        !parsed_client_hello.supportsServerCertificateType(
+            negotiated_server_certificate_type,
+        )) or negotiated_server_certificate_type !=
+        options.server_certificate_type)
+    {
+        return error.InvalidServerFlight;
+    }
+    const negotiated_client_certificate_type =
+        encrypted_extensions.client_certificate_type orelse .x509;
+    if (encrypted_extensions.client_certificate_type != null and
+        !parsed_client_hello.supportsClientCertificateType(
+            negotiated_client_certificate_type,
+        ))
+    {
+        return error.InvalidServerFlight;
+    }
+    const expected_client_certificate_type = if (options.client_identity) |identity|
+        identity.certificate_type
+    else
+        auth.CertificateType.x509;
+    if (negotiated_client_certificate_type != expected_client_certificate_type) {
+        return error.InvalidServerFlight;
+    }
     if (encrypted_extensions.early_data_accepted and
         (!options.psk_resumed or !options.early_data_offered))
     {
@@ -146,11 +179,21 @@ pub fn verifyServerAndWriteClientFlight(
             certificate_message,
         );
         defer certificate.deinit(allocator);
-        try options.server_verifier.verifyTrustWithOcsp(
-            options.server_name,
-            certificate.entries,
-            certificate.ocsp_response,
-        );
+        if (negotiated_server_certificate_type == .raw_public_key) {
+            if (certificate.ocsp_response != null) {
+                return error.InvalidServerFlight;
+            }
+            try options.server_verifier.verifyRawPublicKey(
+                options.server_name,
+                certificate.entries,
+            );
+        } else {
+            try options.server_verifier.verifyTrustWithOcsp(
+                options.server_name,
+                certificate.entries,
+                certificate.ocsp_response,
+            );
+        }
         state.update(certificate_wire);
         const parsed_certificate_verify = try auth.parseCertificateVerify(
             flight.certificate_verify orelse
@@ -291,6 +334,8 @@ pub fn verifyServerAndWriteClientFlight(
         .early_data_accepted = encrypted_extensions.early_data_accepted,
         .certificate_compression = selected_certificate_compression,
         .client_certificate_compression = selected_client_certificate_compression,
+        .server_certificate_type = negotiated_server_certificate_type,
+        .client_certificate_type = negotiated_client_certificate_type,
     };
 }
 
@@ -465,7 +510,13 @@ test "authenticated client handshake verifies server and writes identity" {
     );
     const server_public = server_key.public_key.toBytes();
     const client_public = client_key.public_key.toBytes();
-    const client_hello_bytes = "client-hello";
+    var client_hello_message: std.ArrayList(u8) = .empty;
+    defer client_hello_message.deinit(allocator);
+    try client_hello.write(&client_hello_message, allocator, .{
+        .random = [_]u8{0x70} ** 32,
+        .x25519_public_key = [_]u8{0x76} ** 32,
+    });
+    const client_hello_bytes = client_hello_message.items;
     const suite = @import("cipher_suite.zig").Suite
         .aes_128_gcm_sha256;
     var server_hello_bytes: std.ArrayList(u8) = .empty;

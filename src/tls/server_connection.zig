@@ -63,6 +63,7 @@ pub const Config = struct {
     key_material: *key_exchange.ServerKeyMaterial,
     certificate_chain: []const []const u8,
     signer: auth.Signer,
+    server_certificate_type: auth.CertificateType = .x509,
     identity_resolver: ?IdentityResolver = null,
     client_auth: ?server_handshake.ClientAuthOptions = null,
     client_auth_policy: ?client_auth.ServerPolicy = null,
@@ -74,13 +75,20 @@ pub const Config = struct {
 pub const ResolvedIdentity = struct {
     certificate_chain: []const []const u8,
     signer: auth.Signer,
+    certificate_type: auth.CertificateType = .x509,
     ocsp_response: ?[]const u8 = null,
     compressed_certificates: []const certificate_compression.PreparedView = &.{},
 
     pub fn validate(self: ResolvedIdentity) auth.Error!void {
+        if (self.certificate_type == .raw_public_key and
+            self.ocsp_response != null)
+        {
+            return error.InvalidCertificate;
+        }
         try (auth.ServerIdentity{
             .certificate_chain = self.certificate_chain,
             .signer = self.signer,
+            .certificate_type = self.certificate_type,
         }).validate();
     }
 };
@@ -128,27 +136,40 @@ pub const IdentitySet = struct {
                 if (std.ascii.eqlIgnoreCase(
                     entry.server_name_pattern,
                     server_name,
-                ) and try hello.supportsSignatureScheme(
-                    entry.identity.signer.scheme(),
-                )) return entry.identity;
+                ) and try identityCompatible(hello, entry.identity)) {
+                    return entry.identity;
+                }
             }
             for (self.entries) |entry| {
                 if (matchesWildcardServerName(
                     entry.server_name_pattern,
                     server_name,
-                ) and try hello.supportsSignatureScheme(
-                    entry.identity.signer.scheme(),
-                )) return entry.identity;
+                ) and try identityCompatible(hello, entry.identity)) {
+                    return entry.identity;
+                }
             }
         }
         if (self.fallback) |fallback| {
-            if (try hello.supportsSignatureScheme(fallback.signer.scheme())) {
+            if (try identityCompatible(hello, fallback)) {
                 return fallback;
             }
         }
         return null;
     }
 };
+
+fn identityCompatible(
+    hello: client_hello.Parsed,
+    identity: ResolvedIdentity,
+) client_hello.Error!bool {
+    if (!try hello.supportsSignatureScheme(identity.signer.scheme())) {
+        return false;
+    }
+    if (hello.server_certificate_types.len == 0) {
+        return identity.certificate_type == .x509;
+    }
+    return hello.supportsServerCertificateType(identity.certificate_type);
+}
 
 pub const ServerPsk = struct {
     identity: []const u8,
@@ -173,8 +194,10 @@ pub const ServerResumption = union(enum) {
     tickets: TicketResumption,
 };
 
+/// `max_handshake_message_len` bounds both ClientHello and encrypted client
+/// Certificate messages, including an RFC 7250 SubjectPublicKeyInfo.
 pub fn ServerConnection(
-    comptime max_client_hello_len: usize,
+    comptime max_handshake_message_len: usize,
     comptime max_post_handshake_len: usize,
 ) type {
     return struct {
@@ -192,6 +215,8 @@ pub fn ServerConnection(
             early_data_accepted: bool,
             certificate_compression: ?certificate_compression.Algorithm,
             client_certificate_compression: ?certificate_compression.Algorithm,
+            server_certificate_type: auth.CertificateType,
+            client_certificate_type: auth.CertificateType,
             peer_certificate_chain: ?[][]u8 = null,
 
             pub const TicketOptions = struct {
@@ -290,6 +315,8 @@ pub fn ServerConnection(
             transcript_state: transcript.State,
             resumed: bool,
             certificate_compression: ?certificate_compression.Algorithm,
+            server_certificate_type: auth.CertificateType,
+            client_certificate_type: auth.CertificateType,
             client_records: traffic.State,
             early_records: ?traffic.State = null,
             early_data_accepted: bool = false,
@@ -298,7 +325,7 @@ pub fn ServerConnection(
             expect_end_of_early_data: bool = false,
             early_deframer: stream.RecordDeframer = .{},
             early_plaintext: [record.max_inner_plaintext_len]u8 = undefined,
-            receiver: stream.ProtectedReceiver(256) = .{},
+            receiver: stream.ProtectedReceiver(max_handshake_message_len) = .{},
             saw_change_cipher_spec: bool = false,
             client_flight: std.ArrayList(u8) = .empty,
             client_certificate: ?MessageRange = null,
@@ -364,7 +391,7 @@ pub fn ServerConnection(
         psk_consumed: bool = false,
         records: stream.RecordDeframer = .{},
         hello_messages: stream.HandshakeReassembler(
-            max_client_hello_len,
+            max_handshake_message_len,
         ) = .{},
         retry: ?RetryState = null,
         saw_retry_change_cipher_spec: bool = false,
@@ -390,6 +417,7 @@ pub fn ServerConnection(
                 ResolvedIdentity{
                     .certificate_chain = self.config.certificate_chain,
                     .signer = self.config.signer,
+                    .certificate_type = self.config.server_certificate_type,
                     .ocsp_response = self.config.policy.ocsp_response,
                     .compressed_certificates = self.config.policy.compressed_certificates,
                 };
@@ -522,12 +550,18 @@ pub fn ServerConnection(
             output: *std.ArrayList(u8),
         ) Error!ReceiveResult {
             const material_group = self.config.key_material.namedGroup();
+            const identity = try self.resolveIdentity(parsed);
+            var policy = self.config.policy;
+            policy.server_certificate_type = identity.certificate_type;
+            policy.client_certificate_type = if (self.config.client_auth_policy) |client_policy|
+                client_policy.certificate_type
+            else
+                .x509;
             const selected = try server_flight.selectHelloRetryRequest(
                 parsed,
-                self.config.policy,
+                policy,
                 material_group,
             );
-            const identity = try self.resolveIdentity(parsed);
             const first_client_hello = try self.config.allocator.dupe(
                 u8,
                 message,
@@ -614,6 +648,11 @@ pub fn ServerConnection(
             policy.ocsp_response = identity.ocsp_response;
             policy.compressed_certificates =
                 identity.compressed_certificates;
+            policy.server_certificate_type = identity.certificate_type;
+            policy.client_certificate_type = if (self.config.client_auth_policy) |client_policy|
+                client_policy.certificate_type
+            else
+                .x509;
             const retry_suites = if (retry_suite) |suite|
                 [_]cipher_suite.Suite{suite}
             else
@@ -705,6 +744,8 @@ pub fn ServerConnection(
                 .transcript_state = result.transcript_state_after_server_finished,
                 .resumed = selected_psk != null,
                 .certificate_compression = result.certificate_compression,
+                .server_certificate_type = result.selection.server_certificate_type,
+                .client_certificate_type = result.selection.client_certificate_type,
                 .client_records = client_records,
                 .early_records = early_records,
                 .early_data_accepted = early_limit != null,
@@ -1131,6 +1172,8 @@ pub fn ServerConnection(
                 .early_data_accepted = pending.early_data_accepted,
                 .certificate_compression = pending.certificate_compression,
                 .client_certificate_compression = pending.client_certificate_compression,
+                .server_certificate_type = pending.server_certificate_type,
+                .client_certificate_type = pending.client_certificate_type,
                 .peer_certificate_chain = pending.authenticated_client_chain,
             };
             pending.authenticated_client_chain = null;
@@ -1177,6 +1220,16 @@ fn validateSecondClientHello(
             u8,
             first.certificate_compression_algorithms,
             second.certificate_compression_algorithms,
+        ) or
+        !std.mem.eql(
+            u8,
+            first.server_certificate_types,
+            second.server_certificate_types,
+        ) or
+        !std.mem.eql(
+            u8,
+            first.client_certificate_types,
+            second.client_certificate_types,
         ) or
         !std.mem.eql(u8, first.supported_groups, second.supported_groups) or
         !std.mem.eql(u8, first.signature_algorithms, second.signature_algorithms) or
@@ -1248,6 +1301,48 @@ fn copyClientChain(
     return copies;
 }
 
+test "HelloRetryRequest preserves RFC 7250 certificate type offers" {
+    const allocator = std.testing.allocator;
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try client_hello.writeWithKeyShare(&first, allocator, .{
+        .random = [_]u8{0x97} ** 32,
+        .key_share = .{
+            .group = key_exchange.named_group_x25519,
+            .key_exchange = &([_]u8{0x98} ** 32),
+        },
+        .supported_groups = &.{
+            key_exchange.named_group_x25519,
+            key_exchange.named_group_secp256r1,
+        },
+        .server_certificate_types = &.{.raw_public_key},
+        .client_certificate_types = &.{.raw_public_key},
+    });
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    try client_hello.writeWithKeyShare(&second, allocator, .{
+        .random = [_]u8{0x97} ** 32,
+        .key_share = .{
+            .group = key_exchange.named_group_secp256r1,
+            .key_exchange = &([_]u8{0x04} ++ ([_]u8{0x99} ** 64)),
+        },
+        .supported_groups = &.{
+            key_exchange.named_group_x25519,
+            key_exchange.named_group_secp256r1,
+        },
+        .server_certificate_types = &.{.raw_public_key},
+    });
+    try std.testing.expectError(
+        error.InvalidSecondClientHello,
+        validateSecondClientHello(
+            first.items,
+            try client_hello.parse(second.items),
+            key_exchange.named_group_secp256r1,
+            null,
+        ),
+    );
+}
+
 test "identity set selects SNI wildcard and compatible signature scheme" {
     const allocator = std.testing.allocator;
     const client_public = try key_exchange.publicKey(
@@ -1259,6 +1354,7 @@ test "identity set selects SNI wildcard and compatible signature scheme" {
         .random = [_]u8{0xa1} ** 32,
         .server_name = "api.example.com",
         .x25519_public_key = client_public,
+        .server_certificate_types = &.{.raw_public_key},
     });
     var hello = try client_hello.parse(encoded_hello.items);
     const only_ed25519 = [_]u8{
@@ -1277,7 +1373,16 @@ test "identity set selects SNI wildcard and compatible signature scheme" {
         [_]u8{0xa3} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
     );
     const p256_certificate = p256_key.public_key.toUncompressedSec1();
-    const ed25519_certificate = ed25519_key.public_key.toBytes();
+    const ed25519_public_key = ed25519_key.public_key.toBytes();
+    var ed25519_certificate = [_]u8{
+        0x30, 0x2a,
+        0x30, 0x05,
+        0x06, 0x03,
+        0x2b, 0x65,
+        0x70, 0x03,
+        0x21, 0x00,
+    } ++ ([_]u8{0} ** 32);
+    @memcpy(ed25519_certificate[12..], &ed25519_public_key);
     const identities = IdentitySet{
         .entries = &.{
             .{
@@ -1296,6 +1401,7 @@ test "identity set selects SNI wildcard and compatible signature scheme" {
                     .signer = .{
                         .ed25519 = .{ .key_pair = ed25519_key },
                     },
+                    .certificate_type = .raw_public_key,
                 },
             },
         },

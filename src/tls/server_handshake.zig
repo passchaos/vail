@@ -214,6 +214,14 @@ fn writeServerHandshakeFlightSelected(
         .alpn_protocol = selection.alpn_protocol,
         .quic_transport_parameters = options.policy.quic_transport_parameters,
         .accept_early_data = options.accept_early_data,
+        .server_certificate_type = if (selection.send_server_certificate_type)
+            selection.server_certificate_type
+        else
+            null,
+        .client_certificate_type = if (selection.send_client_certificate_type)
+            selection.client_certificate_type
+        else
+            null,
     });
     try appendEncryptedHandshake(
         out,
@@ -248,7 +256,8 @@ fn writeServerHandshakeFlightSelected(
     defer certificate_verify.deinit(allocator);
     var selected_certificate_compression: ?certificate_compression.Algorithm = null;
     if (options.psk == null) {
-        if (options.parsed_client_hello.requests_ocsp and
+        if (selection.server_certificate_type == .x509 and
+            options.parsed_client_hello.requests_ocsp and
             options.policy.ocsp_response != null)
         {
             try auth.writeCertificateWithOcsp(
