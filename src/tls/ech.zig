@@ -8,6 +8,7 @@
 const std = @import("std");
 const hpke = @import("../crypto/hpke.zig");
 const client_hello = @import("client_hello.zig");
+const psk = @import("psk.zig");
 const secret = @import("secret.zig");
 const sm3 = @import("../crypto/sm3.zig");
 const transcript = @import("transcript.zig");
@@ -390,6 +391,7 @@ pub fn writeOuterExtension(
 /// used for the second ClientHelloOuter.
 pub const ClientContext = struct {
     config: Config,
+    io: std.Io,
     sender: hpke.SenderSetup,
     initial_sealed: bool = false,
     retry_sealed: bool = false,
@@ -404,6 +406,7 @@ pub const ClientContext = struct {
         try appendHpkeInfo(&info, allocator, config.encoded);
         return .{
             .config = config,
+            .io = io,
             .sender = try hpke.setupBaseSender(
                 io,
                 config.public_key,
@@ -473,10 +476,7 @@ pub const ClientContext = struct {
         const parsed_outer = client_hello.parse(outer_template) catch
             return error.InvalidClientHello;
         if (!onlyTls13(parsed_inner) or !parsed_outer.offersTls13() or
-            parsed_inner.encrypted_client_hello != null or
             parsed_outer.encrypted_client_hello != null or
-            parsed_inner.pre_shared_key != null or
-            parsed_outer.pre_shared_key != null or
             !std.mem.eql(u8, parsed_inner.session_id, parsed_outer.session_id) or
             std.mem.eql(u8, parsed_inner.random, parsed_outer.random) or
             parsed_outer.server_name == null or
@@ -488,13 +488,20 @@ pub const ClientContext = struct {
             return error.InvalidClientHello;
         }
 
-        try appendClientHelloExtension(
-            inner_output,
-            allocator,
-            inner_template,
-            extension_type,
-            &.{inner_type},
-        );
+        if (parsed_inner.encrypted_client_hello) |inner_extension| {
+            if (try parseClientHelloExtension(inner_extension) != .inner) {
+                return error.InvalidInnerClientHello;
+            }
+            try inner_output.appendSlice(allocator, inner_template);
+        } else {
+            try appendClientHelloExtension(
+                inner_output,
+                allocator,
+                inner_template,
+                extension_type,
+                &.{inner_type},
+            );
+        }
         var encoded_inner: std.ArrayList(u8) = .empty;
         defer encoded_inner.deinit(allocator);
         defer std.crypto.secureZero(u8, encoded_inner.items);
@@ -527,9 +534,23 @@ pub const ClientContext = struct {
             extension_payload.items,
         );
         const outer_hello = outer_output.items[outer_start..];
+        const extension_location = (try findClientHelloExtension(
+            outer_hello,
+            extension_type,
+        )) orelse return error.MissingEchExtension;
+        const serialized_outer = switch (try parseClientHelloExtension(
+            extension_location.payload,
+        )) {
+            .outer => |value| value,
+            .inner => return error.InvalidEchExtension,
+        };
+        const payload_start = try outerPayloadStart(
+            extension_location,
+            serialized_outer,
+        );
         const aad = try allocator.dupe(u8, outer_hello[4..]);
         defer allocator.free(aad);
-        const ciphertext = outer_output.items[outer_output.items.len - payload_len ..];
+        const ciphertext = outer_output.items[outer_start + payload_start ..][0..payload_len];
         try self.sender.context.seal(
             ciphertext,
             encoded_inner.items,
@@ -860,6 +881,113 @@ fn appendHpkeInfo(
     try output.appendSlice(allocator, encoded_config);
 }
 
+/// Adds an RFC 9849 GREASE PSK offer to ClientHelloOuter. Identity, ticket
+/// age, and binder bytes are independently random, while every vector length
+/// matches the real ClientHelloInner offer. The PSK extension remains last.
+pub fn appendGreasePskFromInner(
+    outer_client_hello: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    inner_client_hello: []const u8,
+) Error!void {
+    const inner = client_hello.parse(inner_client_hello) catch
+        return error.InvalidInnerClientHello;
+    const psk_payload = inner.pre_shared_key orelse return;
+    if (inner.psk_key_exchange_modes.len == 0) {
+        return error.InvalidInnerClientHello;
+    }
+    const outer = client_hello.parse(outer_client_hello.items) catch
+        return error.InvalidClientHello;
+    if (outer.pre_shared_key != null or
+        outer.psk_key_exchange_modes.len != 0 or outer.early_data)
+    {
+        return error.InvalidClientHello;
+    }
+    const original_len = outer_client_hello.items.len;
+    errdefer outer_client_hello.shrinkRetainingCapacity(original_len);
+
+    var modes_payload: std.ArrayList(u8) = .empty;
+    defer modes_payload.deinit(allocator);
+    if (inner.psk_key_exchange_modes.len > std.math.maxInt(u8)) {
+        return error.InvalidInnerClientHello;
+    }
+    try modes_payload.append(
+        allocator,
+        @intCast(inner.psk_key_exchange_modes.len),
+    );
+    try modes_payload.appendSlice(allocator, inner.psk_key_exchange_modes);
+    try appendClientHelloExtensionInPlace(
+        outer_client_hello,
+        allocator,
+        client_hello.ext_psk_key_exchange_modes,
+        modes_payload.items,
+    );
+    if (inner.early_data) {
+        try appendClientHelloExtensionInPlace(
+            outer_client_hello,
+            allocator,
+            client_hello.ext_early_data,
+            "",
+        );
+    }
+
+    const grease_payload = try allocator.dupe(u8, psk_payload);
+    defer allocator.free(grease_payload);
+    try randomizePskPayload(io, grease_payload);
+    try appendClientHelloExtensionInPlace(
+        outer_client_hello,
+        allocator,
+        client_hello.ext_pre_shared_key,
+        grease_payload,
+    );
+}
+
+fn randomizePskPayload(io: std.Io, payload: []u8) Error!void {
+    var pos: usize = 0;
+    const identities_len = readInt(u16, payload, &pos) catch
+        return error.InvalidInnerClientHello;
+    const identities_end = std.math.add(usize, pos, identities_len) catch
+        return error.InvalidInnerClientHello;
+    if (identities_len < 7 or identities_end > payload.len) {
+        return error.InvalidInnerClientHello;
+    }
+    var identity_count: usize = 0;
+    while (pos < identities_end) {
+        const identity_len = readInt(u16, payload, &pos) catch
+            return error.InvalidInnerClientHello;
+        if (identity_len == 0 or identity_len > identities_end - pos or
+            identities_end - pos - identity_len < 4)
+        {
+            return error.InvalidInnerClientHello;
+        }
+        io.random(payload[pos..][0..identity_len]);
+        pos += identity_len;
+        io.random(payload[pos..][0..4]);
+        pos += 4;
+        identity_count += 1;
+    }
+    if (pos != identities_end) return error.InvalidInnerClientHello;
+    const binders_len = readInt(u16, payload, &pos) catch
+        return error.InvalidInnerClientHello;
+    const binders_end = std.math.add(usize, pos, binders_len) catch
+        return error.InvalidInnerClientHello;
+    if (binders_len < 33 or binders_end != payload.len) {
+        return error.InvalidInnerClientHello;
+    }
+    var binder_count: usize = 0;
+    while (pos < binders_end) {
+        const binder_len = readByte(payload, &pos) catch
+            return error.InvalidInnerClientHello;
+        if (binder_len < 32 or binder_len > binders_end - pos) {
+            return error.InvalidInnerClientHello;
+        }
+        io.random(payload[pos..][0..binder_len]);
+        pos += binder_len;
+        binder_count += 1;
+    }
+    if (binder_count != identity_count) return error.InvalidInnerClientHello;
+}
+
 fn onlyTls13(parsed: client_hello.Parsed) bool {
     const versions = parsed.supported_versions;
     if (versions.len == 0 or versions.len % 2 != 0) {
@@ -960,7 +1088,19 @@ fn appendClientHelloExtension(
 
     const start = output.items.len;
     errdefer output.shrinkRetainingCapacity(start);
-    try output.appendSlice(allocator, template);
+    const psk_location = try findClientHelloExtension(
+        template,
+        client_hello.ext_pre_shared_key,
+    );
+    const insertion_offset = if (psk_location) |location|
+        location.full_start
+    else
+        template.len;
+    try output.appendSlice(allocator, template[0..insertion_offset]);
+    try appendInt(output, allocator, u16, typ);
+    try appendInt(output, allocator, u16, payload.len);
+    try output.appendSlice(allocator, payload);
+    try output.appendSlice(allocator, template[insertion_offset..]);
     std.mem.writeInt(
         u24,
         output.items[start + 1 ..][0..3],
@@ -973,9 +1113,42 @@ fn appendClientHelloExtension(
         @intCast(layout.extensions.len + added_len),
         .big,
     );
-    try appendInt(output, allocator, u16, typ);
-    try appendInt(output, allocator, u16, payload.len);
-    try output.appendSlice(allocator, payload);
+}
+
+fn appendClientHelloExtensionInPlace(
+    hello: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    typ: u16,
+    payload: []const u8,
+) Error!void {
+    if (payload.len > std.math.maxInt(u16)) return error.InvalidClientHello;
+    const layout = try parseClientHelloLayout(hello.items);
+    if (try findClientHelloExtension(hello.items, typ) != null) {
+        return error.InvalidClientHello;
+    }
+    const added_len = 4 + payload.len;
+    if (layout.extensions.len > std.math.maxInt(u16) - added_len or
+        hello.items.len - 4 > std.math.maxInt(u24) - added_len)
+    {
+        return error.InvalidClientHello;
+    }
+    const original_len = hello.items.len;
+    errdefer hello.shrinkRetainingCapacity(original_len);
+    try appendInt(hello, allocator, u16, typ);
+    try appendInt(hello, allocator, u16, payload.len);
+    try hello.appendSlice(allocator, payload);
+    std.mem.writeInt(
+        u24,
+        hello.items[1..4],
+        @intCast(original_len - 4 + added_len),
+        .big,
+    );
+    std.mem.writeInt(
+        u16,
+        hello.items[layout.extensions_len_offset..][0..2],
+        @intCast(layout.extensions.len + added_len),
+        .big,
+    );
 }
 
 fn encodeClientHelloInner(
@@ -989,7 +1162,7 @@ fn encodeClientHelloInner(
     const extension = parsed.encrypted_client_hello orelse
         return error.MissingEchExtension;
     if (try parseClientHelloExtension(extension) != .inner or
-        !onlyTls13(parsed) or parsed.pre_shared_key != null)
+        !onlyTls13(parsed))
     {
         return error.InvalidInnerClientHello;
     }
@@ -1025,6 +1198,20 @@ fn clientHelloOuterAad(
     extension_location: ExtensionLocation,
     outer: Outer,
 ) Error![]u8 {
+    const absolute_payload_start = try outerPayloadStart(
+        extension_location,
+        outer,
+    );
+    const aad = try allocator.dupe(u8, outer_client_hello[4..]);
+    const aad_payload_start = absolute_payload_start - 4;
+    @memset(aad[aad_payload_start..][0..outer.payload.len], 0);
+    return aad;
+}
+
+fn outerPayloadStart(
+    extension_location: ExtensionLocation,
+    outer: Outer,
+) Error!usize {
     var pos: usize = 0;
     _ = readByte(extension_location.payload, &pos) catch
         return error.InvalidEchExtension;
@@ -1039,11 +1226,7 @@ fn clientHelloOuterAad(
     {
         return error.InvalidEchExtension;
     }
-    const absolute_payload_start = extension_location.payload_start + pos;
-    var aad = try allocator.dupe(u8, outer_client_hello[4..]);
-    const aad_payload_start = absolute_payload_start - 4;
-    @memset(aad[aad_payload_start..][0..payload_len], 0);
-    return aad;
+    return extension_location.payload_start + pos;
 }
 
 fn decodeClientHelloInner(
@@ -1571,6 +1754,63 @@ test "EncodedClientHelloInner expands outer extensions in linear order" {
         &share,
         (try parsed.keyShareForGroup(0x001d)).?.key_exchange,
     );
+}
+
+test "ECH outer GREASE PSK preserves structure without exposing identity" {
+    const allocator = std.testing.allocator;
+    const share = [_]u8{0x6a} ** 32;
+    var inner: std.ArrayList(u8) = .empty;
+    defer inner.deinit(allocator);
+    try client_hello.writeWithKeyShare(&inner, allocator, .{
+        .random = [_]u8{0x6b} ** 32,
+        .server_name = "private.example",
+        .key_share = .{ .group = 0x001d, .key_exchange = &share },
+        .supported_groups = &.{0x001d},
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .supported_versions = &.{0x0304},
+        .encrypted_client_hello = &.{inner_type},
+    });
+    try psk.appendClientOfferWithEarlyData(
+        &inner,
+        allocator,
+        "private-ticket-identity",
+        0x11223344,
+        [_]u8{0x6c} ** 32,
+        true,
+    );
+    const inner_offer = try psk.parseClientOffer(inner.items);
+
+    var outer: std.ArrayList(u8) = .empty;
+    defer outer.deinit(allocator);
+    try client_hello.writeWithKeyShare(&outer, allocator, .{
+        .random = [_]u8{0x6d} ** 32,
+        .server_name = "public.example",
+        .key_share = .{ .group = 0x001d, .key_exchange = &share },
+        .supported_groups = &.{0x001d},
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .supported_versions = &.{0x0304},
+    });
+    try appendGreasePskFromInner(&outer, allocator, std.testing.io, inner.items);
+    const parsed_outer = try client_hello.parse(outer.items);
+    try std.testing.expect(parsed_outer.early_data);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{psk.psk_dhe_ke},
+        parsed_outer.psk_key_exchange_modes,
+    );
+    const outer_offer = try psk.parseClientOffer(outer.items);
+    try std.testing.expectEqual(inner_offer.identity.len, outer_offer.identity.len);
+    try std.testing.expectEqual(inner_offer.binder.len, outer_offer.binder.len);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        inner_offer.identity,
+        outer_offer.identity,
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        inner_offer.binder,
+        outer_offer.binder,
+    ));
 }
 
 test "RFC 9849 initial and retry ClientHello encryption round trip" {

@@ -56,6 +56,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.tls.ech, "openInitial"));
     try std.testing.expect(@hasDecl(vail.tls.ech, "acceptConfirmation"));
     try std.testing.expect(@hasDecl(
+        vail.tls.ech,
+        "appendGreasePskFromInner",
+    ));
+    try std.testing.expect(@hasDecl(
         vail.tls.client_connection,
         "EchClientConfig",
     ));

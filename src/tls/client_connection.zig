@@ -51,7 +51,7 @@ pub const Error = std.mem.Allocator.Error || client_hello.Error ||
         AlreadyEstablished,
         ConnectionFailed,
         EchRejected,
-        EchIncompatibleResumption,
+        EchIncompatibleOptions,
     };
 
 pub const EchClientConfig = struct {
@@ -285,12 +285,11 @@ pub fn ClientConnection(
             output: *std.ArrayList(u8),
         ) Error!Self {
             if (config.ech != null and
-                (config.resumption != null or
-                    config.tls12_session_ticket != null or
+                (config.tls12_session_ticket != null or
                     config.additional_cipher_suites.len != 0 or
                     config.offer_extended_master_secret))
             {
-                return error.EchIncompatibleResumption;
+                return error.EchIncompatibleOptions;
             }
             if (config.retry_key_material) |retry| {
                 if (retry == config.key_material) {
@@ -344,6 +343,10 @@ pub fn ClientConnection(
                         &.{}
                 else
                     &.{},
+                .encrypted_client_hello = if (config.ech != null)
+                    &.{ech.inner_type}
+                else
+                    null,
             });
             var resumption: ?StoredPsk = if (config.resumption) |value|
                 try StoredPsk.init(config.allocator, value)
@@ -392,6 +395,14 @@ pub fn ClientConnection(
                         .signature_schemes = config.signature_schemes,
                     },
                 );
+                if (resumption != null) {
+                    try ech.appendGreasePskFromInner(
+                        &outer_template,
+                        config.allocator,
+                        ech_config.io,
+                        hello.items,
+                    );
+                }
                 var context = try ech.ClientContext.init(
                     config.allocator,
                     ech_config.io,
@@ -690,6 +701,10 @@ pub fn ClientConnection(
                             &.{}
                     else
                         &.{},
+                    .encrypted_client_hello = if (self.ech_context != null)
+                        &.{ech.inner_type}
+                    else
+                        null,
                 },
             );
             const retry_prefix = transcript.afterHelloRetryRequest(
@@ -734,6 +749,14 @@ pub fn ClientConnection(
                         .signature_schemes = self.signature_schemes,
                     },
                 );
+                if (self.resumption != null) {
+                    try ech.appendGreasePskFromInner(
+                        &outer_template,
+                        self.allocator,
+                        context.io,
+                        second_hello.items,
+                    );
+                }
                 try context.sealRetry(
                     &ech_inner,
                     &ech_outer,
@@ -2011,7 +2034,7 @@ test "ECH client rejects a forged ServerHello acceptance signal" {
     );
 }
 
-test "client and server complete P-256 HelloRetryRequest transcript" {
+test "ECH PSK resumption survives P-256 HelloRetryRequest" {
     const allocator = std.testing.allocator;
     const Client = ClientConnection(64 * 1024, 256);
     const Server = @import("server_connection.zig").ServerConnection(
@@ -2043,6 +2066,20 @@ test "client and server complete P-256 HelloRetryRequest transcript" {
         }
     };
 
+    const ech_secret = [_]u8{0xe8} ** 32;
+    var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
+        .fromSecretKey(&ech_secret);
+    defer ech_key_pair.deinit();
+    var encoded_ech_config: std.ArrayList(u8) = .empty;
+    defer encoded_ech_config.deinit(allocator);
+    try ech.writeConfig(&encoded_ech_config, allocator, .{
+        .config_id = 27,
+        .public_key = ech_key_pair.public_key,
+        .maximum_name_length = 32,
+        .public_name = "public.example",
+    });
+    const selected_ech = try ech.parseConfig(encoded_ech_config.items);
+
     var initial_material = key_exchange.ClientKeyMaterial{
         .x25519 = [_]u8{0xe2} ** key_exchange.secret_len,
     };
@@ -2071,6 +2108,11 @@ test "client and server complete P-256 HelloRetryRequest transcript" {
         .server_verifier = .{ .pinned_raw_public_key = &certificate },
         .server_certificate_type = .raw_public_key,
         .resumption = client_psk,
+        .ech = .{
+            .io = std.testing.io,
+            .config = selected_ech,
+            .outer_random = [_]u8{0xe9} ** 32,
+        },
     }, &client_output);
     client_psk.secret.deinit();
     defer client.deinit();
@@ -2125,6 +2167,10 @@ test "client and server complete P-256 HelloRetryRequest transcript" {
             .replay_guard = retry_replay_cache.guard(),
             .max_bytes = 1024,
         },
+        .ech = .{
+            .config = selected_ech,
+            .key_pair = &ech_key_pair,
+        },
     });
     defer server.deinit();
 
@@ -2176,10 +2222,21 @@ test "client and server complete P-256 HelloRetryRequest transcript" {
             key_exchange.named_group_secp256r1,
         ) != null,
     );
-    try std.testing.expect(
-        second_client_hello.supportsCertificateCompression(.zlib),
+    try std.testing.expectEqualStrings(
+        "public.example",
+        second_client_hello.server_name.?,
     );
-    try std.testing.expect(second_client_hello.supportsServerCertificateType(
+    try std.testing.expect(!second_client_hello.supportsCertificateCompression(
+        .zlib,
+    ));
+    try std.testing.expect(!second_client_hello.supportsServerCertificateType(
+        .raw_public_key,
+    ));
+    const second_inner = try client_hello.parse(
+        client.client_hello_bytes.?,
+    );
+    try std.testing.expect(second_inner.supportsCertificateCompression(.zlib));
+    try std.testing.expect(second_inner.supportsServerCertificateType(
         .raw_public_key,
     ));
 
@@ -2236,6 +2293,7 @@ test "client and server complete P-256 HelloRetryRequest transcript" {
         return error.ClientDidNotEstablish;
     defer established_client.deinit();
     try std.testing.expect(established_client.resumed);
+    try std.testing.expect(established_client.ech_accepted);
     try std.testing.expect(!established_client.early_data_accepted);
     try std.testing.expectEqual(
         @as(usize, 0),
@@ -2249,6 +2307,7 @@ test "client and server complete P-256 HelloRetryRequest transcript" {
     var established_server = server_established_result.event.?.established;
     defer established_server.deinit();
     try std.testing.expect(established_server.resumed);
+    try std.testing.expect(established_server.ech_accepted);
     try std.testing.expect(!established_server.early_data_accepted);
     try std.testing.expectEqual(
         @import("server_connection.zig").Stage.established,
@@ -2610,7 +2669,7 @@ test "server state rejects a tampered selected PSK binder and locks" {
     );
 }
 
-test "client and server accept bounded replay-guarded 0-RTT" {
+test "ECH client and server accept bounded replay-guarded 0-RTT" {
     const allocator = std.testing.allocator;
     const server_module = @import("server_connection.zig");
     const early_module = @import("early_data.zig");
@@ -2636,6 +2695,19 @@ test "client and server accept bounded replay-guarded 0-RTT" {
             .max_early_data_size = 1024,
         },
     );
+    const ech_secret = [_]u8{0xd3} ** 32;
+    var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
+        .fromSecretKey(&ech_secret);
+    defer ech_key_pair.deinit();
+    var encoded_ech_config: std.ArrayList(u8) = .empty;
+    defer encoded_ech_config.deinit(allocator);
+    try ech.writeConfig(&encoded_ech_config, allocator, .{
+        .config_id = 26,
+        .public_key = ech_key_pair.public_key,
+        .maximum_name_length = 32,
+        .public_name = "public.example",
+    });
+    const selected_ech = try ech.parseConfig(encoded_ech_config.items);
     var replay_cache = early_module.ReplayCache(4){};
 
     var client_material = key_exchange.ClientKeyMaterial{
@@ -2659,10 +2731,32 @@ test "client and server accept bounded replay-guarded 0-RTT" {
         .alpn_protocols = &.{"h2"},
         .server_verifier = .{},
         .resumption = offered_psk,
+        .ech = .{
+            .io = std.testing.io,
+            .config = selected_ech,
+            .outer_random = [_]u8{0xd4} ** 32,
+        },
     }, &client_wire);
     offered_psk.secret.deinit();
     defer client.deinit();
     const client_hello_record_len = client_wire.items.len;
+    const outer_hello = try client_hello.parse(
+        client_wire.items[record.header_len..client_hello_record_len],
+    );
+    try std.testing.expectEqualStrings(
+        "public.example",
+        outer_hello.server_name.?,
+    );
+    try std.testing.expect(outer_hello.early_data);
+    const grease_offer = try psk.parseClientOffer(
+        client_wire.items[record.header_len..client_hello_record_len],
+    );
+    try std.testing.expectEqual(identity.len, grease_offer.identity.len);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &identity,
+        grease_offer.identity,
+    ));
     var early_record: [256]u8 = undefined;
     const early_record_len = try client.sealEarlyData(
         "zero round trip",
@@ -2700,6 +2794,10 @@ test "client and server accept bounded replay-guarded 0-RTT" {
         .early_data = .{
             .replay_guard = replay_cache.guard(),
             .max_bytes = 1024,
+        },
+        .ech = .{
+            .config = selected_ech,
+            .key_pair = &ech_key_pair,
         },
     });
     defer server.deinit();
@@ -2762,6 +2860,7 @@ test "client and server accept bounded replay-guarded 0-RTT" {
         return error.ClientDidNotEstablish;
     defer established_client.deinit();
     try std.testing.expect(established_client.early_data_accepted);
+    try std.testing.expect(established_client.ech_accepted);
 
     const end_of_early_data = try server.receive(
         client_wire.items,
@@ -2775,6 +2874,7 @@ test "client and server accept bounded replay-guarded 0-RTT" {
     var established_server = established_result.event.?.established;
     defer established_server.deinit();
     try std.testing.expect(established_server.early_data_accepted);
+    try std.testing.expect(established_server.ech_accepted);
 
     // A second connection can still resume, but the same ticket identity is
     // replayed and therefore its 0-RTT records are decrypted and discarded.
@@ -2799,6 +2899,11 @@ test "client and server accept bounded replay-guarded 0-RTT" {
         .alpn_protocols = &.{"h2"},
         .server_verifier = .{},
         .resumption = replay_psk,
+        .ech = .{
+            .io = std.testing.io,
+            .config = selected_ech,
+            .outer_random = [_]u8{0xd5} ** 32,
+        },
     }, &replay_wire);
     replay_psk.secret.deinit();
     defer replay_client.deinit();
@@ -2833,6 +2938,10 @@ test "client and server accept bounded replay-guarded 0-RTT" {
         .early_data = .{
             .replay_guard = replay_cache.guard(),
             .max_bytes = 1024,
+        },
+        .ech = .{
+            .config = selected_ech,
+            .key_pair = &ech_key_pair,
         },
     });
     defer replay_server.deinit();

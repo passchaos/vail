@@ -19,10 +19,9 @@ The current foundation provides:
   ClientHelloInner padding, linear-time `ech_outer_extensions`
   reconstruction, authenticated ClientHelloOuter encryption/decryption,
   retained HPKE state and acceptance confirmation across HRR, private-SNI
-  identity selection, and SHA-256/SHA-384/SM3 confirmation derivation. The
-  connection-level ECH path currently requires a fresh TLS 1.3 handshake;
-  PSK/0-RTT ECH offers are rejected until their inner-binder and outer-GREASE
-  handling is integrated;
+  identity selection, SHA-256/SHA-384/SM3 confirmation derivation, and
+  PSK-DHE/0-RTT resumption with real binders confined to ClientHelloInner and
+  independently randomized, length-matched GREASE PSKs in ClientHelloOuter;
 - TLS 1.3 ClientHello parsing, encrypted server-handshake flight construction,
   ServerHello/EncryptedExtensions, Certificate, CertificateVerify, Finished, and
   AEAD record-protection codecs;
