@@ -233,6 +233,9 @@ and application data in both mTLS directions.
 a second abbreviated session-ID connection in each direction, verify the
 resumed Finished transcript, and exchange application data under fresh record
 keys.
+The equivalent `interop-rustls-tls12-resumption-client` and
+`interop-rustls-tls12-resumption-server` steps require rustls with AWS-LC to
+report the second connection as `Resumed`.
 
 TLS 1.3 server flights can also emit CertificateRequest and retain an
 incremental negotiated-hash transcript. `tls.client_auth.verifyClientFlight`

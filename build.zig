@@ -610,4 +610,47 @@ pub fn build(b: *std.Build) void {
     interop_vail_tls12_server_resumption_step.dependOn(
         &check_vail_tls12_server_resumption.step,
     );
+
+    const check_rustls_tls12_server_resumption = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_tls12_server_resumption.step.dependOn(&build_rustls_min.step);
+    check_rustls_tls12_server_resumption.addArg(
+        "$1 > /tmp/vail-rustls-tls12-resume-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 12s bench/rustls_min_client/target/release/vail-rustls-tls12-resume-client > /tmp/vail-rustls-tls12-resume-client.log 2>&1; wait $pid; " ++
+            "grep -q 'TLS 1.2 server session resumption verified' /tmp/vail-rustls-tls12-resume-server.log && " ++
+            "grep -q 'rustls TLS 1.2 session resumption verified' /tmp/vail-rustls-tls12-resume-client.log",
+    );
+    check_rustls_tls12_server_resumption.addArg("sh");
+    check_rustls_tls12_server_resumption.addArtifactArg(
+        min_tls12_resume_server,
+    );
+    const interop_rustls_tls12_server_resumption_step = b.step(
+        "interop-rustls-tls12-resumption-server",
+        "Exercise Vail's TLS 1.2 session-ID server against rustls/AWS-LC",
+    );
+    interop_rustls_tls12_server_resumption_step.dependOn(
+        &check_rustls_tls12_server_resumption.step,
+    );
+
+    const check_rustls_tls12_client_resumption = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_tls12_client_resumption.step.dependOn(&build_rustls_server.step);
+    check_rustls_tls12_client_resumption.addArg(
+        "work=$(mktemp -d /tmp/vail-rustls-tls12-resume-client.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "bench/rustls_min_server/target/release/vail-rustls-tls12-resume-server \"$work/cert.pem\" \"$work/key.pem\" >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 12s $1 >\"$work/client.log\" 2>&1; wait $pid; " ++
+            "grep -q 'rustls TLS 1.2 session resumption verified' \"$work/server.log\" && " ++
+            "grep -q 'TLS 1.2 session resumption verified' \"$work/client.log\"",
+    );
+    check_rustls_tls12_client_resumption.addArg("sh");
+    check_rustls_tls12_client_resumption.addArtifactArg(
+        min_tls12_resume_client,
+    );
+    const interop_rustls_tls12_client_resumption_step = b.step(
+        "interop-rustls-tls12-resumption-client",
+        "Exercise Vail's TLS 1.2 session-ID client against rustls/AWS-LC",
+    );
+    interop_rustls_tls12_client_resumption_step.dependOn(
+        &check_rustls_tls12_client_resumption.step,
+    );
 }

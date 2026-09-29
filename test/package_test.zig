@@ -57,6 +57,7 @@ test "public modules are reachable" {
         vail.tls.tls12,
         "exportKeyingMaterial",
     ));
+    try std.testing.expect(@hasDecl(vail.tls.tls12, "Session"));
     try std.testing.expect(@hasDecl(
         vail.tls,
         "tls12_client_connection",

@@ -19,12 +19,10 @@ fn main() {
         .unwrap()
         .expect("private key");
 
-    let mut config = ServerConfig::builder_with_protocol_versions(&[
-        &rustls::version::TLS12,
-    ])
-    .with_no_client_auth()
-    .with_single_cert(certificates, key)
-    .unwrap();
+    let mut config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)
+        .unwrap();
     config.alpn_protocols.push(b"http/1.1".to_vec());
 
     let listener = TcpListener::bind("127.0.0.1:24447").unwrap();
@@ -34,7 +32,10 @@ fn main() {
     let mut request = [0u8; 1024];
     let received = tls.read(&mut request).unwrap();
     assert!(received != 0);
-    assert_eq!(tls.conn.protocol_version(), Some(rustls::ProtocolVersion::TLSv1_2));
+    assert_eq!(
+        tls.conn.protocol_version(),
+        Some(rustls::ProtocolVersion::TLSv1_2)
+    );
     assert_eq!(
         tls.conn.negotiated_cipher_suite().unwrap().suite(),
         rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
