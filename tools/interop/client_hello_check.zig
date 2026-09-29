@@ -7,7 +7,10 @@ pub fn main(init: std.process.Init) !void {
     defer it.deinit();
     const exe = it.next() orelse "client_hello_check";
     const hex_path = it.next() orelse {
-        std.debug.print("usage: {s} <hex-file> <server-name> <cipher-hex>\n", .{exe});
+        std.debug.print(
+            "usage: {s} <hex-file> <server-name> <cipher-hex> [ocsp|zlib ...]\n",
+            .{exe},
+        );
         return error.InvalidArgs;
     };
     const expected_name = it.next() orelse return error.InvalidArgs;
@@ -39,6 +42,17 @@ pub fn main(init: std.process.Init) !void {
     if (!parsed.hasCipherSuite(expected_cipher)) return error.MissingCipher;
     const share = (try parsed.firstKeyShare()) orelse return error.MissingShare;
     if (share.key_exchange.len == 0) return error.EmptyShare;
+    while (it.next()) |feature| {
+        if (std.mem.eql(u8, feature, "ocsp")) {
+            if (!parsed.requests_ocsp) return error.MissingOcspStatusRequest;
+        } else if (std.mem.eql(u8, feature, "zlib")) {
+            if (!parsed.supportsCertificateCompression(.zlib)) {
+                return error.MissingZlibCertificateCompression;
+            }
+        } else {
+            return error.InvalidArgs;
+        }
+    }
     std.debug.print(
         "clienthello ok: sni={s} cipher=0x{x} first_group=0x{x} share_len={d}\n",
         .{ parsed.server_name.?, expected_cipher, share.group, share.key_exchange.len },

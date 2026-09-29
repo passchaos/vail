@@ -5,20 +5,54 @@
 //! the negotiation core that OpenSSL/rustls interop will exercise next.
 
 const std = @import("std");
+const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const client_hello = @import("client_hello.zig");
 const server_hello = @import("server_hello.zig");
 
-pub const Error = std.mem.Allocator.Error || error{
+pub const Error = std.mem.Allocator.Error || client_hello.Error || error{
     NoTls13,
     NoSharedCipherSuite,
     NoSupportedKeyShare,
+    NoSupportedGroup,
+    RetryGroupAlreadyOffered,
     MissingQuicTransportParameters,
-    InvalidClientHello,
     InvalidAlpn,
     InvalidServerHello,
     InvalidEncryptedExtensions,
 };
+
+pub const RetrySelection = struct {
+    suite: cipher_suite.Suite,
+    selected_group: u16,
+};
+
+pub fn selectHelloRetryRequest(
+    client: client_hello.Parsed,
+    policy: Policy,
+    requested_group: u16,
+) Error!RetrySelection {
+    if (!client.offersTls13()) return error.NoTls13;
+    if (policy.quic_transport_parameters != null and
+        client.quic_transport_parameters == null)
+    {
+        return error.MissingQuicTransportParameters;
+    }
+    var group_allowed = false;
+    for (policy.groups) |group| {
+        if (group == requested_group) group_allowed = true;
+    }
+    if (!group_allowed or !try client.supportsGroup(requested_group)) {
+        return error.NoSupportedGroup;
+    }
+    if (try client.keyShareForGroup(requested_group) != null) {
+        return error.RetryGroupAlreadyOffered;
+    }
+    const suite = for (policy.cipher_suites) |candidate| {
+        if (client.hasCipherSuite(candidate.wireValue())) break candidate;
+    } else return error.NoSharedCipherSuite;
+    return .{ .suite = suite, .selected_group = requested_group };
+}
 
 pub const Selection = struct {
     suite: cipher_suite.Suite,
@@ -31,6 +65,12 @@ pub const Policy = struct {
     groups: []const u16 = &.{ 0x001d, 0x0017 },
     alpn_protocols: []const []const u8 = &.{},
     quic_transport_parameters: ?[]const u8 = null,
+    /// DER-encoded OCSPResponse stapled only when the client offered the
+    /// status_request extension and the handshake is certificate based.
+    ocsp_response: ?[]const u8 = null,
+    /// Precomputed compressed Certificate messages. The first entry matching
+    /// both the actual Certificate body and a client-offered algorithm wins.
+    compressed_certificates: []const certificate_compression.PreparedView = &.{},
 };
 
 pub fn select(client: client_hello.Parsed, policy: Policy) Error!Selection {

@@ -42,6 +42,7 @@ const oid_certificate_issuer = [_]u8{ 0x55, 0x1d, 0x1d };
 
 pub const List = struct {
     der: []const u8,
+    issuer_certificate_der: []const u8,
     issuer_name: []const u8,
     revoked_entries: []const u8,
     this_update: u64,
@@ -65,6 +66,58 @@ pub const List = struct {
             if (std.mem.eql(u8, parsed.serial, serial)) return true;
         }
         return false;
+    }
+};
+
+/// A caller-owned set of already authenticated CRLs exposed as a trust-layer
+/// revocation policy. Lists and their issuer certificates must outlive it.
+pub const VerifiedSet = struct {
+    lists: []const List,
+
+    pub fn policy(
+        self: *const VerifiedSet,
+        require_status: bool,
+    ) trust.RevocationPolicy {
+        return .{
+            .context = self,
+            .check = check,
+            .require_status = require_status,
+        };
+    }
+
+    fn check(
+        context: *const anyopaque,
+        certificate_der: []const u8,
+        issuer_der: []const u8,
+    ) anyerror!trust.RevocationStatus {
+        const self: *const VerifiedSet = @ptrCast(@alignCast(context));
+        const certificate = try parseCertificate(certificate_der);
+        const actual_issuer = try parseCertificate(issuer_der);
+        for (self.lists) |list| {
+            if (!std.mem.eql(u8, certificate.issuer(), list.issuer_name)) {
+                continue;
+            }
+            const authenticated_issuer = try parseCertificate(
+                list.issuer_certificate_der,
+            );
+            if (!std.mem.eql(
+                u8,
+                authenticated_issuer.subject(),
+                actual_issuer.subject(),
+            ) or !std.meta.eql(
+                authenticated_issuer.pub_key_algo,
+                actual_issuer.pub_key_algo,
+            ) or !std.mem.eql(
+                u8,
+                authenticated_issuer.pubKey(),
+                actual_issuer.pubKey(),
+            )) continue;
+            return if (try list.isRevoked(certificate_der))
+                .revoked
+            else
+                .good;
+        }
+        return .unknown;
     }
 };
 
@@ -162,6 +215,7 @@ pub fn parseAndVerify(
 
     return .{
         .der = crl_der,
+        .issuer_certificate_der = issuer_certificate_der,
         .issuer_name = issuer.value,
         .revoked_entries = revoked_entries,
         .this_update = this_update,

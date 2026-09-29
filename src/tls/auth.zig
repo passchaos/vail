@@ -1,17 +1,27 @@
 //! TLS 1.3 server Certificate and CertificateVerify helpers.
 //!
-//! The handshake codec is certificate-format agnostic, while the built-in
-//! Built-in possession verification supports Ed25519, ECDSA P-256, and
-//! RSA-PSS/RSAE SHA-256 X.509 leaves. Applications can additionally provide a
-//! trust callback for chain, validity, EKU, and policy validation.
+//! The handshake codec is certificate-format agnostic. Built-in possession
+//! verification supports Ed25519, ECDSA P-256/P-384, SM2, and RSA-PSS X.509
+//! CertificateVerify. An allocation-free signer callback supports additional
+//! pure-Zig or hardware-backed private-key implementations. Applications can
+//! separately provide a trust callback for chain, validity, EKU, and policy.
 
 const std = @import("std");
 
+const rsa = @import("../crypto/rsa.zig");
 const sm2 = @import("../crypto/sm2.zig");
 const Certificate = std.crypto.Certificate;
 const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
+const EcdsaP256Sha384 = std.crypto.sign.ecdsa.Ecdsa(
+    std.crypto.ecc.P256,
+    std.crypto.hash.sha2.Sha384,
+);
+const EcdsaP384Sha256 = std.crypto.sign.ecdsa.Ecdsa(
+    std.crypto.ecc.P384,
+    std.crypto.hash.sha2.Sha256,
+);
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Sha384 = std.crypto.hash.sha2.Sha384;
 const Sha512 = std.crypto.hash.sha2.Sha512;
@@ -49,6 +59,8 @@ pub const Error = std.mem.Allocator.Error || error{
     CertificateUntrusted,
 };
 
+pub const max_certificate_verify_signature_len: usize = 512;
+
 pub const ServerIdentity = struct {
     /// DER-encoded leaf-first certificate chain. Raw Ed25519 and uncompressed
     /// P-256 SEC1 public keys are accepted for compact pinned-key deployments.
@@ -84,6 +96,11 @@ pub const Signer = union(enum) {
         /// Must be fresh for each SM2 signature.
         nonce: [sm2.scalar_len]u8,
     },
+    rsa_pss: RsaPssSigner,
+    /// Allocation-free extension point for pure-Zig software keys, hardware
+    /// keys, or signature schemes whose private-key operation is not provided
+    /// by Zig std. TLS framing and transcript construction remain inside Vail.
+    custom: CustomSigner,
 
     pub fn scheme(self: Signer) u16 {
         return switch (self) {
@@ -91,6 +108,8 @@ pub const Signer = union(enum) {
             .ecdsa_p256_sha256 => signature_scheme_ecdsa_secp256r1_sha256,
             .ecdsa_p384_sha384 => signature_scheme_ecdsa_secp384r1_sha384,
             .sm2sig_sm3 => signature_scheme_sm2sig_sm3,
+            .rsa_pss => |rsa_signer| rsa_signer.signature_scheme,
+            .custom => |custom| custom.signature_scheme,
         };
     }
 
@@ -131,13 +150,211 @@ pub const Signer = union(enum) {
                     return error.InvalidCertificate;
                 }
             },
+            .rsa_pss => |signer| {
+                const expected_key_algorithm: Certificate.AlgorithmCategory =
+                    switch (signer.signature_scheme) {
+                        signature_scheme_rsa_pss_rsae_sha256,
+                        signature_scheme_rsa_pss_rsae_sha384,
+                        signature_scheme_rsa_pss_rsae_sha512,
+                        => .rsaEncryption,
+                        signature_scheme_rsa_pss_pss_sha256,
+                        signature_scheme_rsa_pss_pss_sha384,
+                        signature_scheme_rsa_pss_pss_sha512,
+                        => .rsassa_pss,
+                        else => return error.UnsupportedSignatureScheme,
+                    };
+                const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
+                    certificate,
+                    expected_key_algorithm,
+                );
+                const public_key = Certificate.rsa.PublicKey.parseDer(
+                    public_key_der,
+                ) catch return error.InvalidCertificate;
+                if (!signer.prepared_key.matchesPublicKey(
+                    public_key.modulus,
+                    public_key.exponent,
+                )) return error.InvalidCertificate;
+            },
+            .custom => |custom| {
+                if (!isTls13CertificateVerifyScheme(
+                    custom.signature_scheme,
+                ) or custom.max_signature_len == 0 or
+                    custom.max_signature_len >
+                        max_certificate_verify_signature_len)
+                {
+                    return error.UnsupportedSignatureScheme;
+                }
+                custom.validate_certificate(
+                    custom.context,
+                    certificate,
+                ) catch return error.InvalidCertificate;
+            },
         }
     }
+
+    /// Sign protocol-defined content into caller-provided storage.
+    pub fn sign(
+        self: Signer,
+        content: []const u8,
+        output: []u8,
+    ) Error!usize {
+        return switch (self) {
+            .ed25519 => |ed| blk: {
+                if (output.len < Ed25519.Signature.encoded_length) {
+                    return error.InvalidCertificateVerify;
+                }
+                const signature = ed.key_pair.sign(
+                    content,
+                    ed.noise,
+                ) catch return error.InvalidCertificateVerify;
+                const bytes = signature.toBytes();
+                @memcpy(output[0..bytes.len], &bytes);
+                break :blk bytes.len;
+            },
+            .ecdsa_p256_sha256 => |ecdsa| blk: {
+                const signature = ecdsa.key_pair.sign(
+                    content,
+                    ecdsa.noise,
+                ) catch return error.InvalidCertificateVerify;
+                var der: [EcdsaP256Sha256.Signature.der_encoded_length_max]u8 =
+                    undefined;
+                const encoded = signature.toDer(&der);
+                if (output.len < encoded.len) {
+                    return error.InvalidCertificateVerify;
+                }
+                @memcpy(output[0..encoded.len], encoded);
+                break :blk encoded.len;
+            },
+            .ecdsa_p384_sha384 => |ecdsa| blk: {
+                const signature = ecdsa.key_pair.sign(
+                    content,
+                    ecdsa.noise,
+                ) catch return error.InvalidCertificateVerify;
+                var der: [EcdsaP384Sha384.Signature.der_encoded_length_max]u8 =
+                    undefined;
+                const encoded = signature.toDer(&der);
+                if (output.len < encoded.len) {
+                    return error.InvalidCertificateVerify;
+                }
+                @memcpy(output[0..encoded.len], encoded);
+                break :blk encoded.len;
+            },
+            .sm2sig_sm3 => |sm2_signer| blk: {
+                const signature = sm2_signer.key_pair.sign(
+                    sm2.default_user_id,
+                    content,
+                    sm2_signer.nonce,
+                ) catch return error.InvalidCertificateVerify;
+                var der: [sm2.Signature.der_encoded_length_max]u8 =
+                    undefined;
+                const encoded = signature.toDer(&der);
+                if (output.len < encoded.len) {
+                    return error.InvalidCertificateVerify;
+                }
+                @memcpy(output[0..encoded.len], encoded);
+                break :blk encoded.len;
+            },
+            .rsa_pss => |rsa_signer| blk: {
+                const hash_len = rsa_signer.hashLength();
+                if (hash_len == 0 or output.len <
+                    rsa_signer.prepared_key.signatureLength())
+                {
+                    return error.UnsupportedSignatureScheme;
+                }
+                var salt: [Sha512.digest_length]u8 = undefined;
+                defer std.crypto.secureZero(u8, &salt);
+                rsa_signer.io.randomSecure(salt[0..hash_len]) catch
+                    return error.InvalidCertificateVerify;
+                break :blk switch (rsa_signer.signature_scheme) {
+                    signature_scheme_rsa_pss_rsae_sha256,
+                    signature_scheme_rsa_pss_pss_sha256,
+                    => rsa_signer.prepared_key.signPssSha256(
+                        content,
+                        salt[0..hash_len],
+                        output,
+                    ),
+                    signature_scheme_rsa_pss_rsae_sha384,
+                    signature_scheme_rsa_pss_pss_sha384,
+                    => rsa_signer.prepared_key.signPssSha384(
+                        content,
+                        salt[0..hash_len],
+                        output,
+                    ),
+                    signature_scheme_rsa_pss_rsae_sha512,
+                    signature_scheme_rsa_pss_pss_sha512,
+                    => rsa_signer.prepared_key.signPssSha512(
+                        content,
+                        salt[0..hash_len],
+                        output,
+                    ),
+                    else => error.UnsupportedSignatureScheme,
+                } catch return error.InvalidCertificateVerify;
+            },
+            .custom => |custom| blk: {
+                if (!isTls13CertificateVerifyScheme(
+                    custom.signature_scheme,
+                ) or custom.max_signature_len == 0 or
+                    custom.max_signature_len > output.len)
+                {
+                    return error.UnsupportedSignatureScheme;
+                }
+                const signature_len = custom.sign(
+                    custom.context,
+                    content,
+                    output[0..custom.max_signature_len],
+                ) catch return error.InvalidCertificateVerify;
+                if (signature_len == 0 or
+                    signature_len > custom.max_signature_len)
+                {
+                    return error.InvalidCertificateVerify;
+                }
+                break :blk signature_len;
+            },
+        };
+    }
+};
+
+pub const RsaPssSigner = struct {
+    prepared_key: *const rsa.PreparedPrivateKey,
+    signature_scheme: u16 = signature_scheme_rsa_pss_rsae_sha256,
+    /// Used to obtain a fresh RFC 8017 salt for every signature.
+    io: std.Io,
+
+    pub fn hashLength(self: RsaPssSigner) usize {
+        return switch (self.signature_scheme) {
+            signature_scheme_rsa_pss_rsae_sha256,
+            signature_scheme_rsa_pss_pss_sha256,
+            => Sha256.digest_length,
+            signature_scheme_rsa_pss_rsae_sha384,
+            signature_scheme_rsa_pss_pss_sha384,
+            => Sha384.digest_length,
+            signature_scheme_rsa_pss_rsae_sha512,
+            signature_scheme_rsa_pss_pss_sha512,
+            => Sha512.digest_length,
+            else => 0,
+        };
+    }
+};
+
+pub const CustomSigner = struct {
+    context: ?*anyopaque,
+    signature_scheme: u16,
+    max_signature_len: usize,
+    validate_certificate: *const fn (
+        context: ?*anyopaque,
+        certificate: []const u8,
+    ) anyerror!void,
+    sign: *const fn (
+        context: ?*anyopaque,
+        signed_content: []const u8,
+        output: []u8,
+    ) anyerror!usize,
 };
 
 pub const TrustContext = struct {
     server_name: ?[]const u8,
     chain: []const []const u8,
+    ocsp_response: ?[]const u8 = null,
 };
 
 pub const TrustCallback = *const fn (
@@ -164,11 +381,21 @@ pub const ClientVerifier = struct {
         server_name: ?[]const u8,
         chain: []const []const u8,
     ) Error!void {
+        return self.verifyTrustWithOcsp(server_name, chain, null);
+    }
+
+    pub fn verifyTrustWithOcsp(
+        self: ClientVerifier,
+        server_name: ?[]const u8,
+        chain: []const []const u8,
+        ocsp_response: ?[]const u8,
+    ) Error!void {
         if (chain.len == 0) return error.EmptyCertificateChain;
         if (self.verify_trust) |verify| {
             verify(self.context, .{
                 .server_name = server_name,
                 .chain = chain,
+                .ocsp_response = ocsp_response,
             }) catch return error.CertificateUntrusted;
             return;
         }
@@ -232,6 +459,7 @@ pub const ClientVerifier = struct {
 
 pub const ParsedCertificate = struct {
     entries: [][]const u8,
+    ocsp_response: ?[]const u8 = null,
 
     pub fn deinit(self: *ParsedCertificate, allocator: std.mem.Allocator) void {
         allocator.free(self.entries);
@@ -264,6 +492,27 @@ pub fn writeCertificateWithContext(
         allocator,
         chain,
         request_context,
+        null,
+    );
+}
+
+pub fn writeCertificateWithOcsp(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    chain: []const []const u8,
+    ocsp_response: []const u8,
+) Error!void {
+    if (ocsp_response.len == 0 or
+        ocsp_response.len > std.math.maxInt(u16) - 8)
+    {
+        return error.InvalidCertificate;
+    }
+    return writeCertificateEntriesWithContext(
+        list,
+        allocator,
+        chain,
+        &.{},
+        ocsp_response,
     );
 }
 
@@ -282,6 +531,7 @@ pub fn writeClientCertificateWithContext(
         allocator,
         chain,
         request_context,
+        null,
     );
 }
 
@@ -290,6 +540,7 @@ fn writeCertificateEntriesWithContext(
     allocator: std.mem.Allocator,
     chain: []const []const u8,
     request_context: []const u8,
+    leaf_ocsp_response: ?[]const u8,
 ) Error!void {
     if (request_context.len > std.math.maxInt(u8)) {
         return error.InvalidCertificate;
@@ -299,7 +550,7 @@ fn writeCertificateEntriesWithContext(
 
     var entries: std.ArrayList(u8) = .empty;
     defer entries.deinit(allocator);
-    for (chain) |cert| {
+    for (chain, 0..) |cert, index| {
         if (cert.len == 0 or cert.len > std.math.maxInt(u24)) {
             return error.CertificateTooLarge;
         }
@@ -307,8 +558,29 @@ fn writeCertificateEntriesWithContext(
         writeU24(&cert_len, @intCast(cert.len));
         try entries.appendSlice(allocator, &cert_len);
         try entries.appendSlice(allocator, cert);
-        // Per-certificate extensions are intentionally empty.
-        try entries.appendSlice(allocator, &.{ 0, 0 });
+        if (index == 0 and leaf_ocsp_response != null) {
+            const response = leaf_ocsp_response.?;
+            try appendInt(
+                &entries,
+                allocator,
+                u16,
+                2 + 2 + 1 + 3 + response.len,
+            );
+            try appendInt(&entries, allocator, u16, 0x0005);
+            try appendInt(
+                &entries,
+                allocator,
+                u16,
+                1 + 3 + response.len,
+            );
+            try entries.append(allocator, 1);
+            var response_len: [3]u8 = undefined;
+            writeU24(&response_len, @intCast(response.len));
+            try entries.appendSlice(allocator, &response_len);
+            try entries.appendSlice(allocator, response);
+        } else {
+            try entries.appendSlice(allocator, &.{ 0, 0 });
+        }
     }
     if (entries.items.len > std.math.maxInt(u24)) {
         return error.CertificateTooLarge;
@@ -386,19 +658,52 @@ fn parseCertificateEntriesWithContext(
     if (entries_end != bytes.len) return error.InvalidCertificate;
 
     var entries: std.ArrayList([]const u8) = .empty;
+    var ocsp_response: ?[]const u8 = null;
     errdefer entries.deinit(allocator);
     while (pos < entries_end) {
         const cert_len = try readU24At(bytes, &pos);
         if (cert_len == 0) return error.InvalidCertificate;
         const cert = try readSlice(bytes, &pos, cert_len);
         const extensions_len = try readInt(u16, bytes, &pos);
-        _ = try readSlice(bytes, &pos, extensions_len);
+        const extensions = try readSlice(bytes, &pos, extensions_len);
+        if (entries.items.len == 0) {
+            ocsp_response = try parseCertificateEntryExtensions(extensions);
+        } else if (try parseCertificateEntryExtensions(extensions) != null) {
+            return error.InvalidCertificate;
+        }
         try entries.append(allocator, cert);
     }
     if (!allow_empty and entries.items.len == 0) {
         return error.EmptyCertificateChain;
     }
-    return .{ .entries = try entries.toOwnedSlice(allocator) };
+    return .{
+        .entries = try entries.toOwnedSlice(allocator),
+        .ocsp_response = ocsp_response,
+    };
+}
+
+fn parseCertificateEntryExtensions(
+    extensions: []const u8,
+) Error!?[]const u8 {
+    var pos: usize = 0;
+    var ocsp_response: ?[]const u8 = null;
+    while (pos < extensions.len) {
+        const extension_type = try readInt(u16, extensions, &pos);
+        const extension_len = try readInt(u16, extensions, &pos);
+        const payload = try readSlice(extensions, &pos, extension_len);
+        if (extension_type != 0x0005) continue;
+        if (ocsp_response != null or payload.len < 4 or payload[0] != 1) {
+            return error.InvalidCertificate;
+        }
+        var payload_pos: usize = 1;
+        const response_len = try readU24At(payload, &payload_pos);
+        const response = try readSlice(payload, &payload_pos, response_len);
+        if (response.len == 0 or payload_pos != payload.len) {
+            return error.InvalidCertificate;
+        }
+        ocsp_response = response;
+    }
+    return ocsp_response;
 }
 
 pub fn writeCertificateVerify(
@@ -432,7 +737,7 @@ pub fn writeCertificateVerifyForRole(
     const context = certificateVerifyContext(role);
     var signed_content: [
         64 + client_certificate_verify_context.len + 1 +
-            std.crypto.hash.sha2.Sha384.digest_length
+            Sha512.digest_length
     ]u8 = undefined;
     @memset(signed_content[0..64], 0x20);
     @memcpy(signed_content[64 .. 64 + context.len], context);
@@ -444,63 +749,10 @@ pub fn writeCertificateVerifyForRole(
     );
     const content = signed_content[0 .. separator + 1 +
         transcript_hash.len];
-    var signature_storage: [
-        @max(
-            EcdsaP384Sha384.Signature.der_encoded_length_max,
-            @max(
-                EcdsaP256Sha256.Signature.der_encoded_length_max,
-                sm2.Signature.der_encoded_length_max,
-            ),
-        )
-    ]u8 = undefined;
-    const signature_bytes: []const u8 = switch (signer) {
-        .ed25519 => |ed| blk: {
-            const signature = ed.key_pair.sign(
-                content,
-                ed.noise,
-            ) catch return error.InvalidCertificateVerify;
-            const bytes = signature.toBytes();
-            @memcpy(signature_storage[0..bytes.len], &bytes);
-            break :blk signature_storage[0..bytes.len];
-        },
-        .ecdsa_p256_sha256 => |ecdsa| blk: {
-            const signature = ecdsa.key_pair.sign(
-                content,
-                ecdsa.noise,
-            ) catch return error.InvalidCertificateVerify;
-            var der: [EcdsaP256Sha256.Signature.der_encoded_length_max]u8 =
-                undefined;
-            const encoded = signature.toDer(&der);
-            @memcpy(signature_storage[0..encoded.len], encoded);
-            break :blk signature_storage[0..encoded.len];
-        },
-        .ecdsa_p384_sha384 => |ecdsa| blk: {
-            const signature = ecdsa.key_pair.sign(
-                content,
-                ecdsa.noise,
-            ) catch return error.InvalidCertificateVerify;
-            var der: [EcdsaP384Sha384.Signature.der_encoded_length_max]u8 =
-                undefined;
-            const encoded = signature.toDer(&der);
-            @memcpy(signature_storage[0..encoded.len], encoded);
-            break :blk signature_storage[0..encoded.len];
-        },
-        .sm2sig_sm3 => |sm2_signer| blk: {
-            if (transcript_hash.len != sm3DigestLen()) {
-                return error.InvalidCertificateVerify;
-            }
-            const signature = sm2_signer.key_pair.sign(
-                sm2.default_user_id,
-                content,
-                sm2_signer.nonce,
-            ) catch return error.InvalidCertificateVerify;
-            var der: [sm2.Signature.der_encoded_length_max]u8 =
-                undefined;
-            const encoded = signature.toDer(&der);
-            @memcpy(signature_storage[0..encoded.len], encoded);
-            break :blk signature_storage[0..encoded.len];
-        },
-    };
+    var signature_storage: [max_certificate_verify_signature_len]u8 =
+        undefined;
+    const signature_len = try signer.sign(content, &signature_storage);
+    const signature_bytes = signature_storage[0..signature_len];
 
     const body_len = 2 + 2 + signature_bytes.len;
     try list.append(allocator, handshake_type_certificate_verify);
@@ -510,6 +762,19 @@ pub fn writeCertificateVerifyForRole(
     try appendInt(list, allocator, u16, signer.scheme());
     try appendInt(list, allocator, u16, signature_bytes.len);
     try list.appendSlice(allocator, signature_bytes);
+}
+
+fn isTls13CertificateVerifyScheme(scheme: u16) bool {
+    return scheme == signature_scheme_ed25519 or
+        scheme == signature_scheme_ecdsa_secp256r1_sha256 or
+        scheme == signature_scheme_ecdsa_secp384r1_sha384 or
+        scheme == signature_scheme_rsa_pss_rsae_sha256 or
+        scheme == signature_scheme_rsa_pss_rsae_sha384 or
+        scheme == signature_scheme_rsa_pss_rsae_sha512 or
+        scheme == signature_scheme_rsa_pss_pss_sha256 or
+        scheme == signature_scheme_rsa_pss_pss_sha384 or
+        scheme == signature_scheme_rsa_pss_pss_sha512 or
+        scheme == signature_scheme_sm2sig_sm3;
 }
 
 pub fn parseCertificateVerify(
@@ -545,6 +810,206 @@ pub fn parseCertificateVerify(
     const signature = try readSlice(bytes, &pos, signature_len);
     if (pos != bytes.len) return error.InvalidCertificateVerify;
     return .{ .scheme = scheme, .signature = signature };
+}
+
+/// Verify a TLS signature over protocol-defined bytes without applying the
+/// TLS 1.3 CertificateVerify context prefix. TLS 1.2 ServerKeyExchange uses
+/// this form for `client_random || server_random || ServerECDHParams`.
+pub fn verifySignedContent(
+    certificate: []const u8,
+    parsed: ParsedCertificateVerify,
+    content: []const u8,
+) Error!void {
+    switch (parsed.scheme) {
+        signature_scheme_ed25519 => {
+            if (parsed.signature.len != Ed25519.Signature.encoded_length) {
+                return error.InvalidCertificateVerify;
+            }
+            const public_key_bytes =
+                try ed25519CertificatePublicKey(certificate);
+            const public_key = Ed25519.PublicKey.fromBytes(
+                public_key_bytes,
+            ) catch return error.InvalidCertificate;
+            const signature = Ed25519.Signature.fromBytes(
+                parsed.signature[0..Ed25519.Signature.encoded_length].*,
+            );
+            signature.verify(content, public_key) catch
+                return error.BadCertificateVerify;
+        },
+        signature_scheme_ecdsa_secp256r1_sha256 => {
+            const public_key_bytes =
+                try p256CertificatePublicKey(certificate);
+            const public_key = EcdsaP256Sha256.PublicKey.fromSec1(
+                &public_key_bytes,
+            ) catch return error.InvalidCertificate;
+            const signature = EcdsaP256Sha256.Signature.fromDer(
+                parsed.signature,
+            ) catch return error.InvalidCertificateVerify;
+            var verifier = signature.verifier(public_key) catch
+                return error.BadCertificateVerify;
+            verifier.update(content);
+            verifier.verify() catch return error.BadCertificateVerify;
+        },
+        signature_scheme_ecdsa_secp384r1_sha384 => {
+            const public_key_bytes =
+                try p384CertificatePublicKey(certificate);
+            const public_key = EcdsaP384Sha384.PublicKey.fromSec1(
+                &public_key_bytes,
+            ) catch return error.InvalidCertificate;
+            const signature = EcdsaP384Sha384.Signature.fromDer(
+                parsed.signature,
+            ) catch return error.InvalidCertificateVerify;
+            var verifier = signature.verifier(public_key) catch
+                return error.BadCertificateVerify;
+            verifier.update(content);
+            verifier.verify() catch return error.BadCertificateVerify;
+        },
+        signature_scheme_rsa_pss_rsae_sha256 => try verifyRsaPssContent(
+            Sha256,
+            .rsaEncryption,
+            certificate,
+            parsed.signature,
+            content,
+        ),
+        signature_scheme_rsa_pss_rsae_sha384 => try verifyRsaPssContent(
+            Sha384,
+            .rsaEncryption,
+            certificate,
+            parsed.signature,
+            content,
+        ),
+        signature_scheme_rsa_pss_rsae_sha512 => try verifyRsaPssContent(
+            Sha512,
+            .rsaEncryption,
+            certificate,
+            parsed.signature,
+            content,
+        ),
+        signature_scheme_rsa_pss_pss_sha256 => try verifyRsaPssContent(
+            Sha256,
+            .rsassa_pss,
+            certificate,
+            parsed.signature,
+            content,
+        ),
+        signature_scheme_rsa_pss_pss_sha384 => try verifyRsaPssContent(
+            Sha384,
+            .rsassa_pss,
+            certificate,
+            parsed.signature,
+            content,
+        ),
+        signature_scheme_rsa_pss_pss_sha512 => try verifyRsaPssContent(
+            Sha512,
+            .rsassa_pss,
+            certificate,
+            parsed.signature,
+            content,
+        ),
+        signature_scheme_sm2sig_sm3 => {
+            const public_key = sm2.PublicKey.fromUncompressedSec1(
+                &try sm2CertificatePublicKey(certificate),
+            ) catch return error.InvalidCertificate;
+            const signature = sm2.Signature.fromDer(parsed.signature) catch
+                return error.InvalidCertificateVerify;
+            sm2.verify(
+                sm2.default_user_id,
+                public_key,
+                content,
+                signature,
+            ) catch return error.BadCertificateVerify;
+        },
+        else => return error.UnsupportedSignatureScheme,
+    }
+}
+
+/// TLS 1.2 ECDSA SignatureScheme values bind only the hash and signature
+/// algorithm; unlike TLS 1.3, they do not constrain the certificate curve.
+/// RSA-PSS and Ed25519 retain their ordinary scheme semantics.
+pub fn verifyTls12SignedContent(
+    certificate: []const u8,
+    parsed: ParsedCertificateVerify,
+    content: []const u8,
+) Error!void {
+    switch (parsed.scheme) {
+        signature_scheme_ecdsa_secp256r1_sha256 => {
+            const curve = try certificateCurve(certificate);
+            switch (curve) {
+                .p256 => try verifyEcdsaContent(
+                    EcdsaP256Sha256,
+                    &try p256CertificatePublicKey(certificate),
+                    parsed.signature,
+                    content,
+                ),
+                .p384 => try verifyEcdsaContent(
+                    EcdsaP384Sha256,
+                    &try p384CertificatePublicKey(certificate),
+                    parsed.signature,
+                    content,
+                ),
+            }
+        },
+        signature_scheme_ecdsa_secp384r1_sha384 => {
+            const curve = try certificateCurve(certificate);
+            switch (curve) {
+                .p256 => try verifyEcdsaContent(
+                    EcdsaP256Sha384,
+                    &try p256CertificatePublicKey(certificate),
+                    parsed.signature,
+                    content,
+                ),
+                .p384 => try verifyEcdsaContent(
+                    EcdsaP384Sha384,
+                    &try p384CertificatePublicKey(certificate),
+                    parsed.signature,
+                    content,
+                ),
+            }
+        },
+        else => try verifySignedContent(certificate, parsed, content),
+    }
+}
+
+const CertificateCurve = enum { p256, p384 };
+
+fn certificateCurve(certificate: []const u8) Error!CertificateCurve {
+    if (certificate.len ==
+        EcdsaP256Sha256.PublicKey.uncompressed_sec1_encoded_length)
+    {
+        _ = EcdsaP256Sha256.PublicKey.fromSec1(certificate) catch
+            return error.InvalidCertificate;
+        return .p256;
+    }
+    if (certificate.len ==
+        EcdsaP384Sha384.PublicKey.uncompressed_sec1_encoded_length)
+    {
+        _ = EcdsaP384Sha384.PublicKey.fromSec1(certificate) catch
+            return error.InvalidCertificate;
+        return .p384;
+    }
+    const parsed_certificate = try parseX509(certificate);
+    if (parsed_certificate.pub_key_algo != .X9_62_id_ecPublicKey) {
+        return error.UnsupportedCertificateKey;
+    }
+    return switch (parsed_certificate.pub_key_algo.X9_62_id_ecPublicKey) {
+        .X9_62_prime256v1 => .p256,
+        .secp384r1 => .p384,
+        else => error.UnsupportedCertificateKey,
+    };
+}
+
+fn verifyEcdsaContent(
+    comptime Ecdsa: type,
+    public_key_bytes: []const u8,
+    signature_bytes: []const u8,
+    content: []const u8,
+) Error!void {
+    const public_key = Ecdsa.PublicKey.fromSec1(public_key_bytes) catch
+        return error.InvalidCertificate;
+    const signature = Ecdsa.Signature.fromDer(signature_bytes) catch
+        return error.InvalidCertificateVerify;
+    signature.verify(content, public_key) catch
+        return error.BadCertificateVerify;
 }
 
 pub fn verifyCertificateVerify(
@@ -752,6 +1217,45 @@ fn verifyRsaPss(
                     &separator,
                     transcript_hash,
                 },
+                public_key,
+                Hash,
+            ) catch return error.BadCertificateVerify;
+        },
+        else => return error.UnsupportedCertificateKey,
+    }
+}
+
+fn verifyRsaPssContent(
+    comptime Hash: type,
+    comptime expected_key_algorithm: Certificate.AlgorithmCategory,
+    certificate: []const u8,
+    signature_bytes: []const u8,
+    content: []const u8,
+) Error!void {
+    const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
+        certificate,
+        expected_key_algorithm,
+    );
+    const components = Certificate.rsa.PublicKey.parseDer(
+        public_key_der,
+    ) catch return error.InvalidCertificate;
+    switch (components.modulus.len) {
+        inline 128, 256, 384, 512 => |modulus_len| {
+            if (signature_bytes.len != modulus_len) {
+                return error.InvalidCertificateVerify;
+            }
+            const public_key = Certificate.rsa.PublicKey.fromBytes(
+                components.exponent,
+                components.modulus,
+            ) catch return error.InvalidCertificate;
+            const signature = Certificate.rsa.PSSSignature.fromBytes(
+                modulus_len,
+                signature_bytes,
+            );
+            Certificate.rsa.PSSSignature.verify(
+                modulus_len,
+                signature,
+                content,
                 public_key,
                 Hash,
             ) catch return error.BadCertificateVerify;
@@ -1091,4 +1595,119 @@ fn writeU24(bytes: *[3]u8, value: u24) void {
     bytes[0] = @truncate(value >> 16);
     bytes[1] = @truncate(value >> 8);
     bytes[2] = @truncate(value);
+}
+
+test "Certificate codec round-trips a leaf OCSP staple" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeCertificateWithOcsp(
+        &encoded,
+        allocator,
+        &.{ "leaf", "issuer" },
+        "ocsp-response",
+    );
+
+    var parsed = try parseCertificate(allocator, encoded.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), parsed.entries.len);
+    try std.testing.expectEqualStrings("leaf", parsed.entries[0]);
+    try std.testing.expectEqualStrings("issuer", parsed.entries[1]);
+    try std.testing.expectEqualStrings(
+        "ocsp-response",
+        parsed.ocsp_response.?,
+    );
+
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        writeCertificateWithOcsp(
+            &encoded,
+            allocator,
+            &.{"leaf"},
+            &.{},
+        ),
+    );
+}
+
+const TestCustomSignerContext = struct {
+    key_pair: Ed25519.KeyPair,
+};
+
+fn validateTestCustomSigner(
+    opaque_context: ?*anyopaque,
+    certificate: []const u8,
+) !void {
+    const context: *const TestCustomSignerContext = @ptrCast(@alignCast(
+        opaque_context orelse return error.MissingSignerContext,
+    ));
+    const actual = try ed25519CertificatePublicKey(certificate);
+    if (!std.crypto.timing_safe.eql(
+        [Ed25519.PublicKey.encoded_length]u8,
+        actual,
+        context.key_pair.public_key.toBytes(),
+    )) return error.KeyMismatch;
+}
+
+fn signWithTestCustomSigner(
+    opaque_context: ?*anyopaque,
+    content: []const u8,
+    output: []u8,
+) !usize {
+    const context: *const TestCustomSignerContext = @ptrCast(@alignCast(
+        opaque_context orelse return error.MissingSignerContext,
+    ));
+    if (output.len < Ed25519.Signature.encoded_length) {
+        return error.SignatureBufferTooSmall;
+    }
+    const signature = try context.key_pair.sign(content, null);
+    const encoded = signature.toBytes();
+    @memcpy(output[0..encoded.len], &encoded);
+    return encoded.len;
+}
+
+test "custom signer preserves CertificateVerify construction and validation" {
+    const allocator = std.testing.allocator;
+    var context = TestCustomSignerContext{
+        .key_pair = try Ed25519.KeyPair.generateDeterministic(
+            [_]u8{0x91} ** Ed25519.KeyPair.seed_length,
+        ),
+    };
+    const public_key = context.key_pair.public_key.toBytes();
+    const signer = Signer{ .custom = .{
+        .context = @ptrCast(&context),
+        .signature_scheme = signature_scheme_ed25519,
+        .max_signature_len = Ed25519.Signature.encoded_length,
+        .validate_certificate = validateTestCustomSigner,
+        .sign = signWithTestCustomSigner,
+    } };
+    try (ServerIdentity{
+        .certificate_chain = &.{&public_key},
+        .signer = signer,
+    }).validate();
+
+    const transcript_hash = [_]u8{0x92} ** Sha512.digest_length;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeCertificateVerify(
+        &encoded,
+        allocator,
+        signer,
+        &transcript_hash,
+    );
+    const parsed = try parseCertificateVerify(encoded.items);
+    try std.testing.expectEqual(
+        signature_scheme_ed25519,
+        parsed.scheme,
+    );
+    try verifyCertificateVerify(&public_key, parsed, &transcript_hash);
+
+    var wrong_public_key = public_key;
+    wrong_public_key[0] ^= 1;
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        (ServerIdentity{
+            .certificate_chain = &.{&wrong_public_key},
+            .signer = signer,
+        }).validate(),
+    );
 }

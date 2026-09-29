@@ -7,6 +7,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.crypto.aes_gcm, "Context"));
     try std.testing.expect(@hasDecl(vail.crypto, "mac"));
     try std.testing.expect(@hasDecl(vail.crypto, "memory"));
+    try std.testing.expect(@hasDecl(vail.crypto, "rsa"));
     try std.testing.expect(@hasDecl(vail.crypto, "sha256"));
     try std.testing.expect(@hasDecl(vail.crypto, "sm2"));
     try std.testing.expect(@hasDecl(vail.crypto, "sm3"));
@@ -29,6 +30,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.quic, "transport_parameters"));
     try std.testing.expect(@hasDecl(vail, "tls"));
     try std.testing.expect(@hasDecl(vail.tls, "auth"));
+    try std.testing.expect(@hasDecl(vail.tls, "certificate_compression"));
     try std.testing.expect(@hasDecl(vail.tls, "client_auth"));
     try std.testing.expect(@hasDecl(vail.tls, "client_handshake"));
     try std.testing.expect(@hasDecl(vail.tls, "client_hello"));
@@ -50,6 +52,27 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.tls, "server_flight"));
     try std.testing.expect(@hasDecl(vail.tls, "ticket"));
     try std.testing.expect(@hasDecl(vail.tls, "ticket_keyring"));
+    try std.testing.expect(@hasDecl(vail.tls, "tls12"));
+    try std.testing.expect(@hasDecl(
+        vail.tls.tls12,
+        "exportKeyingMaterial",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls,
+        "tls12_client_connection",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.tls12_client_connection,
+        "ClientConnection",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls,
+        "tls12_server_connection",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.tls12_server_connection,
+        "ServerConnection",
+    ));
     try std.testing.expect(@hasDecl(vail.tls, "transcript"));
     try std.testing.expect(@hasDecl(vail, "x509"));
     try std.testing.expect(@hasDecl(vail.x509, "trust"));
@@ -78,6 +101,20 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(vail.tls.auth, "ServerIdentity"));
     try std.testing.expect(@hasDecl(vail.tls.auth, "Signer"));
+    try std.testing.expect(@hasDecl(vail.tls.auth, "CustomSigner"));
+    try std.testing.expect(@hasDecl(vail.tls.auth, "RsaPssSigner"));
+    try std.testing.expect(@hasDecl(
+        vail.tls.auth,
+        "verifySignedContent",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.auth,
+        "verifyTls12SignedContent",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.server_connection,
+        "IdentityResolver",
+    ));
     try std.testing.expect(@hasDecl(
         vail.tls.auth,
         "writeClientCertificateWithContext",

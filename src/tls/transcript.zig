@@ -122,6 +122,30 @@ pub fn hashFor(
     return state.digest();
 }
 
+/// Construct the transcript after a TLS 1.3 HelloRetryRequest.
+///
+/// RFC 8446 section 4.4.1 replaces ClientHello1 with a synthetic
+/// `message_hash` handshake message containing Hash(ClientHello1), then hashes
+/// the exact HelloRetryRequest bytes.
+pub fn afterHelloRetryRequest(
+    algorithm: secret.Hash,
+    first_client_hello: []const u8,
+    hello_retry_request: []const u8,
+) State {
+    const first_hash = hashFor(algorithm, &.{first_client_hello});
+    var message_hash_header = [4]u8{
+        254,
+        0,
+        0,
+        @intCast(first_hash.bytes().len),
+    };
+    var state = State.init(algorithm);
+    state.update(&message_hash_header);
+    state.update(first_hash.bytes());
+    state.update(hello_retry_request);
+    return state;
+}
+
 test "runtime transcript state extends a negotiated hash" {
     inline for ([_]secret.Hash{ .sha256, .sha384, .sm3 }) |algorithm| {
         var state = State.init(algorithm);
@@ -138,6 +162,30 @@ test "runtime transcript state extends a negotiated hash" {
             u8,
             hashFor(algorithm, &.{ "client", "server" }).bytes(),
             after.bytes(),
+        );
+    }
+}
+
+test "HelloRetryRequest transcript uses synthetic message_hash" {
+    inline for ([_]secret.Hash{ .sha256, .sha384, .sm3 }) |algorithm| {
+        const first = "first ClientHello";
+        const retry = "HelloRetryRequest";
+        const first_hash = hashFor(algorithm, &.{first});
+        const header = [_]u8{
+            254,
+            0,
+            0,
+            @intCast(first_hash.bytes().len),
+        };
+        const expected = hashFor(
+            algorithm,
+            &.{ &header, first_hash.bytes(), retry },
+        );
+        const actual = afterHelloRetryRequest(algorithm, first, retry).digest();
+        try std.testing.expectEqualSlices(
+            u8,
+            expected.bytes(),
+            actual.bytes(),
         );
     }
 }

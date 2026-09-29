@@ -1,28 +1,54 @@
 //! TLS 1.3 authentication and handshake-message primitives.
 
+pub const alert = @import("alert.zig");
 pub const auth = @import("auth.zig");
+pub const certificate_compression = @import("certificate_compression.zig");
 pub const cipher_suite = @import("cipher_suite.zig");
 pub const client_auth = @import("client_auth.zig");
+pub const client_connection = @import("client_connection.zig");
 pub const client_handshake = @import("client_handshake.zig");
 pub const client_hello = @import("client_hello.zig");
+pub const connection = @import("connection.zig");
+pub const early_data = @import("early_data.zig");
 pub const key_exchange = @import("key_exchange.zig");
 pub const key_schedule = @import("key_schedule.zig");
+pub const key_update = @import("key_update.zig");
 pub const psk = @import("psk.zig");
 pub const record = @import("record.zig");
 pub const secret = @import("secret.zig");
+pub const stream = @import("stream.zig");
+pub const traffic = @import("traffic.zig");
 pub const server_hello = @import("server_hello.zig");
 pub const server_handshake = @import("server_handshake.zig");
+pub const server_connection = @import("server_connection.zig");
 pub const server_flight = @import("server_flight.zig");
 pub const ticket = @import("ticket.zig");
 pub const ticket_keyring = @import("ticket_keyring.zig");
+pub const tls12 = @import("tls12.zig");
+pub const tls12_client_connection = @import("tls12_client_connection.zig");
+pub const tls12_handshake = @import("tls12_handshake.zig");
+pub const tls12_server_connection = @import("tls12_server_connection.zig");
 pub const transcript = @import("transcript.zig");
 
 test {
     _ = @import("tests.zig");
+    _ = alert;
+    _ = certificate_compression;
     _ = client_hello;
     _ = client_handshake;
+    _ = client_connection;
+    _ = connection;
+    _ = early_data;
+    _ = key_update;
     _ = record;
+    _ = stream;
+    _ = traffic;
+    _ = tls12;
+    _ = tls12_client_connection;
+    _ = tls12_handshake;
+    _ = tls12_server_connection;
     _ = server_hello;
     _ = server_handshake;
+    _ = server_connection;
     _ = server_flight;
 }

@@ -6,15 +6,23 @@
 
 const std = @import("std");
 const auth = @import("auth.zig");
+const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
 
 pub const handshake_type_client_hello: u8 = 0x01;
 pub const ext_server_name: u16 = 0x0000;
+pub const ext_status_request: u16 = 0x0005;
 pub const ext_supported_groups: u16 = 0x000a;
 pub const ext_signature_algorithms: u16 = 0x000d;
 pub const ext_application_layer_protocol_negotiation: u16 = 0x0010;
+pub const ext_extended_master_secret: u16 = 0x0017;
+pub const ext_compress_certificate: u16 =
+    certificate_compression.extension_type_compress_certificate;
+pub const ext_early_data: u16 = 0x002a;
 pub const ext_quic_transport_parameters: u16 = 0x0039;
+pub const ext_renegotiation_info: u16 = 0xff01;
 pub const ext_supported_versions: u16 = 0x002b;
+pub const ext_cookie: u16 = 0x002c;
 pub const ext_psk_key_exchange_modes: u16 = 0x002d;
 pub const ext_key_share: u16 = 0x0033;
 pub const ext_pre_shared_key: u16 = 0x0029;
@@ -37,7 +45,37 @@ pub const WriteOptions = struct {
     x25519_public_key: [32]u8,
     cipher_suites: []const cipher_suite.Suite =
         &cipher_suite.default_preference,
+    additional_cipher_suites: []const u16 = &.{},
+    supported_versions: []const u16 = &.{tls13},
     alpn_protocols: []const []const u8 = &.{},
+    request_ocsp: bool = false,
+    offer_extended_master_secret: bool = false,
+    certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
+};
+
+pub const OfferedKeyShare = struct {
+    group: u16,
+    key_exchange: []const u8,
+};
+
+pub const FlexibleWriteOptions = struct {
+    random: [32]u8,
+    session_id: []const u8 = &.{},
+    server_name: ?[]const u8 = null,
+    /// TLS 1.3 requires a key share (or an HRR-selected retry share). TLS 1.2
+    /// ClientHellos can omit the TLS 1.3-only extension while still advertising
+    /// their ECDHE curves through supported_groups.
+    key_share: ?OfferedKeyShare = null,
+    supported_groups: []const u16 = &.{},
+    cookie: ?[]const u8 = null,
+    cipher_suites: []const cipher_suite.Suite =
+        &cipher_suite.default_preference,
+    additional_cipher_suites: []const u16 = &.{},
+    supported_versions: []const u16 = &.{tls13},
+    alpn_protocols: []const []const u8 = &.{},
+    request_ocsp: bool = false,
+    offer_extended_master_secret: bool = false,
+    certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
 };
 
 /// Write a standards-focused TLS 1.3 ClientHello for stream transports.
@@ -50,8 +88,45 @@ pub fn write(
     allocator: std.mem.Allocator,
     options: WriteOptions,
 ) (std.mem.Allocator.Error || Error)!void {
-    if (options.session_id.len > 32 or options.cipher_suites.len == 0) {
+    return writeWithKeyShare(out, allocator, .{
+        .random = options.random,
+        .session_id = options.session_id,
+        .server_name = options.server_name,
+        .key_share = .{
+            .group = 0x001d,
+            .key_exchange = &options.x25519_public_key,
+        },
+        .supported_groups = &.{0x001d},
+        .cipher_suites = options.cipher_suites,
+        .additional_cipher_suites = options.additional_cipher_suites,
+        .supported_versions = options.supported_versions,
+        .alpn_protocols = options.alpn_protocols,
+        .request_ocsp = options.request_ocsp,
+        .offer_extended_master_secret = options.offer_extended_master_secret,
+        .certificate_compression_algorithms = options.certificate_compression_algorithms,
+    });
+}
+
+/// Write a TLS 1.3 ClientHello with one caller-selected classical or hybrid
+/// key share. The matching private material should be retained through
+/// `key_exchange.ClientExchange`, not reconstructed by transport code.
+pub fn writeWithKeyShare(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    options: FlexibleWriteOptions,
+) (std.mem.Allocator.Error || Error)!void {
+    if (options.session_id.len > 32 or
+        (options.cipher_suites.len == 0 and
+            options.additional_cipher_suites.len == 0))
+    {
         return error.InvalidClientHello;
+    }
+    if (options.key_share) |share| {
+        if (share.key_exchange.len == 0 or
+            share.key_exchange.len > std.math.maxInt(u16))
+        {
+            return error.InvalidClientHello;
+        }
     }
     var extensions: std.ArrayList(u8) = .empty;
     defer extensions.deinit(allocator);
@@ -74,16 +149,85 @@ pub fn write(
         );
     }
 
-    var groups: std.ArrayList(u8) = .empty;
-    defer groups.deinit(allocator);
-    try appendInt(&groups, allocator, u16, 2);
-    try appendInt(&groups, allocator, u16, 0x001d);
-    try appendExtension(
-        &extensions,
-        allocator,
-        ext_supported_groups,
-        groups.items,
-    );
+    if (options.request_ocsp) {
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_status_request,
+            &.{ 1, 0, 0, 0, 0 },
+        );
+    }
+
+    if (options.certificate_compression_algorithms.len != 0) {
+        certificate_compression.validateAlgorithms(
+            options.certificate_compression_algorithms,
+        ) catch return error.InvalidClientHello;
+        var algorithms: std.ArrayList(u8) = .empty;
+        defer algorithms.deinit(allocator);
+        try algorithms.append(
+            allocator,
+            @intCast(options.certificate_compression_algorithms.len * 2),
+        );
+        for (options.certificate_compression_algorithms) |algorithm| {
+            try appendInt(
+                &algorithms,
+                allocator,
+                u16,
+                @intFromEnum(algorithm),
+            );
+        }
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_compress_certificate,
+            algorithms.items,
+        );
+    }
+
+    if (options.offer_extended_master_secret) {
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_extended_master_secret,
+            &.{},
+        );
+    }
+
+    var default_group: [1]u16 = undefined;
+    const offered_groups: []const u16 = if (options.supported_groups.len != 0)
+        options.supported_groups
+    else if (options.key_share) |share| blk: {
+        default_group[0] = share.group;
+        break :blk &default_group;
+    } else &.{};
+    if (offered_groups.len > std.math.maxInt(u16) / 2) {
+        return error.InvalidClientHello;
+    }
+    var includes_key_share = options.key_share == null;
+    for (offered_groups, 0..) |group, index| {
+        if (options.key_share) |share| {
+            if (group == share.group) includes_key_share = true;
+        }
+        for (offered_groups[0..index]) |previous| {
+            if (group == previous) return error.InvalidClientHello;
+        }
+    }
+    if (!includes_key_share) return error.InvalidClientHello;
+
+    if (offered_groups.len != 0) {
+        var groups: std.ArrayList(u8) = .empty;
+        defer groups.deinit(allocator);
+        try appendInt(&groups, allocator, u16, offered_groups.len * 2);
+        for (offered_groups) |group| {
+            try appendInt(&groups, allocator, u16, group);
+        }
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_supported_groups,
+            groups.items,
+        );
+    }
 
     const signature_schemes = [_]u16{
         auth.signature_scheme_ecdsa_secp256r1_sha256,
@@ -145,25 +289,70 @@ pub fn write(
         );
     }
 
-    try appendExtension(
-        &extensions,
-        allocator,
-        ext_supported_versions,
-        &.{ 2, 0x03, 0x04 },
-    );
+    if (options.supported_versions.len != 0) {
+        if (options.supported_versions.len > std.math.maxInt(u8) / 2) {
+            return error.InvalidClientHello;
+        }
+        var versions: std.ArrayList(u8) = .empty;
+        defer versions.deinit(allocator);
+        try versions.append(
+            allocator,
+            @intCast(options.supported_versions.len * 2),
+        );
+        for (options.supported_versions, 0..) |version, index| {
+            for (options.supported_versions[0..index]) |previous| {
+                if (version == previous) return error.InvalidClientHello;
+            }
+            try appendInt(&versions, allocator, u16, version);
+        }
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_supported_versions,
+            versions.items,
+        );
+    }
 
-    var shares: std.ArrayList(u8) = .empty;
-    defer shares.deinit(allocator);
-    try appendInt(&shares, allocator, u16, 4 + 32);
-    try appendInt(&shares, allocator, u16, 0x001d);
-    try appendInt(&shares, allocator, u16, 32);
-    try shares.appendSlice(allocator, &options.x25519_public_key);
-    try appendExtension(
-        &extensions,
-        allocator,
-        ext_key_share,
-        shares.items,
-    );
+    if (options.cookie) |cookie| {
+        if (cookie.len == 0 or cookie.len > std.math.maxInt(u16)) {
+            return error.InvalidClientHello;
+        }
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        try appendInt(&payload, allocator, u16, cookie.len);
+        try payload.appendSlice(allocator, cookie);
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_cookie,
+            payload.items,
+        );
+    }
+
+    if (options.key_share) |share| {
+        var shares: std.ArrayList(u8) = .empty;
+        defer shares.deinit(allocator);
+        try appendInt(
+            &shares,
+            allocator,
+            u16,
+            4 + share.key_exchange.len,
+        );
+        try appendInt(&shares, allocator, u16, share.group);
+        try appendInt(
+            &shares,
+            allocator,
+            u16,
+            share.key_exchange.len,
+        );
+        try shares.appendSlice(allocator, share.key_exchange);
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_key_share,
+            shares.items,
+        );
+    }
 
     var suites: std.ArrayList(u8) = .empty;
     defer suites.deinit(allocator);
@@ -177,6 +366,17 @@ pub fn write(
             u16,
             suite.wireValue(),
         );
+    }
+    for (options.additional_cipher_suites, 0..) |suite, index| {
+        for (options.additional_cipher_suites[0..index]) |previous| {
+            if (suite == previous) return error.InvalidClientHello;
+        }
+        for (options.cipher_suites) |tls13_suite| {
+            if (suite == tls13_suite.wireValue()) {
+                return error.InvalidClientHello;
+            }
+        }
+        try appendInt(&suites, allocator, u16, suite);
     }
     if (suites.items.len > std.math.maxInt(u16) or
         extensions.items.len > std.math.maxInt(u16))
@@ -209,6 +409,10 @@ pub const Parsed = struct {
     cipher_suites: []const u8,
     compression_methods: []const u8,
     server_name: ?[]const u8 = null,
+    requests_ocsp: bool = false,
+    offers_extended_master_secret: bool = false,
+    offers_secure_renegotiation: bool = false,
+    certificate_compression_algorithms: []const u8 = &.{},
     supported_groups: []const u8 = &.{},
     signature_algorithms: []const u8 = &.{},
     alpn_protocols: []const u8 = &.{},
@@ -216,13 +420,19 @@ pub const Parsed = struct {
     supported_versions: []const u8 = &.{},
     psk_key_exchange_modes: []const u8 = &.{},
     key_shares: []const u8 = &.{},
+    cookie: ?[]const u8 = null,
     pre_shared_key: ?[]const u8 = null,
+    early_data: bool = false,
 
     pub fn offersTls13(self: Parsed) bool {
+        return self.supportsVersion(tls13);
+    }
+
+    pub fn supportsVersion(self: Parsed, target: u16) bool {
         var pos: usize = 0;
         while (pos < self.supported_versions.len) : (pos += 2) {
             if (pos + 2 > self.supported_versions.len) return false;
-            if (std.mem.readInt(u16, self.supported_versions[pos..][0..2], .big) == tls13) {
+            if (std.mem.readInt(u16, self.supported_versions[pos..][0..2], .big) == target) {
                 return true;
             }
         }
@@ -236,6 +446,89 @@ pub const Parsed = struct {
             if (std.mem.readInt(u16, self.cipher_suites[pos..][0..2], .big) == suite) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    pub fn supportsSignatureScheme(
+        self: Parsed,
+        target_scheme: u16,
+    ) Error!bool {
+        if (self.signature_algorithms.len == 0) return false;
+        var pos: usize = 0;
+        const algorithms = try readU16Vector(
+            self.signature_algorithms,
+            &pos,
+        );
+        if (pos != self.signature_algorithms.len or
+            algorithms.len == 0 or algorithms.len % 2 != 0)
+        {
+            return error.InvalidClientHello;
+        }
+        var algorithm_pos: usize = 0;
+        while (algorithm_pos < algorithms.len) : (algorithm_pos += 2) {
+            if (std.mem.readInt(
+                u16,
+                algorithms[algorithm_pos..][0..2],
+                .big,
+            ) == target_scheme) return true;
+        }
+        return false;
+    }
+
+    pub fn supportsAlpnProtocol(
+        self: Parsed,
+        target_protocol: []const u8,
+    ) Error!bool {
+        if (self.alpn_protocols.len == 0) return false;
+        var pos: usize = 0;
+        const protocols = try readU16Vector(self.alpn_protocols, &pos);
+        if (pos != self.alpn_protocols.len or protocols.len == 0) {
+            return error.InvalidClientHello;
+        }
+        var protocol_pos: usize = 0;
+        while (protocol_pos < protocols.len) {
+            const protocol = try readU8Vector(protocols, &protocol_pos);
+            if (protocol.len == 0) return error.InvalidClientHello;
+            if (std.mem.eql(u8, protocol, target_protocol)) return true;
+        }
+        return false;
+    }
+
+    pub fn supportsGroup(self: Parsed, target_group: u16) Error!bool {
+        if (self.supported_groups.len == 0) return false;
+        var pos: usize = 0;
+        const groups = try readU16Vector(self.supported_groups, &pos);
+        if (pos != self.supported_groups.len or
+            groups.len == 0 or groups.len % 2 != 0)
+        {
+            return error.InvalidClientHello;
+        }
+        var group_pos: usize = 0;
+        while (group_pos < groups.len) : (group_pos += 2) {
+            if (std.mem.readInt(
+                u16,
+                groups[group_pos..][0..2],
+                .big,
+            ) == target_group) return true;
+        }
+        return false;
+    }
+
+    pub fn supportsCertificateCompression(
+        self: Parsed,
+        algorithm: certificate_compression.Algorithm,
+    ) bool {
+        var pos: usize = 0;
+        while (pos < self.certificate_compression_algorithms.len) : (pos += 2) {
+            const offered: certificate_compression.Algorithm = @enumFromInt(
+                std.mem.readInt(
+                    u16,
+                    self.certificate_compression_algorithms[pos..][0..2],
+                    .big,
+                ),
+            );
+            if (offered == algorithm) return true;
         }
         return false;
     }
@@ -290,6 +583,7 @@ pub fn parse(bytes: []const u8) Error!Parsed {
         .cipher_suites = cipher_suites,
         .compression_methods = compression_methods,
     };
+    parsed.offers_secure_renegotiation = parsed.hasCipherSuite(0x00ff);
     if (pos == bytes.len) return parsed;
     const extensions = try readU16Vector(bytes, &pos);
     if (pos != bytes.len) return error.InvalidClientHello;
@@ -302,14 +596,36 @@ pub fn parse(bytes: []const u8) Error!Parsed {
         seen.set(typ);
         switch (typ) {
             ext_server_name => parsed.server_name = try parseSni(payload),
+            ext_status_request => {
+                parsed.requests_ocsp = try parseStatusRequest(payload);
+            },
             ext_supported_groups => parsed.supported_groups = payload,
             ext_signature_algorithms => parsed.signature_algorithms = payload,
             ext_application_layer_protocol_negotiation => parsed.alpn_protocols = payload,
+            ext_extended_master_secret => {
+                if (payload.len != 0) return error.InvalidClientHello;
+                parsed.offers_extended_master_secret = true;
+            },
+            ext_compress_certificate => {
+                parsed.certificate_compression_algorithms =
+                    try parseCertificateCompressionAlgorithms(payload);
+            },
             ext_quic_transport_parameters => parsed.quic_transport_parameters = payload,
             ext_supported_versions => parsed.supported_versions = try parseSupportedVersions(payload),
+            ext_cookie => parsed.cookie = try parseCookie(payload),
+            ext_early_data => {
+                if (payload.len != 0) return error.InvalidClientHello;
+                parsed.early_data = true;
+            },
             ext_psk_key_exchange_modes => parsed.psk_key_exchange_modes = try parseU8List(payload),
             ext_key_share => parsed.key_shares = payload,
             ext_pre_shared_key => parsed.pre_shared_key = payload,
+            ext_renegotiation_info => {
+                if (!std.mem.eql(u8, payload, &.{0})) {
+                    return error.InvalidClientHello;
+                }
+                parsed.offers_secure_renegotiation = true;
+            },
             else => {},
         }
     }
@@ -331,6 +647,53 @@ fn parseSni(payload: []const u8) Error!?[]const u8 {
     return first_host;
 }
 
+fn parseStatusRequest(payload: []const u8) Error!bool {
+    var pos: usize = 0;
+    const status_type = try readByte(payload, &pos);
+    if (status_type != 1) return false;
+    const responder_ids = try readU16Vector(payload, &pos);
+    var responder_pos: usize = 0;
+    while (responder_pos < responder_ids.len) {
+        const responder_id = try readU16Vector(
+            responder_ids,
+            &responder_pos,
+        );
+        if (responder_id.len == 0) return error.InvalidClientHello;
+    }
+    _ = try readU16Vector(payload, &pos);
+    if (pos != payload.len) return error.InvalidClientHello;
+    return true;
+}
+
+fn parseCertificateCompressionAlgorithms(
+    payload: []const u8,
+) Error![]const u8 {
+    var pos: usize = 0;
+    const algorithms = try readU8Vector(payload, &pos);
+    if (pos != payload.len or algorithms.len == 0 or
+        algorithms.len % 2 != 0)
+    {
+        return error.InvalidClientHello;
+    }
+    var current: usize = 0;
+    while (current < algorithms.len) : (current += 2) {
+        const algorithm = std.mem.readInt(
+            u16,
+            algorithms[current..][0..2],
+            .big,
+        );
+        var previous: usize = 0;
+        while (previous < current) : (previous += 2) {
+            if (algorithm == std.mem.readInt(
+                u16,
+                algorithms[previous..][0..2],
+                .big,
+            )) return error.InvalidClientHello;
+        }
+    }
+    return algorithms;
+}
+
 fn parseSupportedVersions(payload: []const u8) Error![]const u8 {
     var pos: usize = 0;
     const versions = try readU8Vector(payload, &pos);
@@ -345,6 +708,15 @@ fn parseU8List(payload: []const u8) Error![]const u8 {
     const list = try readU8Vector(payload, &pos);
     if (pos != payload.len) return error.InvalidClientHello;
     return list;
+}
+
+fn parseCookie(payload: []const u8) Error![]const u8 {
+    var pos: usize = 0;
+    const cookie = try readU16Vector(payload, &pos);
+    if (cookie.len == 0 or pos != payload.len) {
+        return error.InvalidClientHello;
+    }
+    return cookie;
 }
 
 fn readByte(bytes: []const u8, pos: *usize) Error!u8 {
@@ -381,6 +753,60 @@ fn readSlice(bytes: []const u8, pos: *usize, len: usize) Error![]const u8 {
     if (end > bytes.len) return error.InvalidClientHello;
     defer pos.* = end;
     return bytes[pos.*..end];
+}
+
+test "ClientHello writer carries an arbitrary single key share" {
+    const allocator = std.testing.allocator;
+    const hybrid_share = [_]u8{0x7a} ** 1216;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeWithKeyShare(&encoded, allocator, .{
+        .random = [_]u8{0x79} ** 32,
+        .server_name = "example.com",
+        .key_share = .{
+            .group = 0x11ec,
+            .key_exchange = &hybrid_share,
+        },
+        .supported_groups = &.{ 0x11ec, 0x001d },
+        .cookie = "retry-cookie",
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .alpn_protocols = &.{ "h3", "test" },
+    });
+    const parsed = try parse(encoded.items);
+    const share = (try parsed.keyShareForGroup(0x11ec)).?;
+    try std.testing.expectEqualSlices(
+        u8,
+        &hybrid_share,
+        share.key_exchange,
+    );
+    try std.testing.expect(try parsed.supportsAlpnProtocol("h3"));
+    try std.testing.expect(!try parsed.supportsAlpnProtocol("h2"));
+    try std.testing.expect(try parsed.supportsGroup(0x11ec));
+    try std.testing.expect(try parsed.supportsGroup(0x001d));
+    try std.testing.expectEqualStrings("retry-cookie", parsed.cookie.?);
+}
+
+test "TLS 1.2 ClientHello omits the TLS 1.3 key_share extension" {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    try writeWithKeyShare(&encoded, std.testing.allocator, .{
+        .random = [_]u8{0x2a} ** 32,
+        .server_name = "example.com",
+        .key_share = null,
+        .supported_groups = &.{0x0017},
+        .cipher_suites = &.{},
+        .additional_cipher_suites = &.{ 0xc02f, 0x00ff },
+        .supported_versions = &.{0x0303},
+        .offer_extended_master_secret = true,
+    });
+    const parsed = try parse(encoded.items);
+    try std.testing.expectEqual(@as(usize, 0), parsed.key_shares.len);
+    try std.testing.expect(try parsed.supportsGroup(0x0017));
+    try std.testing.expect(parsed.hasCipherSuite(0xc02f));
+    try std.testing.expect(parsed.hasCipherSuite(0x00ff));
+    try std.testing.expect(parsed.supportsVersion(0x0303));
+    try std.testing.expect(parsed.offers_extended_master_secret);
+    try std.testing.expect(parsed.offers_secure_renegotiation);
 }
 
 fn appendExtension(
@@ -434,9 +860,14 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
             .aes_256_gcm_sha384,
             .aes_128_gcm_sha256,
         },
+        .request_ocsp = true,
+        .certificate_compression_algorithms = &.{.zlib},
     });
     const parsed = try parse(encoded.items);
     try std.testing.expect(parsed.offersTls13());
+    try std.testing.expect(parsed.requests_ocsp);
+    try std.testing.expect(parsed.supportsCertificateCompression(.zlib));
+    try std.testing.expect(!parsed.supportsCertificateCompression(.brotli));
     try std.testing.expectEqualStrings(
         "mqtt.example",
         parsed.server_name.?,

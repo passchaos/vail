@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-out=${1:?output hex path}
+mode=${1:?mode}
+out=${2:?output hex path}
+if [[ "$mode" != "--status" ]]; then
+  echo "unsupported mode: $mode" >&2
+  exit 2
+fi
 work=$(mktemp -d)
 cleanup() {
   if [[ -n "${pid:-}" ]]; then kill "$pid" 2>/dev/null || true; fi
@@ -11,7 +16,7 @@ openssl req -newkey rsa:2048 -nodes -keyout "$work/key.pem" -x509 -days 1 -out "
 openssl s_server -accept 24443 -cert "$work/cert.pem" -key "$work/key.pem" -www >"$work/server.log" 2>&1 &
 pid=$!
 sleep 0.3
-(openssl s_client -connect 127.0.0.1:24443 -tls1_3 -servername example.com -alpn h2 -msg </dev/null > "$work/sclient_msg.txt" 2>&1 || true)
+(openssl s_client -connect 127.0.0.1:24443 -tls1_3 -servername example.com -alpn h2 -status -msg </dev/null > "$work/sclient_msg.txt" 2>&1 || true)
 python3 - "$work/sclient_msg.txt" "$out" <<'PY'
 from pathlib import Path
 import sys

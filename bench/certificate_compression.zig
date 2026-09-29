@@ -1,0 +1,86 @@
+const std = @import("std");
+const vail = @import("vail");
+
+const prepare_iterations: usize = 250;
+const decompress_iterations: usize = 5_000;
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = std.heap.smp_allocator;
+    const vectors = vail.x509.testing.path_vectors;
+    const leaf = decodeHex(vectors.leaf_hex);
+    const intermediate = decodeHex(vectors.intermediate_hex);
+    const root = decodeHex(vectors.root_hex);
+    const ocsp_response = decodeHex(vectors.ocsp_good_hex);
+
+    var certificate: std.ArrayList(u8) = .empty;
+    defer certificate.deinit(allocator);
+    try vail.tls.auth.writeCertificateWithOcsp(
+        &certificate,
+        allocator,
+        &.{ &leaf, &intermediate, &root },
+        &ocsp_response,
+    );
+
+    var checksum: u64 = 0;
+    const prepare_start = nowNs(init.io);
+    for (0..prepare_iterations) |_| {
+        var prepared = try vail.tls.certificate_compression.Prepared.initZlib(
+            allocator,
+            certificate.items,
+            .amortized,
+        );
+        checksum +%= prepared.compressed[prepared.compressed.len - 1];
+        prepared.deinit();
+    }
+    const prepare_ns = nowNs(init.io) -| prepare_start;
+
+    var prepared = try vail.tls.certificate_compression.Prepared.initZlib(
+        allocator,
+        certificate.items,
+        .amortized,
+    );
+    defer prepared.deinit();
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try prepared.view().write(&encoded, allocator);
+
+    const decompress_start = nowNs(init.io);
+    for (0..decompress_iterations) |_| {
+        const restored = try vail.tls.certificate_compression
+            .decompressCertificate(
+            allocator,
+            encoded.items,
+            &.{.zlib},
+            certificate.items.len,
+        );
+        checksum +%= restored[restored.len - 1];
+        allocator.free(restored);
+    }
+    const decompress_ns = nowNs(init.io) -| decompress_start;
+
+    std.debug.print(
+        "certificate={d} bytes compressed={d} bytes ratio={d:.2}% " ++
+            "prepare={d} ns/op decompress={d} ns/op checksum={d}\n",
+        .{
+            certificate.items.len,
+            encoded.items.len,
+            100.0 * @as(f64, @floatFromInt(encoded.items.len)) /
+                @as(f64, @floatFromInt(certificate.items.len)),
+            prepare_ns / prepare_iterations,
+            decompress_ns / decompress_iterations,
+            checksum,
+        },
+    );
+}
+
+fn decodeHex(comptime encoded: []const u8) [encoded.len / 2]u8 {
+    var result: [encoded.len / 2]u8 = undefined;
+    _ = std.fmt.hexToBytes(&result, encoded) catch unreachable;
+    return result;
+}
+
+fn nowNs(io: std.Io) u64 {
+    const timestamp = std.Io.Clock.awake.now(io).nanoseconds;
+    if (timestamp <= 0) return 0;
+    return std.math.cast(u64, timestamp) orelse std.math.maxInt(u64);
+}

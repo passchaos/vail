@@ -46,6 +46,20 @@ pub const Suite = enum(u16) {
         };
     }
 
+    /// Conservative TLS record confidentiality limit per traffic-secret
+    /// generation. AES-GCM follows the 2^24 full-size-record bound used to
+    /// keep distinguishing advantage below 2^-60. SM4-GCM uses the same
+    /// conservative GCM bound pending a tighter algorithm-specific analysis.
+    pub fn tlsConfidentialityLimit(self: Suite) u64 {
+        return switch (self) {
+            .aes_128_gcm_sha256,
+            .aes_256_gcm_sha384,
+            .sm4_gcm_sm3,
+            => @as(u64, 1) << 24,
+            .chacha20_poly1305_sha256 => std.math.maxInt(u64),
+        };
+    }
+
     /// RFC 9001 §6.6 per-key packet confidentiality limits.
     pub fn confidentialityLimit(self: Suite) u64 {
         return switch (self) {

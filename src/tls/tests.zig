@@ -1,5 +1,6 @@
 const std = @import("std");
 const auth = @import("auth.zig");
+const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const client_auth = @import("client_auth.zig");
 const key_schedule = @import("key_schedule.zig");
@@ -264,11 +265,12 @@ test "CertificateRequest advertises built-in signature schemes" {
     const allocator = std.testing.allocator;
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
-    try client_auth.writeRequest(
+    try client_auth.writeRequestWithCompression(
         &encoded,
         allocator,
         "request",
         &.{"ca-subject"},
+        &.{.zlib},
     );
     const parsed = try client_auth.parseRequest(encoded.items);
     try std.testing.expectEqualStrings("request", parsed.request_context);
@@ -282,6 +284,8 @@ test "CertificateRequest advertises built-in signature schemes" {
     try std.testing.expect(parsed.supports_rsa_pss_pss_sha384);
     try std.testing.expect(parsed.supports_rsa_pss_pss_sha512);
     try std.testing.expect(parsed.supports_sm2sig_sm3);
+    try std.testing.expect(parsed.supportsCertificateCompression(.zlib));
+    try std.testing.expect(!parsed.supportsCertificateCompression(.brotli));
 }
 
 test "optional client Certificate supports an empty chain" {
@@ -844,6 +848,78 @@ test "RSA-PSS/RSAE SHA-384 and SHA-512 CertificateVerify validate" {
             ),
         );
     }
+}
+
+test "pure Zig RSA-PSS signer emits TLS CertificateVerify" {
+    const allocator = std.testing.allocator;
+    const vector = @import("../crypto/testdata/rsa_signing.zig");
+    var private_key_der: [vector.private_key_pkcs8_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(
+        &private_key_der,
+        vector.private_key_pkcs8_hex,
+    );
+    var certificate: [vector.certificate_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&certificate, vector.certificate_hex);
+    const private_key = try @import("../crypto/rsa.zig").PrivateKey.fromDer(
+        &private_key_der,
+    );
+    var prepared_key = try private_key.prepare();
+    defer prepared_key.deinit();
+    const transcript_hash = [_]u8{0x5c} ** 32;
+
+    inline for (.{
+        .{
+            .scheme = auth.signature_scheme_rsa_pss_rsae_sha256,
+        },
+        .{
+            .scheme = auth.signature_scheme_rsa_pss_rsae_sha384,
+        },
+        .{
+            .scheme = auth.signature_scheme_rsa_pss_rsae_sha512,
+        },
+    }) |case| {
+        const signer = auth.Signer{ .rsa_pss = .{
+            .prepared_key = &prepared_key,
+            .signature_scheme = case.scheme,
+            .io = std.testing.io,
+        } };
+        try (auth.ServerIdentity{
+            .certificate_chain = &.{&certificate},
+            .signer = signer,
+        }).validate();
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try auth.writeCertificateVerify(
+            &encoded,
+            allocator,
+            signer,
+            &transcript_hash,
+        );
+        const parsed = try auth.parseCertificateVerify(encoded.items);
+        try std.testing.expectEqual(case.scheme, parsed.scheme);
+        try auth.verifyCertificateVerify(
+            &certificate,
+            parsed,
+            &transcript_hash,
+        );
+    }
+
+    const other_vector = @import("test_vectors/rsa_pss_sha256.zig");
+    var other_certificate: [other_vector.certificate_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(
+        &other_certificate,
+        other_vector.certificate_hex,
+    );
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        (auth.ServerIdentity{
+            .certificate_chain = &.{&other_certificate},
+            .signer = .{ .rsa_pss = .{
+                .prepared_key = &prepared_key,
+                .io = std.testing.io,
+            } },
+        }).validate(),
+    );
 }
 
 test "RSA-PSS/PSS CertificateVerify enforces the SPKI algorithm" {

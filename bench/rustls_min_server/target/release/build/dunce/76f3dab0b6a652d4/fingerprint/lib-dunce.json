@@ -1,0 +1,1 @@
+{"rustc":3843272546039198354,"features":"[]","declared_features":"[]","target":2507403751003635712,"profile":17078157726716824978,"path":8179961014924282724,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"release/build/dunce/76f3dab0b6a652d4/fingerprint/dep-lib-dunce","checksum":false}}],"rustflags":["-Ctarget-cpu=native"],"config":8362119626465528914,"compile_kind":0}

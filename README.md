@@ -12,15 +12,35 @@ The current foundation provides:
 - TLS 1.3 ClientHello parsing, encrypted server-handshake flight construction,
   ServerHello/EncryptedExtensions, Certificate, CertificateVerify, Finished, and
   AEAD record-protection codecs;
+- incremental TLS 1.3 client/server stream states with record and handshake
+  reassembly, internally owned classical/hybrid key exchange, authenticated
+  transition to application traffic, HelloRetryRequest with RFC 8446
+  `message_hash` transcripts and cookies, automatic sequence numbers and AEAD
+  usage limits, KeyUpdate generations, and bidirectional `close_notify`;
 - Ed25519, ECDSA P-256, ECDSA P-384, and SM2/SM3 verifier
-  implementations, plus RSA-PSS/RSAE SHA-256 X.509 CertificateVerify and DER
-  RSAPublicKey pin verification. TLS P-256 verification uses the curve's public
+  implementations, plus RSA-PSS/RSAE SHA-256/384/512 X.509 CertificateVerify
+  and DER RSAPublicKey pin verification. A built-in pure-Zig RSA signer accepts
+  strict PKCS#1 or unencrypted PKCS#8 keys, uses fresh per-signature PSS salt,
+  and performs CRT private operations through Zig std's constant-time finite-
+  field implementation. TLS P-256 verification uses the curve's public
   double-scalar primitive for the ECDSA verification equation, with
   deterministic equivalence and malformed-scalar tests against Zig's generic
   verifier;
-- type-safe server identities and pinned-key client verification;
+- type-safe server identities, allocation-free custom signer callbacks, and
+  pinned-key client verification; the server can select identities by exact or
+  one-label wildcard SNI and client signature-scheme compatibility, while
+  keeping per-identity OCSP and precompressed Certificate variants together;
 - CertificateRequest codec and mTLS policy types;
-- X.509 chain, hostname, validity, custom-bundle, and system-CA verification,
+- RFC 8879 TLS 1.3 certificate compression in both directions using Zig std's
+  zlib implementation, with reusable server/client precompression, transcript-
+  correct CompressedCertificate processing, exact decompressed lengths, zlib
+  checksum verification, and configurable decompression limits;
+- X.509 bounded path construction over unordered intermediates, alternate
+  issuers and cross-signs, with hostname, validity, custom-bundle, and
+  system-CA verification; explicit depth/candidate/certificate budgets prevent
+  attacker-controlled path explosion, DNS and IPv4/IPv6 Name Constraints
+  intersect across the chosen server path, and literal IP server identities
+  match only exact iPAddress SAN values rather than falling back to CN/dNSName;
   plus a client-certificate bundle verifier that omits hostname matching and
   enforces the clientAuth endpoint purpose for mTLS server policy.
   Strict subject identity extraction returns either an owned, unambiguous UTF-8
@@ -31,7 +51,18 @@ The current foundation provides:
   v1.5/SHA-256 client CAs,
   including issuer and
   cRLSign checks, strict DER/extensions, update windows, authenticated
-  signatures, and leaf serial lookup;
+  signatures, and leaf serial lookup. Authenticated CRL sets plug directly into
+  server/client trust policy with fail-open-if-absent or require-status modes
+  and are bound to both issuer Subject and public key;
+- strict RFC 6960 BasicOCSPResponse verification for issuer-signed responses
+  and directly issued delegated responders with mandatory OCSPSigning EKU,
+  including CertID binding, responder identity, responder certificate
+  validity/KeyUsage, SHA-1/SHA-256 issuer hashes, ECDSA/RSA/Ed25519 signatures,
+  bounded embedded certificates, response time windows, and
+  good/revoked/unknown handling. TLS 1.3 clients can request stapling, servers
+  attach the configured response only when requested, and bundle trust policy
+  supports ignore/if-present/require modes. Response and SingleResponse
+  extensions currently fail closed;
   An exact certificate or cross-signed form with the same Subject and complete
   SubjectPublicKeyInfo is recognized as a configured trust anchor without
   verifying the anchor's issuer signature. Hostname and validity remain
@@ -53,8 +84,15 @@ The current foundation provides:
 - Registered classical-first secp256r1MLKEM768 (`0x11eb`) and
   secp384r1MLKEM1024 (`0x11ed`) TLS groups, including exact SEC1/ML-KEM wire
   layouts, 64/80-byte hybrid HKDF inputs, and shared generic secret handling.
-- TLS 1.3 PSK-DHE ClientHello/ServerHello extensions, constant-time binders,
-  early-data signaling, ticket-age validation, and NewSessionTicket codec.
+- TLS 1.3 PSK-DHE resumption integrated into client/server states, including
+  constant-time SHA-256/SHA-384/SM3 binders, HRR binder transcripts,
+  ServerHello identity selection, ticket-age validation, and stateless tickets
+  bound to their issuing suite, server identity, and ALPN. Authenticated
+  NewSessionTicket messages can be converted directly into owned client cache
+  entries. Stream 0-RTT installs separate early traffic keys, enforces the
+  authenticated ticket byte limit, fails closed without an anti-replay guard,
+  handles accepted/rejected early records, emits EndOfEarlyData, and disables
+  early data after HelloRetryRequest.
 - Allocation-free AES-256-GCM stateless session tickets with origin/ALPN
   associated-data binding and bounded current/history key rotation.
 - TLS 1.3 record protection for AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305,
@@ -62,6 +100,25 @@ The current foundation provides:
   Retry integrity, traffic-secret, and key-update crypto helpers, including
   version-specific QUIC v1/v2 labels, nonce derivation, header protection, and
   suite confidentiality/integrity limits.
+- TLS 1.2 cryptographic foundations for ECDHE-ECDSA/ECDHE-RSA AES-GCM and
+  ChaCha20-Poly1305 suites: SHA-256/SHA-384 PRFs, ordinary and RFC 7627
+  extended master secrets, Finished values, key-block separation, explicit
+  AES-GCM and XOR ChaCha nonces, authenticated record headers, automatic
+  sequence numbers, conservative AEAD usage limits, and allocation-free RFC
+  5705 exporters. Incremental client and server states negotiate all six modern
+  ECDHE-RSA/ECDHE-ECDSA AES-128-GCM, AES-256-GCM, and ChaCha20-Poly1305 suites
+  over P-256 or P-384, require Extended Master Secret and RFC 5746 signaling,
+  authenticate ephemeral parameters with RSA-PSS or ECDSA using TLS 1.2's
+  hash-only signature-scheme semantics, verify both Finished messages, retain
+  authenticated peer identity/ALPN on the client, and transition to
+  bidirectional application records. Handshake-time TLS 1.2 client
+  authentication supports required or optional certificates, authenticates
+  the client chain through the configured trust policy, verifies
+  CertificateVerify possession, and transfers an owned peer chain into the
+  established server state. Stateful TLS 1.2 session-ID resumption uses the
+  abbreviated ServerHello/CCS/Finished exchange and binds cached master
+  secrets to their suite, server identity, ALPN, and expiration time. RFC 5077
+  TLS 1.2 session tickets are not yet included.
 - Compile-time-specialized SHA-256/SHA-384 TLS 1.3 schedules, runtime
   hash-bound secrets/transcripts, 32/48-byte PSK binders, CertificateVerify,
   Finished, exporter keying material, resumption PSKs, and stateless tickets.
@@ -109,12 +166,31 @@ AES-256-GCM vectors, Zig's one-shot implementations across block-boundary
 message lengths, authentication-failure cases, TLS record round trips, and
 QUIC packet vectors.
 Run `zig build -Doptimize=ReleaseFast bench-quic-traffic-crypto` for the local
-QUIC traffic-protection benchmark.
+QUIC traffic-protection benchmark, or
+`zig build -Doptimize=ReleaseFast bench-tls-record-crypto` for the stateful TLS
+record benchmark with automatic nonce sequencing and AEAD usage limits.
+`zig build -Doptimize=ReleaseFast bench-tls-server-handshake` measures managed
+X25519/Ed25519 TLS 1.3 server flights, including key exchange, signing, and
+record protection.
+`zig build -Doptimize=ReleaseFast bench-x509-path` measures bounded unordered
+and cross-signed certificate-path construction plus issuer/delegated OCSP.
+`zig build -Doptimize=ReleaseFast bench-certificate-compression` reports the
+RFC 8879 zlib wire-size ratio, amortized preparation cost, and per-handshake
+decompression cost.
+`zig build -Doptimize=ReleaseFast bench-rsa-pss` measures the built-in
+constant-time RSA-2048-PSS signing path.
+`zig build -Doptimize=ReleaseFast bench-tls12-record-crypto` measures the
+TLS 1.2 AES-GCM and ChaCha20-Poly1305 record paths.
+`zig build -Doptimize=ReleaseFast bench-tls12-server-handshake` measures the
+TLS 1.2 P-256/RSA-2048-PSS authenticated server flight.
+`zig build -Doptimize=ReleaseFast bench-tls12-client-handshake` measures TLS
+1.2 ClientHello generation, RSA-PSS ServerKeyExchange verification, P-256
+ECDHE, EMS derivation, and the encrypted client flight.
 
 ClientHello interop checks are available with `zig build interop-openssl-clienthello`
 and `zig build interop-rustls-clienthello`; both feed real OpenSSL/rustls
 ClientHello wire bytes into Vail's parser and verify TLS 1.3, SNI, cipher-suite,
-and key-share extraction.
+key-share, and OCSP `status_request` extraction.
 
 `zig build interop-openssl-min-server` runs the experimental minimal TLS 1.3
 server harness against `openssl s_client` and verifies that OpenSSL reaches
@@ -123,14 +199,49 @@ Finished after parsing Vail's ServerHello, encrypted EncryptedExtensions,
 Certificate, CertificateVerify, and Finished. The Vail harness decrypts and
 verifies that client Finished, sends encrypted `close_notify`, and requires
 OpenSSL to observe warning `close_notify`. `zig build interop-rustls-min-server`
-performs the same minimal-server check with rustls and requires both rustls
-connected state and Vail-side client Finished verification.
+performs the same minimal-server check with a zlib-enabled rustls client,
+requires RFC 8879 certificate compression to be negotiated, and checks both
+rustls connected state and Vail-side client Finished verification.
+`zig build interop-openssl-min-client` exercises the reverse direction: Vail's
+incremental client state authenticates an OpenSSL server and its Finished,
+sends its encrypted Finished, and verifies encrypted application data. The
+server and client interop paths deliberately force a P-256
+HelloRetryRequest, covering both directions of the retry state machine.
+`zig build interop-rustls-min-client` exercises Vail's client against a
+zlib-enabled rustls server and requires Vail to authenticate a compressed
+Certificate message before exchanging application data.
+`zig build interop-openssl-tls12-server` and
+`zig build interop-rustls-tls12-server` exercise Vail's incremental TLS 1.2
+server, requiring ECDHE-RSA-AES128-GCM-SHA256, Extended Master Secret,
+RSA-PSS-authenticated ephemeral P-256 parameters, verified client/server
+Finished messages, and bidirectional application data.
+`zig build interop-openssl-tls12-client` and
+`zig build interop-rustls-tls12-client` exercise the reverse direction and
+require the Vail client to authenticate the server's certificate-bound
+ServerKeyExchange, verify the server Finished, negotiate `http/1.1`, and
+exchange application data. Rust interoperability fixtures use rustls 0.23's
+AWS-LC provider and remain test-only dependencies; Vail itself links no
+external cryptographic library.
+`zig build interop-openssl-tls12-client-matrix` additionally forces all six
+TLS 1.2 AEAD suites, both RSA and ECDSA authentication, and P-256/P-384 ECDHE.
+`zig build interop-openssl-tls12-mtls-client` and
+`zig build interop-openssl-tls12-mtls-server` cover CertificateRequest,
+client Certificate/CertificateVerify possession, mandatory-certificate policy,
+and application data in both mTLS directions.
+`zig build interop-openssl-tls12-resumption-client` and
+`zig build interop-openssl-tls12-resumption-server` run a full connection and
+a second abbreviated session-ID connection in each direction, verify the
+resumed Finished transcript, and exchange application data under fresh record
+keys.
 
 TLS 1.3 server flights can also emit CertificateRequest and retain an
 incremental negotiated-hash transcript. `tls.client_auth.verifyClientFlight`
 verifies required or optional client Certificate, CertificateVerify
-possession, trust policy, and Finished messages; stream/QUIC adapters remain
-responsible for record reassembly and alert policy.
+possession, trust policy, and Finished messages. `tls.server_connection`
+integrates both required authenticated mTLS and optional anonymous client
+flights, enforces message ordering across arbitrary record fragmentation, and
+transfers an owned authenticated client chain into established state. Lower-
+level transports may still use the codecs directly.
 
 For the client role, `tls.client_hello.write` emits a stream-oriented TLS 1.3
 ClientHello without QUIC-only extensions, while
@@ -140,8 +251,9 @@ response. Its result deep-owns the authenticated server certificate chain so a
 downstream transport can preserve peer identity after releasing its encrypted
 handshake buffer. The same result retains the authenticated negotiated cipher
 suite, allowing a transport to expose both its AEAD choice and transcript hash
-without reparsing released ServerHello bytes. Socket ownership and encrypted-
-record reassembly remain downstream transport concerns.
+without reparsing released ServerHello bytes. `tls.client_connection` composes
+that verifier with incremental record processing; socket ownership remains a
+downstream transport concern.
 
 Transport integration belongs in downstream libraries such as `netz`; reusable
 cryptography and TLS state belong here.

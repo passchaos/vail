@@ -1,0 +1,9 @@
+[package]
+name = "vail-rustls-min-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "zlib"] }
+rustls-pemfile = "2"

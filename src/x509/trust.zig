@@ -5,12 +5,63 @@
 
 const std = @import("std");
 const auth = @import("../tls/auth.zig");
+const ocsp = @import("ocsp.zig");
 
 const Certificate = std.crypto.Certificate;
+
+pub const PathLimits = struct {
+    max_depth: usize = 8,
+    max_candidate_checks: usize = 64,
+    max_presented_certificates: usize = 16,
+};
+
+pub const RevocationStatus = enum {
+    good,
+    revoked,
+    unknown,
+};
+
+pub const RevocationPolicy = struct {
+    context: *const anyopaque,
+    check: *const fn (
+        context: *const anyopaque,
+        certificate_der: []const u8,
+        issuer_der: []const u8,
+    ) anyerror!RevocationStatus,
+    require_status: bool = false,
+
+    pub fn verify(
+        self: RevocationPolicy,
+        certificate_der: []const u8,
+        issuer_der: []const u8,
+    ) !void {
+        switch (try self.check(self.context, certificate_der, issuer_der)) {
+            .good => {},
+            .revoked => return error.CertificateRevoked,
+            .unknown => if (self.require_status) {
+                return error.CertificateRevocationStatusUnavailable;
+            },
+        }
+    }
+};
+
+const hard_max_presented_certificates = 32;
+const hard_max_depth = 16;
+const hard_max_candidate_checks = 256;
+
+pub const StapledOcspPolicy = enum {
+    ignore,
+    if_present,
+    require,
+};
 
 pub const BundleVerifier = struct {
     bundle: *const Certificate.Bundle,
     now_seconds: i64,
+    path_limits: PathLimits = .{},
+    revocation: ?RevocationPolicy = null,
+    stapled_ocsp: StapledOcspPolicy = .ignore,
+    ocsp_validation: ocsp.Policy = .{},
 
     pub fn clientVerifier(
         self: *const BundleVerifier,
@@ -31,12 +82,19 @@ pub const BundleVerifier = struct {
         const leaf = try parseCertificate(trust_context.chain[0]);
         const server_name = trust_context.server_name orelse
             return error.MissingServerName;
-        try leaf.verifyHostName(server_name);
+        const server_identity = parseServerIdentity(server_name);
+        try verifyServerIdentity(leaf, server_identity);
         try verifyChain(
             self.bundle,
             self.now_seconds,
             trust_context.chain,
             .server_auth,
+            self.path_limits,
+            self.revocation,
+            server_identity,
+            trust_context.ocsp_response,
+            self.stapled_ocsp,
+            self.ocsp_validation,
         );
     }
 
@@ -57,6 +115,8 @@ pub const BundleVerifier = struct {
 pub const ClientCertificateBundleVerifier = struct {
     bundle: *const Certificate.Bundle,
     now_seconds: i64,
+    path_limits: PathLimits = .{},
+    revocation: ?RevocationPolicy = null,
 
     pub fn clientVerifier(
         self: *const ClientCertificateBundleVerifier,
@@ -76,6 +136,12 @@ pub const ClientCertificateBundleVerifier = struct {
             self.now_seconds,
             trust_context.chain,
             .client_auth,
+            self.path_limits,
+            self.revocation,
+            null,
+            null,
+            .ignore,
+            .{},
         );
     }
 
@@ -93,6 +159,12 @@ pub const ClientCertificateBundleVerifier = struct {
 
 const EndpointPurpose = enum { server_auth, client_auth };
 
+const ServerIdentity = union(enum) {
+    dns: []const u8,
+    ip4: [4]u8,
+    ip6: [16]u8,
+};
+
 /// Validate one DER certificate as a currently usable trust anchor for TLS
 /// client authentication. This checks X.509 parsing, validity, CA constraints,
 /// keyCertSign, clientAuth EKU restrictions, and supported critical
@@ -103,10 +175,12 @@ pub fn validateClientCertificateAuthority(
 ) !void {
     const certificate = try parseCertificate(certificate_der);
     try verifyValidity(certificate, now_seconds);
-    try validateIssuerUsage(
+    try validateIssuerUsageAndNameConstraints(
         certificate_der,
         0,
         .client_auth,
+        null,
+        null,
     );
 }
 
@@ -131,34 +205,230 @@ fn verifyChain(
     now_seconds: i64,
     chain: []const []const u8,
     purpose: EndpointPurpose,
+    limits: PathLimits,
+    revocation: ?RevocationPolicy,
+    constrained_identity: ?ServerIdentity,
+    stapled_ocsp_response: ?[]const u8,
+    stapled_ocsp_policy: StapledOcspPolicy,
+    ocsp_validation: ocsp.Policy,
 ) !void {
     if (chain.len == 0) return error.EmptyCertificateChain;
-    var subject = try parseCertificate(chain[0]);
+    try validatePathLimits(limits);
+    if (chain.len > limits.max_presented_certificates) {
+        return error.CertificatePathTooManyCertificates;
+    }
+    var parsed: [hard_max_presented_certificates]Certificate.Parsed = undefined;
+    for (chain, 0..) |certificate_der, index| {
+        parsed[index] = try parseCertificate(certificate_der);
+    }
     try validateLeafUsage(chain[0], purpose);
-    var ca_below: usize = 0;
-    for (chain[1..]) |issuer_der| {
-        const issuer = try parseCertificate(issuer_der);
-        try validateIssuerUsage(issuer_der, ca_below, purpose);
-        try subject.verify(issuer, now_seconds);
-        ca_below = try countCaBelow(ca_below, issuer);
-        subject = issuer;
+    var search = PathSearch{
+        .bundle = bundle,
+        .now_seconds = now_seconds,
+        .chain = chain,
+        .parsed = parsed[0..chain.len],
+        .purpose = purpose,
+        .limits = limits,
+        .revocation = revocation,
+        .constrained_identity = constrained_identity,
+        .stapled_ocsp_response = stapled_ocsp_response,
+        .stapled_ocsp_policy = stapled_ocsp_policy,
+        .ocsp_validation = ocsp_validation,
+    };
+    try search.verifyFrom(0, 1, 0, 0);
+}
+
+const PathSearch = struct {
+    bundle: *const Certificate.Bundle,
+    now_seconds: i64,
+    chain: []const []const u8,
+    parsed: []const Certificate.Parsed,
+    purpose: EndpointPurpose,
+    limits: PathLimits,
+    revocation: ?RevocationPolicy,
+    constrained_identity: ?ServerIdentity,
+    stapled_ocsp_response: ?[]const u8,
+    stapled_ocsp_policy: StapledOcspPolicy,
+    ocsp_validation: ocsp.Policy,
+    candidate_checks: usize = 0,
+
+    fn verifyFrom(
+        self: *PathSearch,
+        subject_index: usize,
+        used: u32,
+        ca_below: usize,
+        depth: usize,
+    ) !void {
+        if (depth >= self.limits.max_depth) {
+            return error.CertificatePathTooDeep;
+        }
+        const subject = self.parsed[subject_index];
+        if (trustedEquivalentAnchor(self.bundle, subject)) |anchor| {
+            if (subject_index == 0 and self.stapled_ocsp_policy != .ignore) {
+                if (self.stapled_ocsp_response != null) {
+                    return error.CertificateOcspIssuerUnavailable;
+                }
+                if (self.stapled_ocsp_policy == .require) {
+                    return error.CertificateOcspResponseRequired;
+                }
+            }
+            try verifyValidity(subject, self.now_seconds);
+            try verifyValidity(anchor, self.now_seconds);
+            return;
+        }
+
+        var remembered_error: ?anyerror = null;
+        if (self.bundle.find(subject.issuer())) |anchor_index| {
+            try self.consumeCandidateBudget();
+            const anchor_element = try Certificate.der.Element.parse(
+                self.bundle.bytes.items,
+                anchor_index,
+            );
+            const anchor_der = self.bundle.bytes.items[anchor_index..anchor_element.slice.end];
+            const anchor = try parseCertificate(anchor_der);
+            anchor_attempt: {
+                validateIssuerUsageAndNameConstraints(
+                    anchor_der,
+                    ca_below,
+                    self.purpose,
+                    self.constrained_identity,
+                    self.chain[0],
+                ) catch |err| {
+                    remembered_error = err;
+                    break :anchor_attempt;
+                };
+                subject.verify(anchor, self.now_seconds) catch |err| {
+                    remembered_error = err;
+                    break :anchor_attempt;
+                };
+                if (self.revocation) |revocation| {
+                    revocation.verify(
+                        self.chain[subject_index],
+                        anchor_der,
+                    ) catch |err| {
+                        remembered_error = err;
+                        break :anchor_attempt;
+                    };
+                }
+                self.verifyStapledOcsp(
+                    subject_index,
+                    self.chain[subject_index],
+                    anchor_der,
+                ) catch |err| {
+                    remembered_error = err;
+                    break :anchor_attempt;
+                };
+                verifyValidity(anchor, self.now_seconds) catch |err| {
+                    remembered_error = err;
+                    break :anchor_attempt;
+                };
+                return;
+            }
+        }
+
+        for (self.parsed[1..], 1..) |issuer, issuer_index| {
+            const bit = @as(u32, 1) << @intCast(issuer_index);
+            if ((used & bit) != 0 or !std.mem.eql(
+                u8,
+                subject.issuer(),
+                issuer.subject(),
+            )) continue;
+            try self.consumeCandidateBudget();
+            validateIssuerUsageAndNameConstraints(
+                self.chain[issuer_index],
+                ca_below,
+                self.purpose,
+                self.constrained_identity,
+                self.chain[0],
+            ) catch |err| {
+                remembered_error = err;
+                continue;
+            };
+            subject.verify(issuer, self.now_seconds) catch |err| {
+                remembered_error = err;
+                continue;
+            };
+            if (self.revocation) |revocation| {
+                revocation.verify(
+                    self.chain[subject_index],
+                    self.chain[issuer_index],
+                ) catch |err| {
+                    remembered_error = err;
+                    continue;
+                };
+            }
+            self.verifyStapledOcsp(
+                subject_index,
+                self.chain[subject_index],
+                self.chain[issuer_index],
+            ) catch |err| {
+                remembered_error = err;
+                continue;
+            };
+            const next_ca_below = countCaBelow(ca_below, issuer) catch |err| {
+                remembered_error = err;
+                continue;
+            };
+            self.verifyFrom(
+                issuer_index,
+                used | bit,
+                next_ca_below,
+                depth + 1,
+            ) catch |err| {
+                remembered_error = err;
+                continue;
+            };
+            return;
+        }
+        return remembered_error orelse error.CertificateIssuerNotFound;
     }
-    if (trustedEquivalentAnchor(bundle, subject)) |anchor| {
-        try verifyValidity(subject, now_seconds);
-        try verifyValidity(anchor, now_seconds);
-        return;
+
+    fn consumeCandidateBudget(self: *PathSearch) !void {
+        if (self.candidate_checks >= self.limits.max_candidate_checks) {
+            return error.CertificatePathSearchLimitExceeded;
+        }
+        self.candidate_checks += 1;
     }
-    const anchor_index = bundle.find(subject.issuer()) orelse
-        return error.CertificateIssuerNotFound;
-    const anchor_element = try Certificate.der.Element.parse(
-        bundle.bytes.items,
-        anchor_index,
-    );
-    const anchor_der = bundle.bytes.items[anchor_index..anchor_element.slice.end];
-    const anchor = try parseCertificate(anchor_der);
-    try validateIssuerUsage(anchor_der, ca_below, purpose);
-    try verifyValidity(anchor, now_seconds);
-    try subject.verify(anchor, now_seconds);
+
+    fn verifyStapledOcsp(
+        self: *PathSearch,
+        subject_index: usize,
+        certificate_der: []const u8,
+        issuer_der: []const u8,
+    ) !void {
+        if (subject_index != 0 or self.stapled_ocsp_policy == .ignore) {
+            return;
+        }
+        const response = self.stapled_ocsp_response orelse {
+            if (self.stapled_ocsp_policy == .require) {
+                return error.CertificateOcspResponseRequired;
+            }
+            return;
+        };
+        switch (try ocsp.verify(
+            response,
+            certificate_der,
+            issuer_der,
+            self.now_seconds,
+            self.ocsp_validation,
+        )) {
+            .good => {},
+            .revoked => return error.CertificateRevoked,
+            .unknown => return error.CertificateOcspStatusUnknown,
+        }
+    }
+};
+
+fn validatePathLimits(limits: PathLimits) !void {
+    if (limits.max_depth == 0 or
+        limits.max_depth > hard_max_depth or
+        limits.max_candidate_checks == 0 or
+        limits.max_candidate_checks > hard_max_candidate_checks or
+        limits.max_presented_certificates == 0 or
+        limits.max_presented_certificates > hard_max_presented_certificates)
+    {
+        return error.InvalidCertificatePathLimits;
+    }
 }
 
 pub const SystemStore = struct {
@@ -191,6 +461,51 @@ pub const SystemStore = struct {
         };
     }
 };
+
+fn parseServerIdentity(name: []const u8) ServerIdentity {
+    const address = std.Io.net.IpAddress.parse(name, 0) catch
+        return .{ .dns = name };
+    return switch (address) {
+        .ip4 => |ip4| .{ .ip4 = ip4.bytes },
+        .ip6 => |ip6| .{ .ip6 = ip6.bytes },
+    };
+}
+
+fn verifyServerIdentity(
+    certificate: Certificate.Parsed,
+    identity: ServerIdentity,
+) !void {
+    switch (identity) {
+        .dns => |name| try certificate.verifyHostName(name),
+        .ip4 => |address| try verifyIpSubjectAltName(
+            certificate,
+            &address,
+        ),
+        .ip6 => |address| try verifyIpSubjectAltName(
+            certificate,
+            &address,
+        ),
+    }
+}
+
+fn verifyIpSubjectAltName(
+    certificate: Certificate.Parsed,
+    address: []const u8,
+) !void {
+    const encoded = certificate.subjectAltName();
+    if (encoded.len == 0) return error.CertificateHostMismatch;
+    const names = singleInner(encoded, 0x30) catch
+        return error.InvalidCertificateExtension;
+    var reader = DerReader{ .bytes = names.value };
+    while (try reader.next()) |name| {
+        if (name.tag != 0x87) continue;
+        if (name.value.len != 4 and name.value.len != 16) {
+            return error.InvalidCertificateExtension;
+        }
+        if (std.mem.eql(u8, address, name.value)) return;
+    }
+    return error.CertificateHostMismatch;
+}
 
 fn parseCertificate(der: []const u8) !Certificate.Parsed {
     return Certificate.parse(.{
@@ -262,6 +577,7 @@ const CertificateUsage = struct {
     client_auth: bool = false,
     any_extended_key_usage: bool = false,
     unsupported_critical_extension: bool = false,
+    name_constraints: ?[]const u8 = null,
 };
 
 fn validateLeafUsage(
@@ -280,6 +596,7 @@ fn validateLeafUsageProfile(
 ) !void {
     if (usage.unsupported_critical_extension or
         (usage.basic_constraints_present and usage.is_ca) or
+        usage.name_constraints != null or
         (usage.key_usage_present and !usage.digital_signature) or
         (usage.extended_key_usage_present and
             !purposeAllowed(usage, purpose) and
@@ -299,6 +616,31 @@ fn validateIssuerUsage(
         ca_below,
         purpose,
     );
+}
+
+fn validateIssuerUsageAndNameConstraints(
+    certificate_der: []const u8,
+    ca_below: usize,
+    purpose: EndpointPurpose,
+    constrained_identity: ?ServerIdentity,
+    leaf_der: ?[]const u8,
+) !void {
+    const usage = try certificateUsage(certificate_der);
+    try validateIssuerUsageProfile(usage, ca_below, purpose);
+    if (usage.name_constraints) |encoded| {
+        if (purpose != .server_auth) {
+            return error.UnsupportedCertificateNameConstraint;
+        }
+        try validateNameConstraints(
+            encoded,
+            constrained_identity orelse
+                return error.MissingServerName,
+        );
+        try validateSubjectAlternativeNamesAgainstConstraints(
+            encoded,
+            leaf_der orelse return error.InvalidCertificate,
+        );
+    }
 }
 
 fn validateIssuerUsageProfile(
@@ -400,11 +742,246 @@ fn certificateUsage(certificate_der: []const u8) !CertificateUsage {
             result.any_extended_key_usage = extended.any;
         } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x11 })) {
             // Hostname verification above consumes subjectAltName.
+        } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x1e })) {
+            if (result.name_constraints != null) {
+                return error.InvalidCertificateExtension;
+            }
+            try validateNameConstraintsSyntax(value.value);
+            result.name_constraints = value.value;
         } else if (critical) {
             result.unsupported_critical_extension = true;
         }
     }
     return result;
+}
+
+fn validateNameConstraintsSyntax(encoded: []const u8) !void {
+    _ = try parseNameConstraints(encoded, null, false);
+}
+
+fn validateDnsNameConstraints(
+    encoded: []const u8,
+    dns_name: []const u8,
+) !void {
+    return validateNameConstraints(encoded, .{ .dns = dns_name });
+}
+
+fn validateNameConstraints(
+    encoded: []const u8,
+    identity: ServerIdentity,
+) !void {
+    const result = try parseNameConstraints(encoded, identity, true);
+    if (result.excluded_match or
+        (result.saw_permitted and !result.permitted_match))
+    {
+        return error.CertificateNameConstraintViolation;
+    }
+}
+
+fn validateSubjectAlternativeNamesAgainstConstraints(
+    constraints: []const u8,
+    certificate_der: []const u8,
+) !void {
+    const certificate = try parseCertificate(certificate_der);
+    const encoded_names = certificate.subjectAltName();
+    if (encoded_names.len == 0) return;
+    const names = singleInner(encoded_names, 0x30) catch
+        return error.InvalidCertificateExtension;
+    var reader = DerReader{ .bytes = names.value };
+    while (try reader.next()) |name| {
+        switch (name.tag) {
+            0x82 => {
+                if (name.value.len == 0) {
+                    return error.InvalidCertificateExtension;
+                }
+                try validateNameConstraints(
+                    constraints,
+                    .{ .dns = name.value },
+                );
+            },
+            0x87 => {
+                if (name.value.len == 4) {
+                    try validateNameConstraints(
+                        constraints,
+                        .{ .ip4 = name.value[0..4].* },
+                    );
+                } else if (name.value.len == 16) {
+                    try validateNameConstraints(
+                        constraints,
+                        .{ .ip6 = name.value[0..16].* },
+                    );
+                } else {
+                    return error.InvalidCertificateExtension;
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+const NameConstraintResult = struct {
+    saw_permitted: bool = false,
+    permitted_match: bool = false,
+    excluded_match: bool = false,
+};
+
+fn parseNameConstraints(
+    encoded: []const u8,
+    identity: ?ServerIdentity,
+    evaluate: bool,
+) !NameConstraintResult {
+    const sequence = try singleInner(encoded, 0x30);
+    if (sequence.value.len == 0) return error.InvalidCertificateExtension;
+    var fields = DerReader{ .bytes = sequence.value };
+    var result: NameConstraintResult = .{};
+    var saw_permitted_field = false;
+    var saw_excluded_field = false;
+    while (try fields.next()) |field| {
+        const excluded = switch (field.tag) {
+            0xa0 => false,
+            0xa1 => true,
+            else => return error.UnsupportedCertificateNameConstraint,
+        };
+        if (excluded) {
+            if (saw_excluded_field) return error.InvalidCertificateExtension;
+            saw_excluded_field = true;
+        } else {
+            if (saw_permitted_field) return error.InvalidCertificateExtension;
+            saw_permitted_field = true;
+        }
+        if (field.value.len == 0) return error.InvalidCertificateExtension;
+        var subtrees = DerReader{ .bytes = field.value };
+        while (try subtrees.next()) |subtree| {
+            if (subtree.tag != 0x30) {
+                return error.InvalidCertificateExtension;
+            }
+            var subtree_fields = DerReader{ .bytes = subtree.value };
+            const base = (try subtree_fields.next()) orelse
+                return error.InvalidCertificateExtension;
+            const relevant = switch (base.tag) {
+                0x82 => blk: {
+                    if (!validDnsConstraint(base.value)) {
+                        return error.InvalidCertificateExtension;
+                    }
+                    break :blk if (identity) |name| switch (name) {
+                        .dns => true,
+                        else => false,
+                    } else false;
+                },
+                0x87 => blk: {
+                    try validateIpConstraint(base.value);
+                    break :blk if (identity) |name| switch (name) {
+                        .ip4 => base.value.len == 8,
+                        .ip6 => base.value.len == 32,
+                        else => false,
+                    } else false;
+                },
+                else => return error.UnsupportedCertificateNameConstraint,
+            };
+            while (try subtree_fields.next()) |distance| {
+                // minimum [0] is permitted only when explicitly zero;
+                // maximum [1] and non-zero minimum are unsupported.
+                if (distance.tag != 0x80 or distance.value.len != 1 or
+                    distance.value[0] != 0)
+                {
+                    return error.UnsupportedCertificateNameConstraint;
+                }
+            }
+            if (relevant and !excluded) result.saw_permitted = true;
+            if (evaluate and relevant and identityMatchesConstraint(
+                identity.?,
+                base,
+            )) {
+                if (excluded) {
+                    result.excluded_match = true;
+                } else {
+                    result.permitted_match = true;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+fn validateIpConstraint(constraint: []const u8) !void {
+    if (constraint.len != 8 and constraint.len != 32) {
+        return error.InvalidCertificateExtension;
+    }
+    const half = constraint.len / 2;
+    const address = constraint[0..half];
+    const mask = constraint[half..];
+    var saw_zero = false;
+    for (mask) |byte| {
+        var bit: u8 = 0x80;
+        while (bit != 0) : (bit >>= 1) {
+            if ((byte & bit) == 0) {
+                saw_zero = true;
+            } else if (saw_zero) {
+                return error.InvalidCertificateExtension;
+            }
+        }
+    }
+    for (address, mask) |address_byte, mask_byte| {
+        if ((address_byte & ~mask_byte) != 0) {
+            return error.InvalidCertificateExtension;
+        }
+    }
+}
+
+fn identityMatchesConstraint(
+    identity: ServerIdentity,
+    constraint: Tlv,
+) bool {
+    return switch (identity) {
+        .dns => |dns_name| constraint.tag == 0x82 and
+            dnsWithinConstraint(dns_name, constraint.value),
+        .ip4 => |address| constraint.tag == 0x87 and
+            ipWithinConstraint(&address, constraint.value),
+        .ip6 => |address| constraint.tag == 0x87 and
+            ipWithinConstraint(&address, constraint.value),
+    };
+}
+
+fn ipWithinConstraint(
+    address: []const u8,
+    constraint: []const u8,
+) bool {
+    if (constraint.len != address.len * 2) return false;
+    const subnet = constraint[0..address.len];
+    const mask = constraint[address.len..];
+    for (address, subnet, mask) |address_byte, subnet_byte, mask_byte| {
+        if ((address_byte & mask_byte) != subnet_byte) return false;
+    }
+    return true;
+}
+
+fn validDnsConstraint(value: []const u8) bool {
+    if (value.len == 0 or value[value.len - 1] == '.') return false;
+    const name = if (value[0] == '.') value[1..] else value;
+    if (name.len == 0) return false;
+    for (name) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '.') {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn dnsWithinConstraint(dns_name: []const u8, constraint: []const u8) bool {
+    const subdomains_only = constraint[0] == '.';
+    const base = if (subdomains_only) constraint[1..] else constraint;
+    if (!subdomains_only and std.ascii.eqlIgnoreCase(dns_name, base)) {
+        return true;
+    }
+    if (dns_name.len <= base.len or
+        dns_name[dns_name.len - base.len - 1] != '.')
+    {
+        return false;
+    }
+    return std.ascii.eqlIgnoreCase(
+        dns_name[dns_name.len - base.len ..],
+        base,
+    );
 }
 
 fn certificateExtensions(certificate_der: []const u8) !?Tlv {
@@ -694,5 +1271,29 @@ pub const testing = struct {
         encoded: []const u8,
     ) !ExtendedKeyUsageValue {
         return @import("trust.zig").parseExtendedKeyUsage(encoded);
+    }
+
+    pub fn validateDnsNameConstraints(
+        encoded: []const u8,
+        dns_name: []const u8,
+    ) !void {
+        return @import("trust.zig").validateDnsNameConstraints(
+            encoded,
+            dns_name,
+        );
+    }
+
+    pub fn validateIpNameConstraints(
+        encoded: []const u8,
+        ip_address: []const u8,
+    ) !void {
+        const identity = parseServerIdentity(ip_address);
+        switch (identity) {
+            .dns => return error.InvalidIpAddress,
+            else => return @import("trust.zig").validateNameConstraints(
+                encoded,
+                identity,
+            ),
+        }
     }
 };

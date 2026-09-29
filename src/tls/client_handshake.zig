@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const auth = @import("auth.zig");
+const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const client_auth = @import("client_auth.zig");
 const key_schedule = @import("key_schedule.zig");
@@ -15,8 +16,11 @@ const server_handshake = @import("server_handshake.zig");
 const server_hello = @import("server_hello.zig");
 const transcript = @import("transcript.zig");
 
+pub const handshake_type_end_of_early_data: u8 = 0x05;
+
 pub const Error = std.mem.Allocator.Error || auth.Error ||
-    client_auth.Error || key_schedule.Error || secret.Error ||
+    certificate_compression.Error || client_auth.Error ||
+    key_schedule.Error || secret.Error ||
     server_hello.Error || error{
     BadServerFinished,
     InvalidServerFlight,
@@ -26,8 +30,8 @@ pub const Error = std.mem.Allocator.Error || auth.Error ||
 pub const ServerFlight = struct {
     encrypted_extensions: []const u8,
     certificate_request: ?[]const u8 = null,
-    certificate: []const u8,
-    certificate_verify: []const u8,
+    certificate: ?[]const u8,
+    certificate_verify: ?[]const u8,
     before_finished: []const u8,
     finished: []const u8,
 };
@@ -39,8 +43,14 @@ pub const Options = struct {
     handshake_secret: secret.Secret,
     client_handshake_traffic_secret: secret.Secret,
     server_handshake_traffic_secret: secret.Secret,
+    /// Transcript through ClientHello2 for a HelloRetryRequest handshake.
+    transcript_prefix: ?transcript.State = null,
+    psk_resumed: bool = false,
+    early_data_offered: bool = false,
     server_verifier: auth.ClientVerifier,
     server_name: ?[]const u8,
+    certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
+    max_decompressed_certificate_len: usize = 64 * 1024,
     client_identity: ?client_auth.ClientIdentity = null,
 };
 
@@ -58,6 +68,11 @@ pub const Result = struct {
     /// against the parser's borrowed views first; copies are retained only
     /// after trust, CertificateVerify, and Finished all succeed.
     peer_certificate_chain: [][]const u8,
+    early_data_accepted: bool,
+    /// Compression used by the authenticated server Certificate message.
+    certificate_compression: ?certificate_compression.Algorithm,
+    /// Compression used for this client's Certificate response.
+    client_certificate_compression: ?certificate_compression.Algorithm,
 
     pub fn deinit(self: *Result) void {
         self.application.master_secret.deinit();
@@ -80,42 +95,83 @@ pub fn verifyServerAndWriteClientFlight(
     const parsed_server_hello = try server_hello.parseServerHello(
         options.server_hello_bytes,
     );
-    const flight = try splitServerFlight(
+    const flight = try splitServerFlightForMode(
         options.encrypted_server_flight,
+        options.psk_resumed,
     );
     const encrypted_extensions =
         try server_hello.parseEncryptedExtensions(
             flight.encrypted_extensions,
         );
+    if (encrypted_extensions.early_data_accepted and
+        (!options.psk_resumed or !options.early_data_offered))
+    {
+        return error.InvalidServerFlight;
+    }
 
-    var state = transcript.State.init(
-        parsed_server_hello.cipher_suite.hash(),
-    );
-    state.update(options.client_hello_bytes);
+    var state = options.transcript_prefix orelse blk: {
+        var initial = transcript.State.init(
+            parsed_server_hello.cipher_suite.hash(),
+        );
+        initial.update(options.client_hello_bytes);
+        break :blk initial;
+    };
     state.update(options.server_hello_bytes);
     state.update(flight.encrypted_extensions);
     if (flight.certificate_request) |request| state.update(request);
 
-    var certificate = try auth.parseCertificate(
-        allocator,
-        flight.certificate,
-    );
-    defer certificate.deinit(allocator);
-    try options.server_verifier.verifyTrust(
-        options.server_name,
-        certificate.entries,
-    );
-    state.update(flight.certificate);
-    const parsed_certificate_verify = try auth.parseCertificateVerify(
-        flight.certificate_verify,
-    );
-    const certificate_hash = state.digest();
-    try auth.verifyCertificateVerify(
-        certificate.entries[0],
-        parsed_certificate_verify,
-        certificate_hash.bytes(),
-    );
-    state.update(flight.certificate_verify);
+    var peer_certificate_chain = try allocator.alloc([]const u8, 0);
+    var selected_certificate_compression: ?certificate_compression.Algorithm = null;
+    if (!options.psk_resumed) {
+        const certificate_wire = flight.certificate orelse
+            return error.InvalidServerFlight;
+        var decompressed_certificate: ?[]u8 = null;
+        defer if (decompressed_certificate) |message| allocator.free(message);
+        const certificate_message = if (certificate_wire[0] ==
+            certificate_compression.handshake_type_compressed_certificate)
+        blk: {
+            selected_certificate_compression =
+                (try certificate_compression.parse(certificate_wire)).algorithm;
+            decompressed_certificate =
+                try certificate_compression.decompressCertificate(
+                    allocator,
+                    certificate_wire,
+                    options.certificate_compression_algorithms,
+                    options.max_decompressed_certificate_len,
+                );
+            break :blk decompressed_certificate.?;
+        } else certificate_wire;
+        var certificate = try auth.parseCertificate(
+            allocator,
+            certificate_message,
+        );
+        defer certificate.deinit(allocator);
+        try options.server_verifier.verifyTrustWithOcsp(
+            options.server_name,
+            certificate.entries,
+            certificate.ocsp_response,
+        );
+        state.update(certificate_wire);
+        const parsed_certificate_verify = try auth.parseCertificateVerify(
+            flight.certificate_verify orelse
+                return error.InvalidServerFlight,
+        );
+        const certificate_hash = state.digest();
+        try auth.verifyCertificateVerify(
+            certificate.entries[0],
+            parsed_certificate_verify,
+            certificate_hash.bytes(),
+        );
+        state.update(flight.certificate_verify.?);
+        peer_certificate_chain = try copyCertificateChain(
+            allocator,
+            certificate.entries,
+        );
+    } else if (flight.certificate != null or
+        flight.certificate_verify != null)
+    {
+        return error.InvalidServerFlight;
+    }
 
     const server_verify_data = try parseFinished(
         flight.finished,
@@ -137,10 +193,6 @@ pub fn verifyServerAndWriteClientFlight(
     }
     state.update(flight.finished);
     const transcript_after_server_finished = state.digest();
-    const peer_certificate_chain = try copyCertificateChain(
-        allocator,
-        certificate.entries,
-    );
     errdefer freeCertificateChain(allocator, peer_certificate_chain);
 
     var application = try key_schedule.deriveApplicationFor(
@@ -153,16 +205,51 @@ pub fn verifyServerAndWriteClientFlight(
         application.server_traffic_secret.deinit();
     }
 
+    if (encrypted_extensions.early_data_accepted) {
+        const end_of_early_data = [_]u8{
+            handshake_type_end_of_early_data, 0, 0, 0,
+        };
+        try out.appendSlice(allocator, &end_of_early_data);
+        state.update(&end_of_early_data);
+    }
+
+    var selected_client_certificate_compression: ?certificate_compression.Algorithm = null;
     if (flight.certificate_request) |request_bytes| {
         const request = try client_auth.parseRequest(request_bytes);
         const identity = options.client_identity;
-        try auth.writeClientCertificateWithContext(
-            out,
-            allocator,
-            if (identity) |value| value.certificate_chain else &.{},
-            request.request_context,
-        );
-        state.update(out.items);
+        const certificate_start = out.items.len;
+        if (identity) |value| {
+            var ordinary_certificate: std.ArrayList(u8) = .empty;
+            defer ordinary_certificate.deinit(allocator);
+            try auth.writeClientCertificateWithContext(
+                &ordinary_certificate,
+                allocator,
+                value.certificate_chain,
+                request.request_context,
+            );
+            for (value.compressed_certificates) |prepared| {
+                if (request.supportsCertificateCompression(
+                    prepared.algorithm,
+                ) and prepared.matchesCertificateMessage(
+                    ordinary_certificate.items,
+                ) and prepared.savesBytes(ordinary_certificate.items.len)) {
+                    try prepared.write(out, allocator);
+                    selected_client_certificate_compression =
+                        prepared.algorithm;
+                    break;
+                }
+            } else {
+                try out.appendSlice(allocator, ordinary_certificate.items);
+            }
+        } else {
+            try auth.writeClientCertificateWithContext(
+                out,
+                allocator,
+                &.{},
+                request.request_context,
+            );
+        }
+        state.update(out.items[certificate_start..]);
         if (identity) |value| {
             try value.validate();
             if (!requestSupportsSigner(request, value.signer)) {
@@ -201,6 +288,9 @@ pub fn verifyServerAndWriteClientFlight(
         .transcript_after_client_finished = state.digest(),
         .selected_alpn = encrypted_extensions.alpn_protocol,
         .peer_certificate_chain = peer_certificate_chain,
+        .early_data_accepted = encrypted_extensions.early_data_accepted,
+        .certificate_compression = selected_certificate_compression,
+        .client_certificate_compression = selected_client_certificate_compression,
     };
 }
 
@@ -230,6 +320,13 @@ fn freeCertificateChain(
 }
 
 pub fn splitServerFlight(bytes: []const u8) Error!ServerFlight {
+    return splitServerFlightForMode(bytes, false);
+}
+
+pub fn splitServerFlightForMode(
+    bytes: []const u8,
+    psk_resumed: bool,
+) Error!ServerFlight {
     const encrypted_extensions_len = try handshakeMessageLength(bytes);
     if (bytes[0] != server_hello.handshake_type_encrypted_extensions or
         encrypted_extensions_len >= bytes.len)
@@ -246,22 +343,28 @@ pub fn splitServerFlight(bytes: []const u8) Error!ServerFlight {
         offset += request_len;
         if (offset >= bytes.len) return error.InvalidServerFlight;
     }
-    if (bytes[offset] != auth.handshake_type_certificate) {
-        return error.InvalidServerFlight;
+    var certificate: ?[]const u8 = null;
+    var certificate_verify: ?[]const u8 = null;
+    if (!psk_resumed) {
+        if (bytes[offset] != auth.handshake_type_certificate and
+            bytes[offset] !=
+                certificate_compression.handshake_type_compressed_certificate)
+        {
+            return error.InvalidServerFlight;
+        }
+        const certificate_len = try handshakeMessageLength(bytes[offset..]);
+        certificate = bytes[offset..][0..certificate_len];
+        offset += certificate_len;
+        if (offset >= bytes.len or
+            bytes[offset] != auth.handshake_type_certificate_verify)
+        {
+            return error.InvalidServerFlight;
+        }
+        const certificate_verify_len =
+            try handshakeMessageLength(bytes[offset..]);
+        certificate_verify = bytes[offset..][0..certificate_verify_len];
+        offset += certificate_verify_len;
     }
-    const certificate_len = try handshakeMessageLength(bytes[offset..]);
-    const certificate = bytes[offset..][0..certificate_len];
-    offset += certificate_len;
-    if (offset >= bytes.len or
-        bytes[offset] != auth.handshake_type_certificate_verify)
-    {
-        return error.InvalidServerFlight;
-    }
-    const certificate_verify_len =
-        try handshakeMessageLength(bytes[offset..]);
-    const certificate_verify =
-        bytes[offset..][0..certificate_verify_len];
-    offset += certificate_verify_len;
     if (offset >= bytes.len or
         bytes[offset] != server_handshake.handshake_type_finished)
     {
@@ -290,6 +393,12 @@ fn requestSupportsSigner(
         auth.signature_scheme_ecdsa_secp256r1_sha256 => request.supports_ecdsa_p256_sha256,
         auth.signature_scheme_ecdsa_secp384r1_sha384 => request.supports_ecdsa_p384_sha384,
         auth.signature_scheme_sm2sig_sm3 => request.supports_sm2sig_sm3,
+        auth.signature_scheme_rsa_pss_rsae_sha256 => request.supports_rsa_pss_rsae_sha256,
+        auth.signature_scheme_rsa_pss_rsae_sha384 => request.supports_rsa_pss_rsae_sha384,
+        auth.signature_scheme_rsa_pss_rsae_sha512 => request.supports_rsa_pss_rsae_sha512,
+        auth.signature_scheme_rsa_pss_pss_sha256 => request.supports_rsa_pss_pss_sha256,
+        auth.signature_scheme_rsa_pss_pss_sha384 => request.supports_rsa_pss_pss_sha384,
+        auth.signature_scheme_rsa_pss_pss_sha512 => request.supports_rsa_pss_pss_sha512,
         else => false,
     };
 }

@@ -3,9 +3,15 @@
 pub const trust = @import("trust.zig");
 pub const identity = @import("identity.zig");
 pub const crl = @import("crl.zig");
+pub const ocsp = @import("ocsp.zig");
+
+pub const testing = struct {
+    pub const path_vectors = @import("testdata/path_vectors.zig");
+};
 
 test {
     _ = crl;
     _ = identity;
+    _ = ocsp;
     _ = @import("tests.zig");
 }

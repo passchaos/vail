@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const auth = @import("auth.zig");
+const certificate_compression = @import("certificate_compression.zig");
 const key_schedule = @import("key_schedule.zig");
 const secret = @import("secret.zig");
 const transcript = @import("transcript.zig");
@@ -9,9 +10,11 @@ const transcript = @import("transcript.zig");
 pub const handshake_type_certificate_request: u8 = 0x0d;
 const ext_signature_algorithms: u16 = 0x000d;
 const ext_certificate_authorities: u16 = 0x002f;
+const ext_compress_certificate: u16 =
+    certificate_compression.extension_type_compress_certificate;
 
 pub const Error = std.mem.Allocator.Error || auth.Error ||
-    key_schedule.Error || secret.Error || error{
+    certificate_compression.Error || key_schedule.Error || secret.Error || error{
     BadClientFinished,
     InvalidClientFlight,
     InvalidCertificateRequest,
@@ -19,7 +22,18 @@ pub const Error = std.mem.Allocator.Error || auth.Error ||
     ClientCertificateRequired,
 };
 
-pub const ClientIdentity = auth.ServerIdentity;
+pub const ClientIdentity = struct {
+    certificate_chain: []const []const u8,
+    signer: auth.Signer,
+    compressed_certificates: []const certificate_compression.PreparedView = &.{},
+
+    pub fn validate(self: ClientIdentity) auth.Error!void {
+        try (auth.ServerIdentity{
+            .certificate_chain = self.certificate_chain,
+            .signer = self.signer,
+        }).validate();
+    }
+};
 
 pub const Requirement = enum {
     /// Abort the handshake when the client returns an empty Certificate list.
@@ -47,10 +61,31 @@ pub const ParsedRequest = struct {
     supports_rsa_pss_pss_sha384: bool,
     supports_rsa_pss_pss_sha512: bool,
     supports_sm2sig_sm3: bool,
+    certificate_compression_algorithms: []const u8,
+
+    pub fn supportsCertificateCompression(
+        self: ParsedRequest,
+        algorithm: certificate_compression.Algorithm,
+    ) bool {
+        var pos: usize = 0;
+        while (pos < self.certificate_compression_algorithms.len) : (pos += 2) {
+            const offered: certificate_compression.Algorithm = @enumFromInt(
+                std.mem.readInt(
+                    u16,
+                    self.certificate_compression_algorithms[pos..][0..2],
+                    .big,
+                ),
+            );
+            if (offered == algorithm) return true;
+        }
+        return false;
+    }
 };
 
 pub const Verification = struct {
     certificate: auth.ParsedCertificate,
+    decompressed_certificate_message: ?[]u8 = null,
+    certificate_compression: ?certificate_compression.Algorithm = null,
     transcript_after_client_finished: transcript.Digest,
 
     pub fn deinit(
@@ -58,6 +93,9 @@ pub const Verification = struct {
         allocator: std.mem.Allocator,
     ) void {
         self.certificate.deinit(allocator);
+        if (self.decompressed_certificate_message) |message| {
+            allocator.free(message);
+        }
         self.* = undefined;
     }
 
@@ -82,9 +120,55 @@ pub fn verifyClientFlight(
     certificate_verify_bytes: ?[]const u8,
     finished_bytes: []const u8,
 ) Error!Verification {
+    return verifyClientFlightWithCompression(
+        allocator,
+        policy,
+        request_context,
+        transcript_after_server_finished,
+        client_handshake_traffic_secret,
+        certificate_bytes,
+        certificate_verify_bytes,
+        finished_bytes,
+        &.{},
+        64 * 1024,
+    );
+}
+
+pub fn verifyClientFlightWithCompression(
+    allocator: std.mem.Allocator,
+    policy: ServerPolicy,
+    request_context: []const u8,
+    transcript_after_server_finished: transcript.State,
+    client_handshake_traffic_secret: secret.Secret,
+    certificate_bytes: []const u8,
+    certificate_verify_bytes: ?[]const u8,
+    finished_bytes: []const u8,
+    accepted_compression_algorithms: []const certificate_compression.Algorithm,
+    max_decompressed_certificate_len: usize,
+) Error!Verification {
+    var decompressed_certificate_message: ?[]u8 = null;
+    errdefer if (decompressed_certificate_message) |message| {
+        allocator.free(message);
+    };
+    var selected_certificate_compression: ?certificate_compression.Algorithm = null;
+    const certificate_message = if (certificate_bytes.len != 0 and
+        certificate_bytes[0] ==
+            certificate_compression.handshake_type_compressed_certificate)
+    blk: {
+        selected_certificate_compression =
+            (try certificate_compression.parse(certificate_bytes)).algorithm;
+        decompressed_certificate_message =
+            try certificate_compression.decompressCertificate(
+                allocator,
+                certificate_bytes,
+                accepted_compression_algorithms,
+                max_decompressed_certificate_len,
+            );
+        break :blk decompressed_certificate_message.?;
+    } else certificate_bytes;
     var certificate = try auth.parseClientCertificateWithContext(
         allocator,
-        certificate_bytes,
+        certificate_message,
         request_context,
     );
     errdefer certificate.deinit(allocator);
@@ -134,6 +218,8 @@ pub fn verifyClientFlight(
 
     return .{
         .certificate = certificate,
+        .decompressed_certificate_message = decompressed_certificate_message,
+        .certificate_compression = selected_certificate_compression,
         .transcript_after_client_finished = state.digest(),
     };
 }
@@ -160,6 +246,22 @@ pub fn writeRequest(
     allocator: std.mem.Allocator,
     request_context: []const u8,
     certificate_authorities: []const []const u8,
+) Error!void {
+    return writeRequestWithCompression(
+        list,
+        allocator,
+        request_context,
+        certificate_authorities,
+        &.{},
+    );
+}
+
+pub fn writeRequestWithCompression(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    request_context: []const u8,
+    certificate_authorities: []const []const u8,
+    compression_algorithms: []const certificate_compression.Algorithm,
 ) Error!void {
     if (request_context.len > std.math.maxInt(u8)) {
         return error.InvalidCertificateRequest;
@@ -232,6 +334,35 @@ pub fn writeRequest(
         u16,
         auth.signature_scheme_ed25519,
     );
+    if (compression_algorithms.len != 0) {
+        certificate_compression.validateAlgorithms(
+            compression_algorithms,
+        ) catch return error.InvalidCertificateRequest;
+        try appendInt(
+            &extensions,
+            allocator,
+            u16,
+            ext_compress_certificate,
+        );
+        try appendInt(
+            &extensions,
+            allocator,
+            u16,
+            1 + compression_algorithms.len * 2,
+        );
+        try extensions.append(
+            allocator,
+            @intCast(compression_algorithms.len * 2),
+        );
+        for (compression_algorithms) |algorithm| {
+            try appendInt(
+                &extensions,
+                allocator,
+                u16,
+                @intFromEnum(algorithm),
+            );
+        }
+    }
     if (certificate_authorities.len != 0) {
         var authorities: std.ArrayList(u8) = .empty;
         defer authorities.deinit(allocator);
@@ -318,7 +449,9 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
     var supports_rsa_pss_pss_sha384 = false;
     var supports_rsa_pss_pss_sha512 = false;
     var supports_sm2 = false;
+    var certificate_compression_algorithms: []const u8 = &.{};
     var saw_signature_algorithms = false;
+    var saw_certificate_compression = false;
     var ext_pos: usize = 0;
     while (ext_pos < extensions.len) {
         const typ = try readInt(u16, extensions, &ext_pos);
@@ -396,6 +529,13 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
                 if (name_len == 0) return error.InvalidCertificateRequest;
                 _ = try readSlice(payload, &ca_pos, name_len);
             }
+        } else if (typ == ext_compress_certificate) {
+            if (saw_certificate_compression) {
+                return error.InvalidCertificateRequest;
+            }
+            saw_certificate_compression = true;
+            certificate_compression_algorithms =
+                try parseCompressionAlgorithms(payload);
         } else {
             return error.InvalidCertificateRequest;
         }
@@ -415,7 +555,36 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
         .supports_rsa_pss_pss_sha384 = supports_rsa_pss_pss_sha384,
         .supports_rsa_pss_pss_sha512 = supports_rsa_pss_pss_sha512,
         .supports_sm2sig_sm3 = supports_sm2,
+        .certificate_compression_algorithms = certificate_compression_algorithms,
     };
+}
+
+fn parseCompressionAlgorithms(payload: []const u8) Error![]const u8 {
+    var pos: usize = 0;
+    const encoded_len = try readByte(payload, &pos);
+    if (encoded_len == 0 or encoded_len % 2 != 0 or
+        encoded_len != payload.len - pos)
+    {
+        return error.InvalidCertificateRequest;
+    }
+    const algorithms = payload[pos..];
+    var current: usize = 0;
+    while (current < algorithms.len) : (current += 2) {
+        const algorithm = std.mem.readInt(
+            u16,
+            algorithms[current..][0..2],
+            .big,
+        );
+        var previous: usize = 0;
+        while (previous < current) : (previous += 2) {
+            if (algorithm == std.mem.readInt(
+                u16,
+                algorithms[previous..][0..2],
+                .big,
+            )) return error.InvalidCertificateRequest;
+        }
+    }
+    return algorithms;
 }
 
 fn appendInt(

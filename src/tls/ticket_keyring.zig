@@ -15,10 +15,11 @@ pub const key_len = Aes256Gcm.key_length;
 pub const nonce_len = Aes256Gcm.nonce_length;
 pub const tag_len = Aes256Gcm.tag_length;
 pub const max_keys = 4;
-const format_version: u8 = 3;
+const format_version: u8 = 4;
 const header_len = 1 + @sizeOf(u32) + nonce_len;
-const secret_len_offset =
+const early_data_size_offset =
     @sizeOf(u64) + @sizeOf(u32) + @sizeOf(u32) + @sizeOf(u16);
+const secret_len_offset = early_data_size_offset + @sizeOf(u32);
 const secret_offset = secret_len_offset + @sizeOf(u8);
 const plaintext_len = secret_offset + secret.max_len;
 pub const sealed_len = header_len + plaintext_len + tag_len;
@@ -45,6 +46,7 @@ pub const Opened = struct {
     issued_at_ms: u64,
     lifetime_seconds: u32,
     cipher_suite: cipher_suite.Suite = .aes_128_gcm_sha256,
+    max_early_data_size: ?u32 = null,
 };
 
 pub const OpenedSecret = struct {
@@ -55,6 +57,7 @@ pub const OpenedSecret = struct {
     /// TLS cipher-suite wire ID.  The ticket layer recognizes 0x1302 before
     /// negotiation publishes that suite, but validates its SHA-384 binding.
     cipher_suite_wire: u16,
+    max_early_data_size: ?u32 = null,
 };
 
 pub const Keyring = struct {
@@ -116,6 +119,7 @@ pub const Keyring = struct {
                 .issued_at_ms = opened.issued_at_ms,
                 .lifetime_seconds = opened.lifetime_seconds,
                 .cipher_suite_wire = opened.cipher_suite.wireValue(),
+                .max_early_data_size = opened.max_early_data_size,
             },
         );
     }
@@ -148,6 +152,12 @@ pub const Keyring = struct {
             u16,
             plaintext[16..18],
             opened.cipher_suite_wire,
+            .big,
+        );
+        std.mem.writeInt(
+            u32,
+            plaintext[early_data_size_offset..secret_len_offset],
+            opened.max_early_data_size orelse 0,
             .big,
         );
         plaintext[secret_len_offset] =
@@ -194,6 +204,7 @@ pub const Keyring = struct {
             .cipher_suite = cipher_suite.Suite.fromWire(
                 opened.cipher_suite_wire,
             ) orelse return error.InvalidTicket,
+            .max_early_data_size = opened.max_early_data_size,
         };
     }
 
@@ -233,6 +244,11 @@ pub const Keyring = struct {
             .big,
         );
         const encoded_secret_len = plaintext[secret_len_offset];
+        const encoded_early_data_size = std.mem.readInt(
+            u32,
+            plaintext[early_data_size_offset..secret_len_offset],
+            .big,
+        );
         const hash = expectedHashForSuite(suite_wire) catch
             return error.InvalidTicket;
         if (encoded_secret_len != hash.len()) return error.InvalidTicket;
@@ -241,6 +257,10 @@ pub const Keyring = struct {
             .lifetime_seconds = std.mem.readInt(u32, plaintext[8..12], .big),
             .age_add = std.mem.readInt(u32, plaintext[12..16], .big),
             .cipher_suite_wire = suite_wire,
+            .max_early_data_size = if (encoded_early_data_size == 0)
+                null
+            else
+                encoded_early_data_size,
             .secret = secret.Secret.init(
                 hash,
                 plaintext[secret_offset..][0..encoded_secret_len],

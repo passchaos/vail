@@ -6,6 +6,9 @@
 const std = @import("std");
 
 const key_schedule = @import("key_schedule.zig");
+const cipher_suite = @import("cipher_suite.zig");
+const secret = @import("secret.zig");
+const transcript = @import("transcript.zig");
 
 pub const handshake_type_new_session_ticket: u8 = 0x04;
 pub const ext_early_data: u16 = 0x002a;
@@ -16,7 +19,91 @@ pub const Error = std.mem.Allocator.Error || error{
     InvalidNewSessionTicket,
     InvalidTicketLifetime,
     InvalidEarlyDataSize,
+    TicketNotYetValid,
+    ExpiredTicket,
 };
+
+/// Client-owned session state derived from an authenticated NewSessionTicket.
+pub const Cached = struct {
+    allocator: std.mem.Allocator,
+    identity: []u8,
+    psk: secret.Secret,
+    suite: cipher_suite.Suite,
+    server_name: []u8,
+    alpn: []u8,
+    age_add: u32,
+    received_at_ms: u64,
+    lifetime_seconds: u32,
+    max_early_data_size: ?u32,
+
+    pub fn deinit(self: *Cached) void {
+        self.psk.deinit();
+        self.allocator.free(self.identity);
+        self.allocator.free(self.server_name);
+        self.allocator.free(self.alpn);
+        self.* = undefined;
+    }
+
+    pub fn obfuscatedTicketAge(
+        self: *const Cached,
+        now_ms: u64,
+    ) Error!u32 {
+        if (now_ms < self.received_at_ms) return error.TicketNotYetValid;
+        const age = now_ms - self.received_at_ms;
+        if (age > @as(u64, self.lifetime_seconds) * std.time.ms_per_s or
+            age > std.math.maxInt(u32))
+        {
+            return error.ExpiredTicket;
+        }
+        return @as(u32, @intCast(age)) +% self.age_add;
+    }
+};
+
+pub fn cache(
+    allocator: std.mem.Allocator,
+    message: []const u8,
+    suite: cipher_suite.Suite,
+    master_secret: secret.Secret,
+    transcript_after_client_finished: transcript.Digest,
+    server_name: []const u8,
+    alpn: []const u8,
+    received_at_ms: u64,
+) (Error || key_schedule.Error)!Cached {
+    if (master_secret.hash != suite.hash() or
+        transcript_after_client_finished.hash != suite.hash())
+    {
+        return error.InvalidNewSessionTicket;
+    }
+    const parsed = try parse(message);
+    var resumption_master = try key_schedule.deriveResumptionMasterSecretFor(
+        master_secret,
+        transcript_after_client_finished,
+    );
+    defer resumption_master.deinit();
+    var psk_secret = try key_schedule.deriveResumptionPskFor(
+        resumption_master,
+        parsed.nonce,
+    );
+    errdefer psk_secret.deinit();
+    const identity = try allocator.dupe(u8, parsed.ticket);
+    errdefer allocator.free(identity);
+    const owned_server_name = try allocator.dupe(u8, server_name);
+    errdefer allocator.free(owned_server_name);
+    const owned_alpn = try allocator.dupe(u8, alpn);
+    errdefer allocator.free(owned_alpn);
+    return .{
+        .allocator = allocator,
+        .identity = identity,
+        .psk = psk_secret,
+        .suite = suite,
+        .server_name = owned_server_name,
+        .alpn = owned_alpn,
+        .age_add = parsed.age_add,
+        .received_at_ms = received_at_ms,
+        .lifetime_seconds = parsed.lifetime_seconds,
+        .max_early_data_size = parsed.max_early_data_size,
+    };
+}
 
 pub const Options = struct {
     lifetime_seconds: u32,
@@ -226,4 +313,43 @@ fn writeU24(bytes: *[3]u8, value: u24) void {
     bytes[0] = @truncate(value >> 16);
     bytes[1] = @truncate(value >> 8);
     bytes[2] = @truncate(value);
+}
+
+test "authenticated NewSessionTicket becomes an owned client cache entry" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try write(&encoded, allocator, .{
+        .lifetime_seconds = 60,
+        .age_add = 17,
+        .nonce = &.{ 1, 2, 3 },
+        .ticket = "opaque-ticket",
+        .allow_early_data = true,
+    });
+    const master = secret.Secret.fromSha384([_]u8{0x44} ** 48);
+    var state = transcript.State.init(.sha384);
+    state.update("complete-handshake");
+    var cached = try cache(
+        allocator,
+        encoded.items,
+        .aes_256_gcm_sha384,
+        master,
+        state.digest(),
+        "example.com",
+        "h2",
+        10_000,
+    );
+    defer cached.deinit();
+    try std.testing.expectEqual(secret.Hash.sha384, cached.psk.hash);
+    try std.testing.expectEqualStrings("opaque-ticket", cached.identity);
+    try std.testing.expectEqualStrings("example.com", cached.server_name);
+    try std.testing.expectEqualStrings("h2", cached.alpn);
+    try std.testing.expectEqual(
+        @as(u32, 1_017),
+        try cached.obfuscatedTicketAge(11_000),
+    );
+    try std.testing.expectError(
+        error.ExpiredTicket,
+        cached.obfuscatedTicketAge(70_001),
+    );
 }
