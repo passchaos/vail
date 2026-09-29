@@ -461,6 +461,25 @@ pub fn build(b: *std.Build) void {
     interop_rustls_quic_hybrid_client_step.dependOn(
         &check_rustls_quic_hybrid_client.step,
     );
+    const check_rustls_quic_mlkem_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_quic_mlkem_client.step.dependOn(&build_rustls_min.step);
+    check_rustls_quic_mlkem_client.addArg(
+        "timeout 20s $1 mlkem > /tmp/vail-quic-mlkem-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 18s bench/rustls_min_client/target/release/vail-rustls-quic-client src/crypto/testdata/rsa_signing_cert.pem mlkem > /tmp/rustls-quic-mlkem-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'group=MLKEM768' /tmp/vail-quic-mlkem-server.log && " ++
+            "grep -q 'group=MLKEM768' /tmp/rustls-quic-mlkem-client.log",
+    );
+    check_rustls_quic_mlkem_client.addArg("sh");
+    check_rustls_quic_mlkem_client.addArtifactArg(min_quic_tls_server);
+    const interop_rustls_quic_mlkem_client_step = b.step(
+        "interop-rustls-quic-mlkem-client",
+        "Exercise Vail's ML-KEM-768 QUIC server with rustls/AWS-LC",
+    );
+    interop_rustls_quic_mlkem_client_step.dependOn(
+        &check_rustls_quic_mlkem_client.step,
+    );
 
     const min_tls13_resume_server = b.addExecutable(.{
         .name = "vail-min-tls13-resume-server",
@@ -599,6 +618,25 @@ pub fn build(b: *std.Build) void {
     );
     interop_rustls_quic_hybrid_server_step.dependOn(
         &check_rustls_quic_hybrid_server.step,
+    );
+    const check_rustls_quic_mlkem_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_quic_mlkem_server.step.dependOn(&build_rustls_server.step);
+    check_rustls_quic_mlkem_server.addArg(
+        "timeout 20s bench/rustls_min_server/target/release/vail-rustls-quic-server src/crypto/testdata/rsa_signing_cert.pem src/crypto/testdata/rsa_signing_key.pem mlkem > /tmp/rustls-quic-mlkem-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 18s $1 mlkem > /tmp/vail-quic-mlkem-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'group=MLKEM768' /tmp/rustls-quic-mlkem-server.log && " ++
+            "grep -q 'group=MLKEM768' /tmp/vail-quic-mlkem-client.log",
+    );
+    check_rustls_quic_mlkem_server.addArg("sh");
+    check_rustls_quic_mlkem_server.addArtifactArg(min_quic_tls_client);
+    const interop_rustls_quic_mlkem_server_step = b.step(
+        "interop-rustls-quic-mlkem-server",
+        "Exercise Vail's ML-KEM-768 QUIC client with rustls/AWS-LC",
+    );
+    interop_rustls_quic_mlkem_server_step.dependOn(
+        &check_rustls_quic_mlkem_server.step,
     );
 
     const min_tls13_resume_client = b.addExecutable(.{

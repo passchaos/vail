@@ -112,6 +112,9 @@ The current foundation provides:
 - Standards-aligned X25519MLKEM768 hybrid post-quantum key exchange with the
   registered `0x11ec` ML-KEM-first TLS share layout, compact seeded client
   state, explicit secret wiping, and full 64-byte hybrid HKDF input.
+- Explicit pure ML-KEM-768 key exchange with registered TLS group `0x0201`,
+  compact seeded client state, implicit ciphertext rejection, and direct
+  32-byte KEM output into the TLS 1.3 key schedule.
 - Registered classical-first secp256r1MLKEM768 (`0x11eb`) and
   secp384r1MLKEM1024 (`0x11ed`) TLS groups, including exact SEC1/ML-KEM wire
   layouts, 64/80-byte hybrid HKDF inputs, and shared generic secret handling.
@@ -303,6 +306,9 @@ parameters without linking Rust code into Vail.
 `interop-rustls-quic-hybrid-server` repeat both directions with registered
 X25519MLKEM768 (`0x11ec`), proving that Zig std's ML-KEM implementation and
 AWS-LC agree on the complete hybrid wire shares and derived handshake secrets.
+The corresponding `interop-rustls-quic-mlkem-client` and
+`interop-rustls-quic-mlkem-server` checks cover the explicit pure ML-KEM-768
+group (`0x0201`) in both directions.
 `zig build interop-openssl-tls12-server` and
 `zig build interop-rustls-tls12-server` exercise Vail's incremental TLS 1.2
 server, requiring ECDHE-RSA-AES128-GCM-SHA256, Extended Master Secret,

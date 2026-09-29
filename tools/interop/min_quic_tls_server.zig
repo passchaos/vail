@@ -8,15 +8,21 @@ const server_transport_parameters = [_]u8{ 0x04, 0x05, 0x06 };
 const rsa_vectors = vail.crypto.testing.rsa_signing;
 const certificate_der = decodeHex(rsa_vectors.certificate_hex);
 const private_key_der = decodeHex(rsa_vectors.private_key_pkcs8_hex);
+const GroupMode = enum { x25519, hybrid, mlkem };
 
 pub fn main(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(init.gpa);
     defer args.deinit();
     _ = args.next();
-    const hybrid = if (args.next()) |mode|
-        if (std.mem.eql(u8, mode, "hybrid")) true else return error.InvalidArguments
+    const mode: GroupMode = if (args.next()) |value|
+        if (std.mem.eql(u8, value, "hybrid"))
+            .hybrid
+        else if (std.mem.eql(u8, value, "mlkem"))
+            .mlkem
+        else
+            return error.InvalidArguments
     else
-        false;
+        .x25519;
     if (args.next() != null) return error.InvalidArguments;
     const allocator = std.heap.smp_allocator;
     const listener = try sysSocket();
@@ -24,7 +30,11 @@ pub fn main(init: std.process.Init) !void {
     try sysReuseAddr(listener);
     var address = std.mem.zeroes(linux.sockaddr.in);
     address.family = linux.AF.INET;
-    address.port = std.mem.nativeToBig(u16, if (hybrid) 24460 else 24456);
+    address.port = std.mem.nativeToBig(u16, switch (mode) {
+        .x25519 => 24456,
+        .hybrid => 24460,
+        .mlkem => 24462,
+    });
     address.addr = std.mem.nativeToBig(u32, 0x7f000001);
     try sysBind(listener, @ptrCast(&address), @sizeOf(linux.sockaddr.in));
     try sysListen(listener, 1);
@@ -46,23 +56,30 @@ pub fn main(init: std.process.Init) !void {
     if (!try parsed_client.supportsAlpnProtocol("h3")) {
         return error.MissingH3;
     }
-    const selected_group = if (hybrid)
-        vail.tls.key_exchange.x25519_mlkem768.named_group
-    else
-        vail.tls.key_exchange.named_group_x25519;
+    const selected_group = switch (mode) {
+        .x25519 => vail.tls.key_exchange.named_group_x25519,
+        .hybrid => vail.tls.key_exchange.x25519_mlkem768.named_group,
+        .mlkem => vail.tls.key_exchange.mlkem768.named_group,
+    };
     const client_share = (try parsed_client.keyShareForGroup(
         selected_group,
     )) orelse return error.MissingKeyShare;
 
-    var key_material: vail.tls.key_exchange.ServerKeyMaterial = if (hybrid)
-        .{ .x25519_mlkem768 = .{
+    var key_material: vail.tls.key_exchange.ServerKeyMaterial = switch (mode) {
+        .x25519 => .{
+            .x25519 = [_]u8{0xc1} ** vail.tls.key_exchange.secret_len,
+        },
+        .hybrid => .{ .x25519_mlkem768 = .{
             .x25519_secret = [_]u8{0xc1} **
                 vail.tls.key_exchange.x25519_mlkem768.x25519_secret_len,
             .encaps_seed = [_]u8{0xc3} **
                 vail.tls.key_exchange.x25519_mlkem768.encaps_seed_len,
-        } }
-    else
-        .{ .x25519 = [_]u8{0xc1} ** vail.tls.key_exchange.secret_len };
+        } },
+        .mlkem => .{
+            .mlkem768 = [_]u8{0xc4} **
+                vail.tls.key_exchange.mlkem768.encaps_seed_len,
+        },
+    };
     defer key_material.wipe();
     var exchange = try key_material.respond(client_share.key_exchange);
     defer exchange.deinit();
@@ -119,7 +136,11 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print(
         "Vail QUIC server verified rustls/AWS-LC client group={s}\n",
-        .{if (hybrid) "X25519MLKEM768" else "X25519"},
+        .{switch (mode) {
+            .x25519 => "X25519",
+            .hybrid => "X25519MLKEM768",
+            .mlkem => "MLKEM768",
+        }},
     );
 }
 

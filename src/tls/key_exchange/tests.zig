@@ -1,6 +1,10 @@
 const std = @import("std");
 const target = @import("x25519_mlkem768.zig");
 
+test {
+    _ = @import("mlkem768.zig");
+}
+
 test "X25519MLKEM768 agrees and preserves the registered TLS layout" {
     const client_x25519 = [_]u8{0x11} ** target.x25519_secret_len;
     const client_mlkem = [_]u8{0x22} ** target.mlkem_seed_len;

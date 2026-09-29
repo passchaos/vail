@@ -4,6 +4,7 @@ const std = @import("std");
 
 pub const x25519_mlkem768 =
     @import("key_exchange/x25519_mlkem768.zig");
+pub const mlkem768 = @import("key_exchange/mlkem768.zig");
 pub const secp256r1_mlkem768 =
     @import("key_exchange/secp256r1_mlkem768.zig").implementation;
 pub const secp384r1_mlkem1024 =
@@ -146,6 +147,7 @@ pub const ClientKeyMaterial = union(enum) {
     x25519: [secret_len]u8,
     secp256r1: [p256.secret_len]u8,
     secp384r1: [p384.secret_len]u8,
+    mlkem768: [mlkem768.seed_len]u8,
     x25519_mlkem768: struct {
         x25519_secret: [x25519_mlkem768.x25519_secret_len]u8,
         mlkem_seed: [x25519_mlkem768.mlkem_seed_len]u8,
@@ -164,6 +166,7 @@ pub const ClientKeyMaterial = union(enum) {
             .x25519 => named_group_x25519,
             .secp256r1 => named_group_secp256r1,
             .secp384r1 => named_group_secp384r1,
+            .mlkem768 => mlkem768.named_group,
             .x25519_mlkem768 => x25519_mlkem768.named_group,
             .secp256r1_mlkem768 => secp256r1_mlkem768.named_group,
             .secp384r1_mlkem1024 => secp384r1_mlkem1024.named_group,
@@ -189,6 +192,12 @@ pub const ClientKeyMaterial = union(enum) {
             .secp384r1 => |private| result.setShare(
                 &(try p384.publicKey(private)),
             ),
+            .mlkem768 => |seed| {
+                var started = mlkem768.clientStart(seed) catch |err|
+                    return mapHybridError(err);
+                defer started.secret.wipe();
+                result.setShare(&started.share);
+            },
             .x25519_mlkem768 => |material| {
                 var started = x25519_mlkem768.clientStart(
                     material.x25519_secret,
@@ -255,6 +264,15 @@ pub const ClientExchange = struct {
             },
             .secp384r1 => |private| blk: {
                 var shared = try p384.sharedSecret(private, server_share);
+                defer std.crypto.secureZero(u8, &shared);
+                break :blk SharedSecret.init(&shared);
+            },
+            .mlkem768 => |seed| blk: {
+                const client_secret = mlkem768.ClientSecret{ .seed = seed };
+                var shared = mlkem768.clientSharedSecret(
+                    &client_secret,
+                    server_share,
+                ) catch |err| return mapHybridError(err);
                 defer std.crypto.secureZero(u8, &shared);
                 break :blk SharedSecret.init(&shared);
             },
@@ -344,6 +362,7 @@ pub const ServerKeyMaterial = union(enum) {
     x25519: [secret_len]u8,
     secp256r1: [p256.secret_len]u8,
     secp384r1: [p384.secret_len]u8,
+    mlkem768: [mlkem768.encaps_seed_len]u8,
     x25519_mlkem768: struct {
         x25519_secret: [x25519_mlkem768.x25519_secret_len]u8,
         encaps_seed: [x25519_mlkem768.encaps_seed_len]u8,
@@ -362,6 +381,7 @@ pub const ServerKeyMaterial = union(enum) {
             .x25519 => named_group_x25519,
             .secp256r1 => named_group_secp256r1,
             .secp384r1 => named_group_secp384r1,
+            .mlkem768 => mlkem768.named_group,
             .x25519_mlkem768 => x25519_mlkem768.named_group,
             .secp256r1_mlkem768 => secp256r1_mlkem768.named_group,
             .secp384r1_mlkem1024 => secp384r1_mlkem1024.named_group,
@@ -390,6 +410,17 @@ pub const ServerKeyMaterial = union(enum) {
                 var shared = try p384.sharedSecret(private, client_share);
                 defer std.crypto.secureZero(u8, &shared);
                 break :blk ServerExchange.init(&public, &shared);
+            },
+            .mlkem768 => |encaps_seed| blk: {
+                var response = mlkem768.serverRespond(
+                    client_share,
+                    encaps_seed,
+                ) catch |err| return mapHybridError(err);
+                defer response.wipeSharedSecret();
+                break :blk ServerExchange.init(
+                    &response.share,
+                    &response.shared_secret,
+                );
             },
             .x25519_mlkem768 => |material| blk: {
                 var response = x25519_mlkem768.serverRespond(
@@ -523,6 +554,28 @@ test "server key material owns classical and hybrid response construction" {
         u8,
         &hybrid_shared,
         hybrid_response.sharedSecretBytes(),
+    );
+}
+
+test "generic key material completes pure ML-KEM-768" {
+    var client_material = ClientKeyMaterial{
+        .mlkem768 = [_]u8{0x37} ** mlkem768.seed_len,
+    };
+    var client = try client_material.start();
+    var server_material = ServerKeyMaterial{
+        .mlkem768 = [_]u8{0x38} ** mlkem768.encaps_seed_len,
+    };
+    try std.testing.expectEqual(mlkem768.named_group, client.namedGroup());
+    try std.testing.expectEqual(mlkem768.named_group, server_material.namedGroup());
+    var response = try server_material.respond(client.clientShare());
+    defer response.deinit();
+    var client_shared = try client.complete(response.serverShare());
+    defer client_shared.deinit();
+
+    try std.testing.expectEqualSlices(
+        u8,
+        response.sharedSecretBytes(),
+        client_shared.bytes(),
     );
 }
 

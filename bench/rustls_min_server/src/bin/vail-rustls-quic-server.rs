@@ -11,15 +11,23 @@ const MAX_CRYPTO_FLIGHT: usize = 64 * 1024;
 const CLIENT_TRANSPORT_PARAMETERS: &[u8] = &[0x01, 0x02, 0x03];
 const SERVER_TRANSPORT_PARAMETERS: &[u8] = &[0x04, 0x05, 0x06];
 
+#[derive(Clone, Copy)]
+enum GroupMode {
+    X25519,
+    Hybrid,
+    MlKem,
+}
+
 fn main() {
     let mut args = std::env::args();
     let _executable = args.next();
     let certificate_path = args.next().expect("certificate path");
     let key_path = args.next().expect("private-key path");
-    let hybrid = match args.next().as_deref() {
-        None => false,
-        Some("hybrid") => true,
-        Some(_) => panic!("expected optional hybrid mode"),
+    let mode = match args.next().as_deref() {
+        None => GroupMode::X25519,
+        Some("hybrid") => GroupMode::Hybrid,
+        Some("mlkem") => GroupMode::MlKem,
+        Some(_) => panic!("expected optional hybrid or mlkem mode"),
     };
     assert!(args.next().is_none());
 
@@ -35,10 +43,12 @@ fn main() {
     let mut provider = rustls::crypto::aws_lc_rs::default_provider();
     provider.cipher_suites =
         vec![rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256];
-    provider.kx_groups = if hybrid {
-        vec![rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768]
-    } else {
-        vec![rustls::crypto::aws_lc_rs::kx_group::X25519]
+    provider.kx_groups = match mode {
+        GroupMode::X25519 => vec![rustls::crypto::aws_lc_rs::kx_group::X25519],
+        GroupMode::Hybrid => {
+            vec![rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768]
+        }
+        GroupMode::MlKem => vec![rustls::crypto::aws_lc_rs::kx_group::MLKEM768],
     };
     let mut config = ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -48,10 +58,10 @@ fn main() {
         .unwrap();
     config.alpn_protocols.push(b"h3".to_vec());
 
-    let listener = TcpListener::bind(if hybrid {
-        "127.0.0.1:24461"
-    } else {
-        "127.0.0.1:24457"
+    let listener = TcpListener::bind(match mode {
+        GroupMode::X25519 => "127.0.0.1:24457",
+        GroupMode::Hybrid => "127.0.0.1:24461",
+        GroupMode::MlKem => "127.0.0.1:24463",
     })
     .unwrap();
     let (mut socket, _) = listener.accept().unwrap();
@@ -96,7 +106,11 @@ fn main() {
     );
     println!(
         "rustls/AWS-LC QUIC server verified Vail client group={}",
-        if hybrid { "X25519MLKEM768" } else { "X25519" }
+        match mode {
+            GroupMode::X25519 => "X25519",
+            GroupMode::Hybrid => "X25519MLKEM768",
+            GroupMode::MlKem => "MLKEM768",
+        }
     );
 }
 
