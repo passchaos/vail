@@ -414,6 +414,35 @@ pub fn build(b: *std.Build) void {
     );
     interop_rustls_ech_hrr_step.dependOn(&check_rustls_ech_hrr.step);
 
+    const min_quic_tls_server = b.addExecutable(.{
+        .name = "vail-min-quic-tls-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/min_quic_tls_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_rustls_quic_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_quic_client.step.dependOn(&build_rustls_min.step);
+    check_rustls_quic_client.addArg(
+        "timeout 15s $1 > /tmp/vail-quic-tls-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 12s bench/rustls_min_client/target/release/vail-rustls-quic-client src/crypto/testdata/rsa_signing_cert.pem > /tmp/rustls-quic-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'Vail QUIC server verified rustls/AWS-LC client' /tmp/vail-quic-tls-server.log && " ++
+            "grep -q 'rustls/AWS-LC QUIC client completed' /tmp/rustls-quic-client.log",
+    );
+    check_rustls_quic_client.addArg("sh");
+    check_rustls_quic_client.addArtifactArg(min_quic_tls_server);
+    const interop_rustls_quic_client_step = b.step(
+        "interop-rustls-quic-client",
+        "Exercise Vail's QUIC TLS server with a rustls/AWS-LC client",
+    );
+    interop_rustls_quic_client_step.dependOn(
+        &check_rustls_quic_client.step,
+    );
+
     const min_tls13_client = b.addExecutable(.{
         .name = "vail-min-tls13-client",
         .root_module = b.createModule(.{
@@ -472,6 +501,35 @@ pub fn build(b: *std.Build) void {
     );
     interop_vail_rustls_server_step.dependOn(
         &check_vail_rustls_server.step,
+    );
+
+    const min_quic_tls_client = b.addExecutable(.{
+        .name = "vail-min-quic-tls-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/min_quic_tls_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_rustls_quic_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_quic_server.step.dependOn(&build_rustls_server.step);
+    check_rustls_quic_server.addArg(
+        "timeout 15s bench/rustls_min_server/target/release/vail-rustls-quic-server src/crypto/testdata/rsa_signing_cert.pem src/crypto/testdata/rsa_signing_key.pem > /tmp/rustls-quic-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 12s $1 > /tmp/vail-quic-tls-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'rustls/AWS-LC QUIC server verified Vail client' /tmp/rustls-quic-server.log && " ++
+            "grep -q 'Vail QUIC client verified rustls/AWS-LC server' /tmp/vail-quic-tls-client.log",
+    );
+    check_rustls_quic_server.addArg("sh");
+    check_rustls_quic_server.addArtifactArg(min_quic_tls_client);
+    const interop_rustls_quic_server_step = b.step(
+        "interop-rustls-quic-server",
+        "Exercise Vail's QUIC TLS client with a rustls/AWS-LC server",
+    );
+    interop_rustls_quic_server_step.dependOn(
+        &check_rustls_quic_server.step,
     );
 
     const min_tls12_server = b.addExecutable(.{

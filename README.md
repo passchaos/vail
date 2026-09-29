@@ -285,6 +285,12 @@ Public Key authentication in both directions against rustls 0.23 with its
 AWS-LC provider. Both peers send a single DER SubjectPublicKeyInfo, verify
 RSA-PSS CertificateVerify possession, pin the peer SPKI exactly, and exchange
 encrypted application data.
+`zig build interop-rustls-quic-client` drives a rustls/AWS-LC QUIC client
+against Vail's server adapter, while `interop-rustls-quic-server` exercises the
+reverse direction. Both checks exchange raw CRYPTO-stream handshake bytes,
+perform real X25519 key exchange, authenticate RSA-PSS CertificateVerify and
+both Finished messages, and require matching `h3` ALPN and opaque transport
+parameters without linking Rust code into Vail.
 `zig build interop-openssl-tls12-server` and
 `zig build interop-rustls-tls12-server` exercise Vail's incremental TLS 1.2
 server, requiring ECDHE-RSA-AES128-GCM-SHA256, Extended Master Secret,
