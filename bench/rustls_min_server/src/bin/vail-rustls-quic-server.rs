@@ -16,6 +16,11 @@ fn main() {
     let _executable = args.next();
     let certificate_path = args.next().expect("certificate path");
     let key_path = args.next().expect("private-key path");
+    let hybrid = match args.next().as_deref() {
+        None => false,
+        Some("hybrid") => true,
+        Some(_) => panic!("expected optional hybrid mode"),
+    };
     assert!(args.next().is_none());
 
     let mut certificate_reader = BufReader::new(File::open(certificate_path).unwrap());
@@ -30,7 +35,11 @@ fn main() {
     let mut provider = rustls::crypto::aws_lc_rs::default_provider();
     provider.cipher_suites =
         vec![rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256];
-    provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519];
+    provider.kx_groups = if hybrid {
+        vec![rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768]
+    } else {
+        vec![rustls::crypto::aws_lc_rs::kx_group::X25519]
+    };
     let mut config = ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .unwrap()
@@ -39,7 +48,12 @@ fn main() {
         .unwrap();
     config.alpn_protocols.push(b"h3".to_vec());
 
-    let listener = TcpListener::bind("127.0.0.1:24457").unwrap();
+    let listener = TcpListener::bind(if hybrid {
+        "127.0.0.1:24461"
+    } else {
+        "127.0.0.1:24457"
+    })
+    .unwrap();
     let (mut socket, _) = listener.accept().unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(8)))
@@ -80,7 +94,10 @@ fn main() {
         connection.quic_transport_parameters(),
         Some(CLIENT_TRANSPORT_PARAMETERS)
     );
-    println!("rustls/AWS-LC QUIC server verified Vail client");
+    println!(
+        "rustls/AWS-LC QUIC server verified Vail client group={}",
+        if hybrid { "X25519MLKEM768" } else { "X25519" }
+    );
 }
 
 fn drain_until_key_change(

@@ -12,7 +12,15 @@ const CLIENT_TRANSPORT_PARAMETERS: &[u8] = &[0x01, 0x02, 0x03];
 const SERVER_TRANSPORT_PARAMETERS: &[u8] = &[0x04, 0x05, 0x06];
 
 fn main() {
-    let certificate_path = std::env::args().nth(1).expect("certificate path");
+    let mut args = std::env::args();
+    let _executable = args.next();
+    let certificate_path = args.next().expect("certificate path");
+    let hybrid = match args.next().as_deref() {
+        None => false,
+        Some("hybrid") => true,
+        Some(_) => panic!("expected optional hybrid mode"),
+    };
+    assert!(args.next().is_none());
     let mut certificate_reader = BufReader::new(File::open(certificate_path).unwrap());
     let certificates = rustls_pemfile::certs(&mut certificate_reader)
         .collect::<Result<Vec<_>, _>>()
@@ -23,7 +31,11 @@ fn main() {
     let mut provider = rustls::crypto::aws_lc_rs::default_provider();
     provider.cipher_suites =
         vec![rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256];
-    provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519];
+    provider.kx_groups = if hybrid {
+        vec![rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768]
+    } else {
+        vec![rustls::crypto::aws_lc_rs::kx_group::X25519]
+    };
     let mut config = ClientConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .unwrap()
@@ -38,7 +50,12 @@ fn main() {
         CLIENT_TRANSPORT_PARAMETERS.to_vec(),
     )
     .unwrap();
-    let mut socket = TcpStream::connect("127.0.0.1:24456").unwrap();
+    let mut socket = TcpStream::connect(if hybrid {
+        "127.0.0.1:24460"
+    } else {
+        "127.0.0.1:24456"
+    })
+    .unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(8)))
         .unwrap();
@@ -76,7 +93,10 @@ fn main() {
         connection.quic_transport_parameters(),
         Some(SERVER_TRANSPORT_PARAMETERS)
     );
-    println!("rustls/AWS-LC QUIC client completed");
+    println!(
+        "rustls/AWS-LC QUIC client completed group={}",
+        if hybrid { "X25519MLKEM768" } else { "X25519" }
+    );
 }
 
 fn drain_until_key_change(

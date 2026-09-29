@@ -10,13 +10,21 @@ const certificate_der = decodeHex(rsa_vectors.certificate_hex);
 const private_key_der = decodeHex(rsa_vectors.private_key_pkcs8_hex);
 
 pub fn main(init: std.process.Init) !void {
+    var args = try init.minimal.args.iterateAllocator(init.gpa);
+    defer args.deinit();
+    _ = args.next();
+    const hybrid = if (args.next()) |mode|
+        if (std.mem.eql(u8, mode, "hybrid")) true else return error.InvalidArguments
+    else
+        false;
+    if (args.next() != null) return error.InvalidArguments;
     const allocator = std.heap.smp_allocator;
     const listener = try sysSocket();
     defer _ = linux.close(listener);
     try sysReuseAddr(listener);
     var address = std.mem.zeroes(linux.sockaddr.in);
     address.family = linux.AF.INET;
-    address.port = std.mem.nativeToBig(u16, 24456);
+    address.port = std.mem.nativeToBig(u16, if (hybrid) 24460 else 24456);
     address.addr = std.mem.nativeToBig(u32, 0x7f000001);
     try sysBind(listener, @ptrCast(&address), @sizeOf(linux.sockaddr.in));
     try sysListen(listener, 1);
@@ -38,16 +46,27 @@ pub fn main(init: std.process.Init) !void {
     if (!try parsed_client.supportsAlpnProtocol("h3")) {
         return error.MissingH3;
     }
+    const selected_group = if (hybrid)
+        vail.tls.key_exchange.x25519_mlkem768.named_group
+    else
+        vail.tls.key_exchange.named_group_x25519;
     const client_share = (try parsed_client.keyShareForGroup(
-        vail.tls.key_exchange.named_group_x25519,
-    )) orelse return error.MissingX25519Share;
+        selected_group,
+    )) orelse return error.MissingKeyShare;
 
-    var key_material = vail.tls.key_exchange.ServerKeyMaterial{
-        .x25519 = [_]u8{0xc1} ** vail.tls.key_exchange.secret_len,
-    };
+    var key_material: vail.tls.key_exchange.ServerKeyMaterial = if (hybrid)
+        .{ .x25519_mlkem768 = .{
+            .x25519_secret = [_]u8{0xc1} **
+                vail.tls.key_exchange.x25519_mlkem768.x25519_secret_len,
+            .encaps_seed = [_]u8{0xc3} **
+                vail.tls.key_exchange.x25519_mlkem768.encaps_seed_len,
+        } }
+    else
+        .{ .x25519 = [_]u8{0xc1} ** vail.tls.key_exchange.secret_len };
     defer key_material.wipe();
     var exchange = try key_material.respond(client_share.key_exchange);
     defer exchange.deinit();
+    const groups = [_]u16{selected_group};
 
     const private_key = try vail.crypto.rsa.PrivateKey.fromDer(&private_key_der);
     var prepared_key = try private_key.prepare();
@@ -72,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
             .parsed_client_hello = parsed_client,
             .policy = .{
                 .cipher_suites = &.{.aes_128_gcm_sha256},
-                .groups = &.{vail.tls.key_exchange.named_group_x25519},
+                .groups = &groups,
                 .alpn_protocols = &.{"h3"},
                 .quic_transport_parameters = &server_transport_parameters,
             },
@@ -98,7 +117,10 @@ pub fn main(init: std.process.Init) !void {
     if (verified.peer_certificate_chain.len != 0) {
         return error.UnexpectedClientCertificate;
     }
-    std.debug.print("Vail QUIC server verified rustls/AWS-LC client\n", .{});
+    std.debug.print(
+        "Vail QUIC server verified rustls/AWS-LC client group={s}\n",
+        .{if (hybrid) "X25519MLKEM768" else "X25519"},
+    );
 }
 
 fn readFrame(fd: i32, allocator: std.mem.Allocator) ![]u8 {

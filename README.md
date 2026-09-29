@@ -299,6 +299,10 @@ reverse direction. Both checks exchange raw CRYPTO-stream handshake bytes,
 perform real X25519 key exchange, authenticate RSA-PSS CertificateVerify and
 both Finished messages, and require matching `h3` ALPN and opaque transport
 parameters without linking Rust code into Vail.
+`interop-rustls-quic-hybrid-client` and
+`interop-rustls-quic-hybrid-server` repeat both directions with registered
+X25519MLKEM768 (`0x11ec`), proving that Zig std's ML-KEM implementation and
+AWS-LC agree on the complete hybrid wire shares and derived handshake secrets.
 `zig build interop-openssl-tls12-server` and
 `zig build interop-rustls-tls12-server` exercise Vail's incremental TLS 1.2
 server, requiring ECDHE-RSA-AES128-GCM-SHA256, Extended Master Secret,
