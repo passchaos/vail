@@ -166,9 +166,11 @@ The current foundation provides:
   emits plaintext CRYPTO-stream flights by encryption level; the client
   authenticates the server flight, returns owned ALPN/transport parameters,
   emits its plaintext Finished flight, and derives matching Handshake/1-RTT
-  packet keys. Both sides require QUIC transport parameters and a common ALPN,
-  while packetization, retransmission, packet-number spaces, and
-  congestion/recovery remain transport responsibilities.
+  packet keys. The server can request and authenticate mTLS and verifies the
+  client's Finished before returning an owned peer chain. Both sides require
+  QUIC transport parameters and a common ALPN, while packetization,
+  retransmission, packet-number spaces, and congestion/recovery remain
+  transport responsibilities.
 - ShangMi coverage: SM2 signs and verifies ZA-bound raw/DER signatures against
   SEC1 public keys and SM2 X.509 SubjectPublicKeyInfo, and is wired into TLS
   CertificateVerify generation/verification for raw and X.509 SM2 keys,

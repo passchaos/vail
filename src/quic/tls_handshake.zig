@@ -39,15 +39,22 @@ pub const Error = std.mem.Allocator.Error || server_flight.Error ||
 };
 
 pub const Result = struct {
+    allocator: std.mem.Allocator,
     selection: server_flight.Selection,
     handshake_secret: secret.Secret,
     client_handshake_traffic_secret: secret.Secret,
     server_handshake_traffic_secret: secret.Secret,
     transcript_after_server_finished: transcript.Digest,
+    transcript_state_after_server_finished: transcript.State,
     handshake_packet_keys: tls_secrets.DirectionalKeys,
     application_packet_keys: tls_secrets.DirectionalKeys,
+    client_auth: ?ClientAuthState,
 
     pub fn deinit(self: *Result) void {
+        if (self.client_auth) |state| {
+            self.allocator.free(state.request_context);
+            self.allocator.free(state.certificate_compression_algorithms);
+        }
         self.handshake_secret.deinit();
         self.client_handshake_traffic_secret.deinit();
         self.server_handshake_traffic_secret.deinit();
@@ -66,7 +73,35 @@ pub const Options = struct {
     shared_secret: []const u8,
     certificate_chain: []const []const u8,
     signer: auth.Signer,
+    client_auth: ?ClientAuthOptions = null,
     labels: traffic.Labels = traffic.labels_v1,
+};
+
+pub const ClientAuthOptions = struct {
+    policy: client_auth.ServerPolicy,
+    request_context: []const u8 = &.{},
+    certificate_authorities: []const []const u8 = &.{},
+    certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{ .zlib, .brotli },
+    max_decompressed_certificate_len: usize = 64 * 1024,
+};
+
+pub const ClientAuthState = struct {
+    policy: client_auth.ServerPolicy,
+    request_context: []u8,
+    certificate_compression_algorithms: []certificate_compression.Algorithm,
+    max_decompressed_certificate_len: usize,
+};
+
+pub const ClientFlightResult = struct {
+    allocator: std.mem.Allocator,
+    peer_certificate_chain: [][]const u8,
+    client_certificate_compression: ?certificate_compression.Algorithm,
+    transcript_after_client_finished: transcript.Digest,
+
+    pub fn deinit(self: *ClientFlightResult) void {
+        freeCertificateChain(self.allocator, self.peer_certificate_chain);
+        self.* = undefined;
+    }
 };
 
 pub const ClientOptions = struct {
@@ -290,14 +325,13 @@ pub fn writeServerCryptoFlight(
     // packet-protects those frames with Initial keys derived from the DCID.
     try initial_crypto.appendSlice(allocator, server_hello_msg.items);
 
-    const hello_hash = transcript.hashFor(
-        selection.suite.hash(),
-        &.{ options.client_hello_bytes, server_hello_msg.items },
-    );
+    var transcript_state = transcript.State.init(selection.suite.hash());
+    transcript_state.update(options.client_hello_bytes);
+    transcript_state.update(server_hello_msg.items);
     var handshake = try key_schedule.deriveHandshakeFor(
         selection.suite.hash(),
         options.shared_secret,
-        hello_hash,
+        transcript_state.digest(),
         null,
     );
     defer handshake.early_secret.deinit();
@@ -320,6 +354,26 @@ pub fn writeServerCryptoFlight(
             null,
     });
     try handshake_crypto.appendSlice(allocator, encrypted_extensions.items);
+    transcript_state.update(encrypted_extensions.items);
+
+    var certificate_request: std.ArrayList(u8) = .empty;
+    defer certificate_request.deinit(allocator);
+    if (options.client_auth) |client_auth_options| {
+        if (client_auth_options.policy.certificate_type !=
+            selection.client_certificate_type)
+        {
+            return error.NoSupportedCertificateType;
+        }
+        try client_auth.writeRequestWithCompression(
+            &certificate_request,
+            allocator,
+            client_auth_options.request_context,
+            client_auth_options.certificate_authorities,
+            client_auth_options.certificate_compression_algorithms,
+        );
+        try handshake_crypto.appendSlice(allocator, certificate_request.items);
+        transcript_state.update(certificate_request.items);
+    }
 
     var certificate: std.ArrayList(u8) = .empty;
     defer certificate.deinit(allocator);
@@ -329,56 +383,29 @@ pub fn writeServerCryptoFlight(
         options.certificate_chain,
     );
     try handshake_crypto.appendSlice(allocator, certificate.items);
+    transcript_state.update(certificate.items);
 
-    const certificate_verify_hash = transcript.hashFor(
-        selection.suite.hash(),
-        &.{
-            options.client_hello_bytes,
-            server_hello_msg.items,
-            encrypted_extensions.items,
-            certificate.items,
-        },
-    );
     var certificate_verify: std.ArrayList(u8) = .empty;
     defer certificate_verify.deinit(allocator);
     try auth.writeCertificateVerify(
         &certificate_verify,
         allocator,
         options.signer,
-        certificate_verify_hash.bytes(),
+        transcript_state.digest().bytes(),
     );
     try handshake_crypto.appendSlice(allocator, certificate_verify.items);
+    transcript_state.update(certificate_verify.items);
 
-    const finished_hash = transcript.hashFor(
-        selection.suite.hash(),
-        &.{
-            options.client_hello_bytes,
-            server_hello_msg.items,
-            encrypted_extensions.items,
-            certificate.items,
-            certificate_verify.items,
-        },
-    );
     const verify_data = try key_schedule.computeFinishedFor(
         handshake.server_traffic_secret,
-        finished_hash,
+        transcript_state.digest(),
     );
     var finished: std.ArrayList(u8) = .empty;
     defer finished.deinit(allocator);
     try writeFinished(&finished, allocator, verify_data.bytes());
     try handshake_crypto.appendSlice(allocator, finished.items);
-
-    const transcript_after_server_finished = transcript.hashFor(
-        selection.suite.hash(),
-        &.{
-            options.client_hello_bytes,
-            server_hello_msg.items,
-            encrypted_extensions.items,
-            certificate.items,
-            certificate_verify.items,
-            finished.items,
-        },
-    );
+    transcript_state.update(finished.items);
+    const transcript_after_server_finished = transcript_state.digest();
     var application = try key_schedule.deriveApplicationFor(
         handshake.handshake_secret,
         transcript_after_server_finished,
@@ -387,12 +414,33 @@ pub fn writeServerCryptoFlight(
     defer application.client_traffic_secret.deinit();
     defer application.server_traffic_secret.deinit();
 
+    const retained_client_auth: ?ClientAuthState = if (options.client_auth) |value| blk: {
+        const request_context = try allocator.dupe(u8, value.request_context);
+        errdefer allocator.free(request_context);
+        const algorithms = try allocator.dupe(
+            certificate_compression.Algorithm,
+            value.certificate_compression_algorithms,
+        );
+        break :blk .{
+            .policy = value.policy,
+            .request_context = request_context,
+            .certificate_compression_algorithms = algorithms,
+            .max_decompressed_certificate_len = value.max_decompressed_certificate_len,
+        };
+    } else null;
+    errdefer if (retained_client_auth) |state| {
+        allocator.free(state.request_context);
+        allocator.free(state.certificate_compression_algorithms);
+    };
+
     return .{
+        .allocator = allocator,
         .selection = selection,
         .handshake_secret = handshake.handshake_secret,
         .client_handshake_traffic_secret = handshake.client_traffic_secret,
         .server_handshake_traffic_secret = handshake.server_traffic_secret,
         .transcript_after_server_finished = transcript_after_server_finished,
+        .transcript_state_after_server_finished = transcript_state,
         .handshake_packet_keys = try tls_secrets.handshakeKeys(
             selection.suite,
             handshake,
@@ -403,7 +451,160 @@ pub fn writeServerCryptoFlight(
             application,
             options.labels,
         ),
+        .client_auth = retained_client_auth,
     };
+}
+
+/// Verify the client's plaintext Handshake CRYPTO flight against the state
+/// returned by `writeServerCryptoFlight`. When client authentication was
+/// requested, the returned certificate chain is deep-owned.
+pub fn verifyClientCryptoFlight(
+    allocator: std.mem.Allocator,
+    server: *const Result,
+    client_handshake_crypto: []const u8,
+) Error!ClientFlightResult {
+    if (server.client_auth) |auth_state| {
+        var offset: usize = 0;
+        const certificate = try takeHandshakeMessage(
+            client_handshake_crypto,
+            &offset,
+        );
+        if (certificate[0] != auth.handshake_type_certificate and
+            certificate[0] !=
+                certificate_compression.handshake_type_compressed_certificate)
+        {
+            return error.InvalidClientFlight;
+        }
+        var next = try takeHandshakeMessage(client_handshake_crypto, &offset);
+        const certificate_verify = if (next[0] ==
+            auth.handshake_type_certificate_verify)
+        blk: {
+            const value = next;
+            next = try takeHandshakeMessage(client_handshake_crypto, &offset);
+            break :blk value;
+        } else null;
+        if (next[0] != handshake_type_finished or
+            offset != client_handshake_crypto.len)
+        {
+            return error.InvalidClientFlight;
+        }
+
+        var verification = try client_auth.verifyClientFlightWithCompression(
+            allocator,
+            auth_state.policy,
+            auth_state.request_context,
+            server.transcript_state_after_server_finished,
+            server.client_handshake_traffic_secret,
+            certificate,
+            certificate_verify,
+            next,
+            auth_state.certificate_compression_algorithms,
+            auth_state.max_decompressed_certificate_len,
+        );
+        defer verification.deinit(allocator);
+        const peer_certificate_chain = try copyCertificateChain(
+            allocator,
+            verification.certificate.entries,
+        );
+        return .{
+            .allocator = allocator,
+            .peer_certificate_chain = peer_certificate_chain,
+            .client_certificate_compression = verification.certificate_compression,
+            .transcript_after_client_finished = verification.transcript_after_client_finished,
+        };
+    }
+
+    var offset: usize = 0;
+    const finished = try takeHandshakeMessage(client_handshake_crypto, &offset);
+    if (offset != client_handshake_crypto.len) {
+        return error.InvalidClientFlight;
+    }
+    var state = server.transcript_state_after_server_finished;
+    try verifyClientFinished(
+        &state,
+        server.client_handshake_traffic_secret,
+        finished,
+    );
+    return .{
+        .allocator = allocator,
+        .peer_certificate_chain = try allocator.alloc([]const u8, 0),
+        .client_certificate_compression = null,
+        .transcript_after_client_finished = state.digest(),
+    };
+}
+
+fn verifyClientFinished(
+    state: *transcript.State,
+    client_handshake_traffic_secret: secret.Secret,
+    message: []const u8,
+) Error!void {
+    if (message.len < 4 or message[0] != handshake_type_finished) {
+        return error.InvalidClientFlight;
+    }
+    const body_len =
+        (@as(usize, message[1]) << 16) |
+        (@as(usize, message[2]) << 8) |
+        message[3];
+    if (body_len != client_handshake_traffic_secret.hash.len() or
+        body_len != message.len - 4)
+    {
+        return error.InvalidClientFlight;
+    }
+    var actual = try secret.Secret.init(
+        client_handshake_traffic_secret.hash,
+        message[4..],
+    );
+    defer actual.deinit();
+    try key_schedule.verifyFinishedFor(
+        client_handshake_traffic_secret,
+        state.digest(),
+        actual,
+    );
+    state.update(message);
+}
+
+fn takeHandshakeMessage(
+    bytes: []const u8,
+    offset: *usize,
+) Error![]const u8 {
+    if (bytes.len -| offset.* < 4) return error.InvalidClientFlight;
+    const body_len =
+        (@as(usize, bytes[offset.* + 1]) << 16) |
+        (@as(usize, bytes[offset.* + 2]) << 8) |
+        bytes[offset.* + 3];
+    const message_len = std.math.add(usize, 4, body_len) catch
+        return error.InvalidClientFlight;
+    if (message_len > bytes.len - offset.*) {
+        return error.InvalidClientFlight;
+    }
+    const message = bytes[offset.*..][0..message_len];
+    offset.* += message_len;
+    return message;
+}
+
+fn copyCertificateChain(
+    allocator: std.mem.Allocator,
+    certificates: []const []const u8,
+) std.mem.Allocator.Error![][]const u8 {
+    const copies = try allocator.alloc([]const u8, certificates.len);
+    var copied: usize = 0;
+    errdefer {
+        for (copies[0..copied]) |certificate| allocator.free(certificate);
+        allocator.free(copies);
+    }
+    for (certificates, 0..) |certificate, index| {
+        copies[index] = try allocator.dupe(u8, certificate);
+        copied += 1;
+    }
+    return copies;
+}
+
+fn freeCertificateChain(
+    allocator: std.mem.Allocator,
+    certificates: [][]const u8,
+) void {
+    for (certificates) |certificate| allocator.free(certificate);
+    allocator.free(certificates);
 }
 
 fn writeFinished(
@@ -501,6 +702,18 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
     );
     const public_key = signing_key.public_key.toBytes();
     const public_key_spki = ed25519SubjectPublicKeyInfo(public_key);
+    const client_signing_key = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0x79} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const client_public_key_spki = ed25519SubjectPublicKeyInfo(
+        client_signing_key.public_key.toBytes(),
+    );
+    const client_identity = client_auth.ClientIdentity{
+        .certificate_chain = &.{&client_public_key_spki},
+        .signer = .{ .ed25519 = .{ .key_pair = client_signing_key } },
+        .certificate_type = .raw_public_key,
+    };
     const client_parameters = [_]u8{ 0x01, 0x04, 0x80, 0x00, 0x75, 0x30 };
     const server_parameters = [_]u8{ 0x03, 0x02, 0x44, 0xb0 };
     const shared_secret = [_]u8{0x72} ** 32;
@@ -516,6 +729,7 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
         .alpn_protocols = &.{"h3"},
         .quic_transport_parameters = &client_parameters,
         .server_certificate_types = &.{.raw_public_key},
+        .client_certificate_types = &.{.raw_public_key},
     });
     const parsed_client = try client_hello.parse(client_hello_bytes.items);
 
@@ -534,12 +748,22 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
                 .alpn_protocols = &.{"h3"},
                 .quic_transport_parameters = &server_parameters,
                 .server_certificate_type = .raw_public_key,
+                .client_certificate_type = .raw_public_key,
             },
             .server_random = [_]u8{0x75} ** 32,
             .server_key_share = &.{ 0x76, 0x77, 0x78 },
             .shared_secret = &shared_secret,
             .certificate_chain = &.{&public_key_spki},
             .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+            .client_auth = .{
+                .policy = .{
+                    .verifier = .{
+                        .pinned_raw_public_key = &client_public_key_spki,
+                    },
+                    .certificate_type = .raw_public_key,
+                },
+                .request_context = "quic-mtls",
+            },
         },
     );
     defer server_result.deinit();
@@ -559,6 +783,7 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
             },
             .server_name = "quic.example",
             .server_certificate_type = .raw_public_key,
+            .client_identity = client_identity,
         },
     );
     defer client_result.deinit();
@@ -599,17 +824,21 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
         &client_result.application_packet_keys.server.key,
     );
 
-    try std.testing.expectEqual(@as(usize, 36), client_crypto.items.len);
-    try std.testing.expectEqual(handshake_type_finished, client_crypto.items[0]);
-    var actual_finished = try secret.Secret.init(
-        .sha256,
-        client_crypto.items[4..],
+    var client_flight = try verifyClientCryptoFlight(
+        allocator,
+        &server_result,
+        client_crypto.items,
     );
-    defer actual_finished.deinit();
-    try key_schedule.verifyFinishedFor(
-        server_result.client_handshake_traffic_secret,
-        server_result.transcript_after_server_finished,
-        actual_finished,
+    defer client_flight.deinit();
+    try std.testing.expectEqualSlices(
+        u8,
+        &client_public_key_spki,
+        client_flight.peer_certificate_chain[0],
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        client_result.verified.transcript_after_client_finished.bytes(),
+        client_flight.transcript_after_client_finished.bytes(),
     );
 
     const encrypted_extensions_len = 4 +
@@ -644,6 +873,7 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
             },
             .server_name = "quic.example",
             .server_certificate_type = .raw_public_key,
+            .client_identity = client_identity,
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), rejected_output.items.len);
@@ -674,6 +904,7 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
             },
             .server_name = "quic.example",
             .server_certificate_type = .raw_public_key,
+            .client_identity = client_identity,
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), rejected_output.items.len);
@@ -693,9 +924,22 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
             },
             .server_name = "quic.example",
             .server_certificate_type = .raw_public_key,
+            .client_identity = client_identity,
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), rejected_output.items.len);
+
+    const tampered_client_crypto = try allocator.dupe(u8, client_crypto.items);
+    defer allocator.free(tampered_client_crypto);
+    tampered_client_crypto[tampered_client_crypto.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.BadClientFinished,
+        verifyClientCryptoFlight(
+            allocator,
+            &server_result,
+            tampered_client_crypto,
+        ),
+    );
 
     @memset(server_crypto.items, 0);
     try std.testing.expectEqualStrings("h3", client_result.selected_alpn);
