@@ -37,6 +37,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.quic.tls_handshake, "prepareRetryState"));
     try std.testing.expect(@hasDecl(vail.quic.tls_handshake, "ClientResult"));
     try std.testing.expect(@hasDecl(vail.quic.tls_handshake, "ClientFlightResult"));
+    try std.testing.expect(@hasDecl(vail.quic.tls_handshake, "ResumptionPsk"));
     try std.testing.expect(@hasDecl(
         vail.quic.tls_handshake.ClientResult,
         "deinit",
@@ -44,6 +45,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         vail.quic.tls_handshake.Result,
         "deinit",
+    ));
+    try std.testing.expect(@hasField(
+        vail.quic.tls_handshake.Result,
+        "resumed",
     ));
     try std.testing.expect(@hasDecl(vail.quic, "tls_secrets"));
     try std.testing.expect(@hasDecl(vail.quic.tls_secrets, "applicationKeys"));

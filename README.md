@@ -162,17 +162,18 @@ The current foundation provides:
 - QUIC transport-parameter TLS extension plumbing: ClientHello extraction,
   EncryptedExtensions emission, and opaque extension helpers so transport
   libraries can own parameter semantics while Vail owns TLS framing.
-- TLS-over-QUIC initial full-handshake adapters for both endpoints. The server
+- TLS-over-QUIC full and PSK-DHE handshake adapters for both endpoints. The server
   emits plaintext CRYPTO-stream flights by encryption level; the client
   authenticates the server flight, returns owned ALPN/transport parameters,
   emits its plaintext Finished flight, and derives matching Handshake/1-RTT
-  packet keys. Validated HelloRetryRequest state preserves the synthetic
-  `message_hash` transcript and enforces ClientHello2 consistency on both
-  endpoints. The server can request and authenticate mTLS and verifies the
-  client's Finished before returning an owned peer chain. Both sides require
-  QUIC transport parameters and a common ALPN, while packetization,
-  retransmission, packet-number spaces, and congestion/recovery remain
-  transport responsibilities.
+  packet keys. Resumption authenticates the one-identity PSK binder and can
+  fall back to a full certificate handshake. Validated HelloRetryRequest state
+  preserves the synthetic `message_hash` transcript, verifies the second
+  binder, and enforces ClientHello2 consistency on both endpoints. The server
+  can request and authenticate mTLS and verifies the client's Finished before
+  returning an owned peer chain. Both sides require QUIC transport parameters
+  and a common ALPN, while packetization, retransmission, packet-number spaces,
+  and congestion/recovery remain transport responsibilities.
 - ShangMi coverage: SM2 signs and verifies ZA-bound raw/DER signatures against
   SEC1 public keys and SM2 X.509 SubjectPublicKeyInfo, and is wired into TLS
   CertificateVerify generation/verification for raw and X.509 SM2 keys,
