@@ -653,4 +653,90 @@ pub fn build(b: *std.Build) void {
     interop_rustls_tls12_client_resumption_step.dependOn(
         &check_rustls_tls12_client_resumption.step,
     );
+
+    const min_versioned_server = b.addExecutable(.{
+        .name = "vail-min-versioned-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/min_versioned_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_versioned_tls13 = b.addSystemCommand(&.{ "sh", "-c" });
+    check_versioned_tls13.addArg(
+        "$1 > /tmp/vail-versioned-tls13-server.log 2>&1 & pid=$!; sleep 0.2; " ++
+            "printf ping | timeout 8s openssl s_client -connect 127.0.0.1:24450 -tls1_3 -groups X25519 -alpn h2 -ign_eof > /tmp/vail-versioned-tls13-client.log 2>&1 || true; wait $pid; " ++
+            "grep -q 'versioned server selected TLS 1.3' /tmp/vail-versioned-tls13-server.log && " ++
+            "grep -q 'vail auto tls13 ok' /tmp/vail-versioned-tls13-client.log",
+    );
+    check_versioned_tls13.addArg("sh");
+    check_versioned_tls13.addArtifactArg(min_versioned_server);
+    const interop_versioned_tls13_step = b.step(
+        "interop-openssl-versioned-server-tls13",
+        "Exercise automatic TLS 1.3 server negotiation with OpenSSL",
+    );
+    interop_versioned_tls13_step.dependOn(&check_versioned_tls13.step);
+
+    const check_versioned_tls12 = b.addSystemCommand(&.{ "sh", "-c" });
+    check_versioned_tls12.addArg(
+        "$1 > /tmp/vail-versioned-tls12-server.log 2>&1 & pid=$!; sleep 0.2; " ++
+            "printf ping | timeout 8s openssl s_client -connect 127.0.0.1:24450 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-256 -no_ticket -alpn http/1.1 -ign_eof > /tmp/vail-versioned-tls12-client.log 2>&1 || true; wait $pid; " ++
+            "grep -q 'versioned server selected TLS 1.2' /tmp/vail-versioned-tls12-server.log && " ++
+            "grep -q 'vail auto tls12 ok' /tmp/vail-versioned-tls12-client.log",
+    );
+    check_versioned_tls12.addArg("sh");
+    check_versioned_tls12.addArtifactArg(min_versioned_server);
+    const interop_versioned_tls12_step = b.step(
+        "interop-openssl-versioned-server-tls12",
+        "Exercise automatic TLS 1.2 server negotiation with OpenSSL",
+    );
+    interop_versioned_tls12_step.dependOn(&check_versioned_tls12.step);
+
+    const min_versioned_client = b.addExecutable(.{
+        .name = "vail-min-versioned-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/min_versioned_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_versioned_client_tls13 = b.addSystemCommand(&.{ "sh", "-c" });
+    check_versioned_client_tls13.addArg(
+        "work=$(mktemp -d /tmp/vail-versioned-client-tls13.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl s_server -accept 127.0.0.1:24451 -tls1_3 -groups X25519 -cert \"$work/cert.pem\" -key \"$work/key.pem\" -alpn h2 -www -naccept 1 >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 8s $1 >\"$work/client.log\" 2>&1; wait $pid; " ++
+            "grep -q 'versioned client selected TLS 1.3' \"$work/client.log\" && grep -q 'versioned client application data verified' \"$work/client.log\"",
+    );
+    check_versioned_client_tls13.addArg("sh");
+    check_versioned_client_tls13.addArtifactArg(min_versioned_client);
+    const interop_versioned_client_tls13_step = b.step(
+        "interop-openssl-versioned-client-tls13",
+        "Exercise automatic TLS 1.3 client negotiation with OpenSSL",
+    );
+    interop_versioned_client_tls13_step.dependOn(
+        &check_versioned_client_tls13.step,
+    );
+
+    const check_versioned_client_tls12 = b.addSystemCommand(&.{ "sh", "-c" });
+    check_versioned_client_tls12.addArg(
+        "work=$(mktemp -d /tmp/vail-versioned-client-tls12.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl s_server -accept 127.0.0.1:24451 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-256 -no_ticket -cert \"$work/cert.pem\" -key \"$work/key.pem\" -alpn h2 -www -naccept 1 >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 8s $1 >\"$work/client.log\" 2>&1; wait $pid; " ++
+            "grep -q 'versioned client selected TLS 1.2' \"$work/client.log\" && grep -q 'versioned client application data verified' \"$work/client.log\"",
+    );
+    check_versioned_client_tls12.addArg("sh");
+    check_versioned_client_tls12.addArtifactArg(min_versioned_client);
+    const interop_versioned_client_tls12_step = b.step(
+        "interop-openssl-versioned-client-tls12",
+        "Exercise automatic TLS 1.2 client negotiation with OpenSSL",
+    );
+    interop_versioned_client_tls12_step.dependOn(
+        &check_versioned_client_tls12.step,
+    );
 }

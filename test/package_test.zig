@@ -75,6 +75,14 @@ test "public modules are reachable" {
         "ServerConnection",
     ));
     try std.testing.expect(@hasDecl(vail.tls, "transcript"));
+    try std.testing.expect(@hasDecl(
+        vail.tls.versioned_server_connection,
+        "ServerConnection",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.versioned_client_connection,
+        "ClientConnection",
+    ));
     try std.testing.expect(@hasDecl(vail, "x509"));
     try std.testing.expect(@hasDecl(vail.x509, "trust"));
     try std.testing.expect(@hasDecl(vail.x509, "identity"));

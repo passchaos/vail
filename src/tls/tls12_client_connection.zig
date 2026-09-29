@@ -10,6 +10,8 @@
 const std = @import("std");
 const alert = @import("alert.zig");
 const auth = @import("auth.zig");
+const certificate_compression = @import("certificate_compression.zig");
+const cipher_suite = @import("cipher_suite.zig");
 const client_auth = @import("client_auth.zig");
 const client_hello = @import("client_hello.zig");
 const key_exchange = @import("key_exchange.zig");
@@ -26,6 +28,7 @@ pub const Error = std.mem.Allocator.Error || stream.Error ||
     ClientHelloTooLarge,
     ServerFlightTooLarge,
     UnsupportedProfile,
+    DowngradeDetected,
     UnexpectedRecord,
     UnexpectedHandshakeMessage,
     InvalidChangeCipherSpec,
@@ -51,6 +54,12 @@ pub const Config = struct {
     client_private_key: ?*[key_exchange.p256.secret_len]u8 = null,
     client_private_key_p384: ?*[key_exchange.p384.secret_len]u8 = null,
     policy: handshake.Policy = .{},
+    tls13_cipher_suites: []const cipher_suite.Suite = &.{},
+    client_hello_key_share: ?client_hello.OfferedKeyShare = null,
+    client_hello_supported_groups: []const u16 = &.{},
+    supported_versions: []const u16 = &.{0x0303},
+    request_ocsp: bool = false,
+    certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_verifier: auth.ClientVerifier,
     client_identity: ?client_auth.ClientIdentity = null,
     resumption: ?tls12.Session = null,
@@ -336,13 +345,18 @@ pub fn ClientConnection(
                 else
                     config.session_id,
                 .server_name = config.server_name,
-                .key_share = null,
-                .supported_groups = config.policy.groups,
-                .cipher_suites = &.{},
+                .key_share = config.client_hello_key_share,
+                .supported_groups = if (config.client_hello_supported_groups.len != 0)
+                    config.client_hello_supported_groups
+                else
+                    config.policy.groups,
+                .cipher_suites = config.tls13_cipher_suites,
                 .additional_cipher_suites = suites.items,
-                .supported_versions = &.{0x0303},
+                .supported_versions = config.supported_versions,
                 .alpn_protocols = config.policy.alpn_protocols,
+                .request_ocsp = config.request_ocsp,
                 .offer_extended_master_secret = true,
+                .certificate_compression_algorithms = config.certificate_compression_algorithms,
             });
             if (hello.items.len > record13.max_plaintext_len) {
                 return error.ClientHelloTooLarge;
@@ -374,6 +388,87 @@ pub fn ClientConnection(
                     .client_random = config.random,
                     .client_hello = owned_hello,
                     .resumption = resumption,
+                },
+            };
+        }
+
+        /// Initialize from an already-emitted ClientHello. This is used by the
+        /// version-negotiating client so TLS 1.2 and TLS 1.3 share one exact
+        /// offer and transcript rather than racing two independently encoded
+        /// hellos.
+        pub fn initWithClientHello(
+            config: Config,
+            encoded_client_hello: []const u8,
+        ) Error!Self {
+            try validatePolicy(config.policy);
+            if (config.resumption != null) return error.UnsupportedProfile;
+            const parsed = try client_hello.parse(encoded_client_hello);
+            if (!parsed.supportsVersion(0x0303) or
+                !parsed.offers_extended_master_secret or
+                !parsed.offers_secure_renegotiation)
+            {
+                return error.UnsupportedProfile;
+            }
+            var has_suite = false;
+            for (config.policy.cipher_suites) |suite| {
+                if (parsed.hasCipherSuite(@intFromEnum(suite))) {
+                    has_suite = true;
+                    break;
+                }
+            }
+            if (!has_suite) return error.UnsupportedProfile;
+
+            var private_key: ?[key_exchange.p256.secret_len]u8 =
+                if (config.client_private_key) |value| value.* else null;
+            if (config.client_private_key) |value| {
+                std.crypto.secureZero(u8, value);
+            }
+            errdefer if (private_key) |*value| {
+                std.crypto.secureZero(u8, value);
+            };
+            var private_key_p384: ?[key_exchange.p384.secret_len]u8 =
+                if (config.client_private_key_p384) |value| value.* else null;
+            if (config.client_private_key_p384) |value| {
+                std.crypto.secureZero(u8, value);
+            }
+            errdefer if (private_key_p384) |*value| {
+                std.crypto.secureZero(u8, value);
+            };
+            for (config.policy.groups) |group| switch (group) {
+                key_exchange.named_group_secp256r1 => {
+                    if (private_key == null or !try parsed.supportsGroup(group)) {
+                        return error.UnsupportedProfile;
+                    }
+                },
+                key_exchange.named_group_secp384r1 => {
+                    if (private_key_p384 == null or
+                        !try parsed.supportsGroup(group))
+                    {
+                        return error.UnsupportedProfile;
+                    }
+                },
+                else => return error.UnsupportedProfile,
+            };
+            const owned_hello = try config.allocator.dupe(
+                u8,
+                encoded_client_hello,
+            );
+            errdefer {
+                std.crypto.secureZero(u8, owned_hello);
+                config.allocator.free(owned_hello);
+            }
+            return .{
+                .allocator = config.allocator,
+                .policy = config.policy,
+                .server_name = config.server_name,
+                .server_verifier = config.server_verifier,
+                .client_identity = config.client_identity,
+                .pending = .{
+                    .allocator = config.allocator,
+                    .client_private_key = private_key,
+                    .client_private_key_p384 = private_key_p384,
+                    .client_random = config.random,
+                    .client_hello = owned_hello,
                 },
             };
         }
@@ -506,6 +601,10 @@ pub fn ClientConnection(
                 messages.server_hello,
                 self.policy,
                 self.server_name != null,
+            );
+            try checkDowngradeSentinel(
+                pending.client_hello,
+                server_hello.random,
             );
             if (pending.resumption) |*session| session.deinit();
             pending.resumption = null;
@@ -776,6 +875,10 @@ pub fn ClientConnection(
                 self.policy,
                 self.server_name != null,
             );
+            try checkDowngradeSentinel(
+                pending.client_hello,
+                server_hello.random,
+            );
             if (!std.mem.eql(u8, server_hello.session_id, session.id())) {
                 return false;
             }
@@ -1010,6 +1113,18 @@ fn copySessionId(id: []const u8) [tls12.max_session_id_len]u8 {
     var result = [_]u8{0} ** tls12.max_session_id_len;
     @memcpy(result[0..id.len], id);
     return result;
+}
+
+fn checkDowngradeSentinel(
+    encoded_client_hello: []const u8,
+    server_random: [32]u8,
+) Error!void {
+    const offered = try client_hello.parse(encoded_client_hello);
+    if (offered.supportsVersion(0x0304) and std.mem.eql(
+        u8,
+        server_random[24..32],
+        "DOWNGRD\x01",
+    )) return error.DowngradeDetected;
 }
 
 fn copyCertificateChain(
@@ -1413,6 +1528,30 @@ test "TLS 1.2 client rejects a bad encrypted server Finished and locks" {
         error.ConnectionFailed,
         client.receive(&.{}, &output),
     );
+}
+
+test "TLS 1.2 client rejects an authenticated downgrade sentinel" {
+    var hello: std.ArrayList(u8) = .empty;
+    defer hello.deinit(std.testing.allocator);
+    try client_hello.writeWithKeyShare(&hello, std.testing.allocator, .{
+        .random = [_]u8{0xa4} ** 32,
+        .key_share = null,
+        .supported_groups = &.{key_exchange.named_group_secp256r1},
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .additional_cipher_suites = &.{
+            @intFromEnum(tls12.Suite.ecdhe_rsa_aes_128_gcm_sha256),
+            0x00ff,
+        },
+        .supported_versions = &.{ 0x0304, 0x0303 },
+        .offer_extended_master_secret = true,
+    });
+    var downgrade_random = [_]u8{0xa5} ** 32;
+    downgrade_random[24..32].* = "DOWNGRD\x01".*;
+    try std.testing.expectError(
+        error.DowngradeDetected,
+        checkDowngradeSentinel(hello.items, downgrade_random),
+    );
+    try checkDowngradeSentinel(hello.items, [_]u8{0xa6} ** 32);
 }
 
 test "TLS 1.2 client and server complete every AEAD suite on P-256" {

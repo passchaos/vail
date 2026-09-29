@@ -18,6 +18,8 @@ pub const record = @import("record.zig");
 pub const secret = @import("secret.zig");
 pub const stream = @import("stream.zig");
 pub const traffic = @import("traffic.zig");
+pub const versioned_server_connection = @import("versioned_server_connection.zig");
+pub const versioned_client_connection = @import("versioned_client_connection.zig");
 pub const server_hello = @import("server_hello.zig");
 pub const server_handshake = @import("server_handshake.zig");
 pub const server_connection = @import("server_connection.zig");
@@ -43,6 +45,8 @@ test {
     _ = record;
     _ = stream;
     _ = traffic;
+    _ = versioned_server_connection;
+    _ = versioned_client_connection;
     _ = tls12;
     _ = tls12_client_connection;
     _ = tls12_handshake;

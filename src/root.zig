@@ -41,6 +41,8 @@ test {
     _ = tls.secret;
     _ = tls.stream;
     _ = tls.traffic;
+    _ = tls.versioned_server_connection;
+    _ = tls.versioned_client_connection;
     _ = tls.server_hello;
     _ = tls.server_handshake;
     _ = tls.server_connection;

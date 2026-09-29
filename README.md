@@ -17,6 +17,10 @@ The current foundation provides:
   transition to application traffic, HelloRetryRequest with RFC 8446
   `message_hash` transcripts and cookies, automatic sequence numbers and AEAD
   usage limits, KeyUpdate generations, and bidirectional `close_notify`;
+- unified incremental client and server frontends that emit/consume one
+  ClientHello, prefer TLS 1.3 when both peers support it, otherwise select TLS
+  1.2 without reconstructing transcript bytes, and wipe the unused version's
+  one-shot key material;
 - Ed25519, ECDSA P-256, ECDSA P-384, and SM2/SM3 verifier
   implementations, plus RSA-PSS/RSAE SHA-256/384/512 X.509 CertificateVerify
   and DER RSAPublicKey pin verification. A built-in pure-Zig RSA signer accepts
@@ -236,6 +240,11 @@ keys.
 The equivalent `interop-rustls-tls12-resumption-client` and
 `interop-rustls-tls12-resumption-server` steps require rustls with AWS-LC to
 report the second connection as `Resumed`.
+`interop-openssl-versioned-server-tls13`,
+`interop-openssl-versioned-server-tls12`,
+`interop-openssl-versioned-client-tls13`, and
+`interop-openssl-versioned-client-tls12` exercise the unified version-selecting
+entry points against real peers.
 
 TLS 1.3 server flights can also emit CertificateRequest and retain an
 incremental negotiated-hash transcript. `tls.client_auth.verifyClientFlight`
