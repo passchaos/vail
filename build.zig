@@ -458,11 +458,11 @@ pub fn build(b: *std.Build) void {
     check_rustls_tls13_resumption.step.dependOn(&build_rustls_min.step);
     check_rustls_tls13_resumption.addArg(
         "timeout 25s $1 > /tmp/vail-rustls-tls13-resume-server.log 2>&1 & pid=$!; " ++
-            "sleep 0.2; timeout 20s bench/rustls_min_client/target/release/vail-rustls-tls13-resume-client src/crypto/testdata/rsa_signing_cert.pem > /tmp/vail-rustls-tls13-resume-client.log 2>&1; client_status=$?; " ++
+            "sleep 0.2; timeout 20s bench/rustls_min_client/target/release/vail-rustls-tls13-resume-client src/crypto/testdata/rsa_signing_cert.pem > /tmp/rustls-vail-tls13-resume-client.log 2>&1; client_status=$?; " ++
             "wait $pid; server_status=$?; " ++
             "test $client_status -eq 0 -a $server_status -eq 0 && " ++
             "grep -q 'Vail TLS 1.3 ticket resumption verified' /tmp/vail-rustls-tls13-resume-server.log && " ++
-            "grep -q 'rustls/AWS-LC TLS 1.3 ticket resumption verified' /tmp/vail-rustls-tls13-resume-client.log",
+            "grep -q 'rustls/AWS-LC TLS 1.3 ticket resumption verified' /tmp/rustls-vail-tls13-resume-client.log",
     );
     check_rustls_tls13_resumption.addArg("sh");
     check_rustls_tls13_resumption.addArtifactArg(min_tls13_resume_server);
@@ -561,6 +561,39 @@ pub fn build(b: *std.Build) void {
     );
     interop_rustls_quic_server_step.dependOn(
         &check_rustls_quic_server.step,
+    );
+
+    const min_tls13_resume_client = b.addExecutable(.{
+        .name = "vail-min-tls13-resume-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/min_tls13_resume_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_rustls_tls13_resumption_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_tls13_resumption_client.step.dependOn(&build_rustls_server.step);
+    check_rustls_tls13_resumption_client.addArg(
+        "timeout 25s bench/rustls_min_server/target/release/vail-rustls-tls13-resume-server src/crypto/testdata/rsa_signing_cert.pem src/crypto/testdata/rsa_signing_key.pem > /tmp/rustls-vail-tls13-resume-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 20s $1 > /tmp/vail-rustls-tls13-resume-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'rustls/AWS-LC TLS 1.3 server ticket resumption verified' /tmp/rustls-vail-tls13-resume-server.log && " ++
+            "grep -q 'Vail TLS 1.3 client ticket resumption verified' /tmp/vail-rustls-tls13-resume-client.log",
+    );
+    check_rustls_tls13_resumption_client.addArg("sh");
+    check_rustls_tls13_resumption_client.addArtifactArg(
+        min_tls13_resume_client,
+    );
+    const interop_rustls_tls13_resumption_client_step = b.step(
+        "interop-rustls-tls13-resumption-client",
+        "Exercise Vail's TLS 1.3 ticket client with rustls/AWS-LC",
+    );
+    interop_rustls_tls13_resumption_client_step.dependOn(
+        &check_rustls_tls13_resumption_client.step,
     );
 
     const min_tls12_server = b.addExecutable(.{

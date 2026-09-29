@@ -92,6 +92,9 @@ pub const Config = struct {
     server_verifier: auth.ClientVerifier,
     server_certificate_type: auth.CertificateType = .x509,
     client_identity: ?client_auth.ClientIdentity = null,
+    /// Advertise PSK-DHE support on a full handshake so the server may issue
+    /// a TLS 1.3 NewSessionTicket for a later connection.
+    request_resumption: bool = false,
     resumption: ?ClientPsk = null,
     ech: ?EchClientConfig = null,
 };
@@ -262,6 +265,7 @@ pub fn ClientConnection(
         server_certificate_type: auth.CertificateType,
         server_name: ?[]const u8,
         client_identity: ?client_auth.ClientIdentity,
+        request_resumption: bool,
         random: [32]u8,
         cipher_suites: []const cipher_suite.Suite,
         additional_cipher_suites: []const u16,
@@ -384,7 +388,8 @@ pub fn ClientConnection(
                     value.max_early_data_size != null,
                     null,
                 );
-            }
+            } else if (config.request_resumption)
+                try psk.appendPskDheMode(&hello, config.allocator);
             var inner_hello: std.ArrayList(u8) = .empty;
             defer inner_hello.deinit(config.allocator);
             var outer_hello: std.ArrayList(u8) = .empty;
@@ -418,7 +423,11 @@ pub fn ClientConnection(
                         ech_config.io,
                         hello.items,
                     );
-                }
+                } else if (config.request_resumption)
+                    try psk.appendPskDheMode(
+                        &outer_template,
+                        config.allocator,
+                    );
                 var context = try ech.ClientContext.init(
                     config.allocator,
                     ech_config.io,
@@ -490,6 +499,7 @@ pub fn ClientConnection(
                 .server_certificate_type = config.server_certificate_type,
                 .server_name = config.server_name,
                 .client_identity = config.client_identity,
+                .request_resumption = config.request_resumption,
                 .random = config.random,
                 .cipher_suites = config.cipher_suites,
                 .additional_cipher_suites = config.additional_cipher_suites,
@@ -762,7 +772,8 @@ pub fn ClientConnection(
                     self.allocator,
                     first_hello,
                 );
-            }
+            } else if (self.request_resumption)
+                try psk.appendPskDheMode(&second_hello, self.allocator);
             var ech_inner: std.ArrayList(u8) = .empty;
             defer ech_inner.deinit(self.allocator);
             var ech_outer: std.ArrayList(u8) = .empty;
@@ -796,7 +807,11 @@ pub fn ClientConnection(
                         context.io,
                         second_hello.items,
                     );
-                }
+                } else if (self.request_resumption)
+                    try psk.appendPskDheMode(
+                        &outer_template,
+                        self.allocator,
+                    );
                 try context.sealRetry(
                     &ech_inner,
                     &ech_outer,
@@ -1275,6 +1290,34 @@ fn ed25519SubjectPublicKeyInfo(public_key: [32]u8) [44]u8 {
     } ++ ([_]u8{0} ** 32);
     @memcpy(spki[12..], &public_key);
     return spki;
+}
+
+test "client requests future TLS 1.3 resumption without offering a PSK" {
+    const allocator = std.testing.allocator;
+    const Client = ClientConnection(4096, 256);
+    var key_material = key_exchange.ClientKeyMaterial{
+        .x25519 = [_]u8{0x18} ** key_exchange.secret_len,
+    };
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0x19} ** 32,
+        .server_name = "example.com",
+        .key_material = &key_material,
+        .request_resumption = true,
+        .server_verifier = .{},
+    }, &output);
+    defer client.deinit();
+
+    try std.testing.expect(output.items.len > record.header_len);
+    const parsed = try client_hello.parse(output.items[record.header_len..]);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{psk.psk_dhe_ke},
+        parsed.psk_key_exchange_modes,
+    );
+    try std.testing.expect(parsed.pre_shared_key == null);
 }
 
 test "client and server states establish over one-byte transport reads" {
@@ -1795,6 +1838,7 @@ test "client and server establish with an accepted RFC 9849 ECH offer" {
         .key_material = &client_material,
         .cipher_suites = &.{.aes_256_gcm_sha384},
         .alpn_protocols = &.{"h2"},
+        .request_resumption = true,
         .server_verifier = .{ .pinned_raw_public_key = &server_spki },
         .server_certificate_type = .raw_public_key,
         .ech = .{
@@ -1964,6 +2008,7 @@ test "accepted RFC 9849 ECH survives HelloRetryRequest" {
         .retry_key_material = &retry_material,
         .cipher_suites = &.{.aes_128_gcm_sha256},
         .alpn_protocols = &.{"h2"},
+        .request_resumption = true,
         .server_verifier = .{ .pinned_raw_public_key = &server_spki },
         .server_certificate_type = .raw_public_key,
         .ech = .{
@@ -2804,6 +2849,7 @@ test "client connection rejects a second HelloRetryRequest" {
         .key_material = &initial_material,
         .retry_key_material = &retry_material,
         .cipher_suites = &.{.aes_128_gcm_sha256},
+        .request_resumption = true,
         .server_verifier = .{},
     }, &output);
     defer client.deinit();
@@ -2825,6 +2871,13 @@ test "client connection rejects a second HelloRetryRequest" {
         .hello_retry_request => {},
         else => return error.ExpectedHelloRetryRequest,
     }
+    const second = try client_hello.parse(output.items[record.header_len..]);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{psk.psk_dhe_ke},
+        second.psk_key_exchange_modes,
+    );
+    try std.testing.expect(second.pre_shared_key == null);
     try std.testing.expectError(
         error.DuplicateHelloRetryRequest,
         client.receive(retry_record.items, &output),

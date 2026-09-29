@@ -48,6 +48,52 @@ pub const TicketAgePolicy = struct {
     tolerance_ms: u32 = 10_000,
 };
 
+/// Advertise support for PSK-DHE so a server may issue a NewSessionTicket even
+/// when this ClientHello does not yet carry a `pre_shared_key` offer.
+pub fn appendPskDheMode(
+    client_hello: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+) Error!void {
+    const original_len = client_hello.items.len;
+    errdefer client_hello.items.len = original_len;
+    const offsets = try clientHelloOffsets(client_hello.items);
+    try rejectExistingPskExtensions(
+        client_hello.items,
+        offsets.extensions_offset,
+        offsets.extensions_len,
+    );
+
+    var extension: [6]u8 = undefined;
+    std.mem.writeInt(u16, extension[0..2], ext_psk_key_exchange_modes, .big);
+    std.mem.writeInt(u16, extension[2..4], 2, .big);
+    extension[4] = 1;
+    extension[5] = psk_dhe_ke;
+    try client_hello.appendSlice(allocator, &extension);
+
+    const new_extensions_len = std.math.add(
+        usize,
+        offsets.extensions_len,
+        extension.len,
+    ) catch return error.InvalidClientHello;
+    const new_body_len = std.math.add(
+        usize,
+        offsets.body_len,
+        extension.len,
+    ) catch return error.InvalidClientHello;
+    if (new_extensions_len > std.math.maxInt(u16) or
+        new_body_len > std.math.maxInt(u24))
+    {
+        return error.InvalidClientHello;
+    }
+    std.mem.writeInt(
+        u16,
+        client_hello.items[offsets.extensions_len_offset..][0..2],
+        @intCast(new_extensions_len),
+        .big,
+    );
+    writeU24(client_hello.items[1..4], @intCast(new_body_len));
+}
+
 pub fn appendClientOffer(
     client_hello: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -812,6 +858,28 @@ fn writeU24(bytes: *[3]u8, value: u24) void {
     bytes[0] = @truncate(value >> 16);
     bytes[1] = @truncate(value >> 8);
     bytes[2] = @truncate(value);
+}
+
+test "TLS client can advertise future PSK-DHE resumption without a ticket" {
+    const allocator = std.testing.allocator;
+    var hello = try baseClientHello(allocator);
+    defer hello.deinit(allocator);
+    try appendPskDheMode(&hello, allocator);
+    const parsed = try @import("client_hello.zig").parse(hello.items);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{psk_dhe_ke},
+        parsed.psk_key_exchange_modes,
+    );
+    try std.testing.expect(parsed.pre_shared_key == null);
+
+    const once = try allocator.dupe(u8, hello.items);
+    defer allocator.free(once);
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        appendPskDheMode(&hello, allocator),
+    );
+    try std.testing.expectEqualSlices(u8, once, hello.items);
 }
 
 test "TLS PSK appends and verifies a mandatory-last binder" {

@@ -275,6 +275,9 @@ rustls connected state and Vail-side client Finished verification.
 client session cache across two connections to Vail, processes Vail's
 encrypted NewSessionTicket, and requires the second connection to complete as
 an authenticated PSK-DHE resumed handshake before exchanging application data.
+`interop-rustls-tls13-resumption-client` covers the reverse direction: Vail
+caches a rustls/AWS-LC ticket, emits the second ClientHello and binder, and
+requires both peers to report a resumed handshake.
 `zig build interop-openssl-min-client` exercises the reverse direction: Vail's
 incremental client state authenticates an OpenSSL server and its Finished,
 sends its encrypted Finished, and verifies encrypted application data. The
