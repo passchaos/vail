@@ -76,6 +76,10 @@ test "public modules are reachable" {
         "ServerConnection",
     ));
     try std.testing.expect(@hasDecl(
+        vail.tls.tls12_handshake,
+        "parseCertificateStatus",
+    ));
+    try std.testing.expect(@hasDecl(
         vail.tls.tls12_ticket,
         "Cached",
     ));

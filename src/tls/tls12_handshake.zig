@@ -15,8 +15,10 @@ pub const handshake_type_server_hello_done: u8 = 0x0e;
 pub const handshake_type_certificate_verify: u8 = 0x0f;
 pub const handshake_type_client_key_exchange: u8 = 0x10;
 pub const handshake_type_finished: u8 = 0x14;
+pub const handshake_type_certificate_status: u8 = 0x16;
 
 const ext_server_name: u16 = 0x0000;
+const ext_status_request: u16 = 0x0005;
 const ext_ec_point_formats: u16 = 0x000b;
 const ext_application_layer_protocol_negotiation: u16 = 0x0010;
 const ext_extended_master_secret: u16 = 0x0017;
@@ -39,6 +41,7 @@ pub const Error = std.mem.Allocator.Error || auth.Error ||
     MissingExtendedMasterSecret,
     InvalidAlpn,
     InvalidCertificate,
+    InvalidCertificateStatus,
     InvalidCertificateRequest,
     ClientCertificateRequired,
     InvalidServerKeyExchange,
@@ -63,6 +66,9 @@ pub const Policy = struct {
     /// Acknowledge RFC 5077 when the client offers the session_ticket
     /// extension. Ticket issuance remains owned by the connection state.
     issue_session_ticket: bool = false,
+    /// DER-encoded OCSPResponse stapled only when the client offered the
+    /// TLS 1.2 status_request extension.
+    ocsp_response: ?[]const u8 = null,
 };
 
 pub const Selection = struct {
@@ -71,6 +77,7 @@ pub const Selection = struct {
     alpn_protocol: ?[]const u8,
     extended_master_secret: bool,
     session_ticket_acknowledged: bool = false,
+    status_request_acknowledged: bool = false,
 };
 
 pub const ServerFlight = struct {
@@ -86,6 +93,7 @@ pub const ParsedServerHello = struct {
     extended_master_secret: bool,
     secure_renegotiation: bool,
     session_ticket_acknowledged: bool,
+    status_request_acknowledged: bool,
 };
 
 pub const ParsedServerKeyExchange = struct {
@@ -97,6 +105,7 @@ pub const ParsedServerKeyExchange = struct {
 pub const ServerFlightMessages = struct {
     server_hello: []const u8,
     certificate: []const u8,
+    certificate_status: ?[]const u8,
     server_key_exchange: []const u8,
     certificate_request: ?[]const u8,
     server_hello_done: []const u8,
@@ -135,6 +144,12 @@ pub fn splitServerFlight(bytes: []const u8) Error!ServerFlightMessages {
     if (certificate[0] != handshake_type_certificate) {
         return error.InvalidCertificate;
     }
+    var certificate_status: ?[]const u8 = null;
+    if (pos < bytes.len and
+        bytes[pos] == handshake_type_certificate_status)
+    {
+        certificate_status = try takeHandshakeMessage(bytes, &pos);
+    }
     const server_key_exchange = try takeHandshakeMessage(bytes, &pos);
     if (server_key_exchange[0] != handshake_type_server_key_exchange) {
         return error.InvalidServerKeyExchange;
@@ -152,6 +167,7 @@ pub fn splitServerFlight(bytes: []const u8) Error!ServerFlightMessages {
     return .{
         .server_hello = server_hello,
         .certificate = certificate,
+        .certificate_status = certificate_status,
         .server_key_exchange = server_key_exchange,
         .certificate_request = certificate_request,
         .server_hello_done = server_hello_done,
@@ -196,6 +212,7 @@ pub fn parseServerHello(
     var seen_ems = false;
     var seen_renegotiation = false;
     var seen_session_ticket = false;
+    var seen_status_request = false;
     var selected_alpn: ?[]const u8 = null;
     while (ext_pos < extensions.len) {
         const extension_type = try readInt(u16, extensions, &ext_pos);
@@ -247,6 +264,13 @@ pub fn parseServerHello(
                 seen_session_ticket = true;
                 if (payload.len != 0) return error.InvalidServerHello;
             },
+            ext_status_request => {
+                if (seen_status_request) {
+                    return error.DuplicateServerExtension;
+                }
+                seen_status_request = true;
+                if (payload.len != 0) return error.InvalidServerHello;
+            },
             else => return error.UnsupportedServerExtension,
         }
     }
@@ -264,6 +288,7 @@ pub fn parseServerHello(
         .extended_master_secret = seen_ems,
         .secure_renegotiation = seen_renegotiation,
         .session_ticket_acknowledged = seen_session_ticket,
+        .status_request_acknowledged = seen_status_request,
     };
 }
 
@@ -406,6 +431,11 @@ pub fn select(
     signer: auth.Signer,
     policy: Policy,
 ) Error!Selection {
+    if (policy.ocsp_response) |response| {
+        if (response.len == 0 or response.len > std.math.maxInt(u24)) {
+            return error.InvalidCertificateStatus;
+        }
+    }
     if (client.legacy_version < 0x0303 or
         !containsByte(client.compression_methods, 0))
     {
@@ -446,6 +476,8 @@ pub fn select(
         .session_ticket_acknowledged = policy.issue_session_ticket and
             client.session_ticket != null and
             client.offers_extended_master_secret,
+        .status_request_acknowledged = client.requests_ocsp and
+            policy.ocsp_response != null,
     };
 }
 
@@ -499,6 +531,18 @@ pub fn writeServerFlight(
     try writeCertificate(&certificate, allocator, certificate_chain);
     try out.appendSlice(allocator, certificate.items);
     state.update(certificate.items);
+
+    if (selection.status_request_acknowledged) {
+        var certificate_status: std.ArrayList(u8) = .empty;
+        defer certificate_status.deinit(allocator);
+        try writeCertificateStatus(
+            &certificate_status,
+            allocator,
+            policy.ocsp_response.?,
+        );
+        try out.appendSlice(allocator, certificate_status.items);
+        state.update(certificate_status.items);
+    }
 
     var server_key_exchange: std.ArrayList(u8) = .empty;
     defer server_key_exchange.deinit(allocator);
@@ -624,6 +668,14 @@ fn writeServerHello(
             &.{},
         );
     }
+    if (selection.status_request_acknowledged) {
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_status_request,
+            &.{},
+        );
+    }
 
     const body_len = 2 + 32 + 1 + session_id.len + 2 + 1 + 2 +
         extensions.items.len;
@@ -673,6 +725,7 @@ pub fn writeResumedServerHello(
         .session_ticket_acknowledged = policy.issue_session_ticket and
             client.session_ticket != null and
             client.offers_extended_master_secret,
+        .status_request_acknowledged = false,
     };
     try writeServerHello(
         out,
@@ -722,6 +775,46 @@ pub fn writeClientCertificate(
     if (chain.len != 0) return writeCertificate(out, allocator, chain);
     try appendHandshakeHeader(out, allocator, handshake_type_certificate, 3);
     try appendU24(out, allocator, 0);
+}
+
+pub fn writeCertificateStatus(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    ocsp_response: []const u8,
+) Error!void {
+    if (ocsp_response.len == 0 or
+        ocsp_response.len > std.math.maxInt(u24))
+    {
+        return error.InvalidCertificateStatus;
+    }
+    const body_len = 1 + 3 + ocsp_response.len;
+    if (body_len > std.math.maxInt(u24)) {
+        return error.InvalidCertificateStatus;
+    }
+    try appendHandshakeHeader(
+        out,
+        allocator,
+        handshake_type_certificate_status,
+        body_len,
+    );
+    try out.append(allocator, 1); // ocsp
+    try appendU24(out, allocator, @intCast(ocsp_response.len));
+    try out.appendSlice(allocator, ocsp_response);
+}
+
+pub fn parseCertificateStatus(message: []const u8) Error![]const u8 {
+    if (message.len < 9 or
+        message[0] != handshake_type_certificate_status or
+        readU24(message[1..4]) != message.len - 4 or
+        message[4] != 1)
+    {
+        return error.InvalidCertificateStatus;
+    }
+    const response_len = readU24(message[5..8]);
+    if (response_len == 0 or response_len != message.len - 8) {
+        return error.InvalidCertificateStatus;
+    }
+    return message[8..];
 }
 
 pub fn writeCertificateRequest(
@@ -1120,6 +1213,7 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
         },
         .supported_versions = &.{0x0303},
         .offer_extended_master_secret = true,
+        .request_ocsp = true,
     });
     const parsed = try client_hello.parse(hello.items);
     var flight: std.ArrayList(u8) = .empty;
@@ -1131,7 +1225,7 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
         allocator,
         hello.items,
         parsed,
-        .{},
+        .{ .ocsp_response = "test-ocsp-response" },
         [_]u8{0x33} ** 32,
         &server_public,
         &.{&certificate},
@@ -1142,6 +1236,7 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
         result.selection.suite,
     );
     try std.testing.expect(result.selection.extended_master_secret);
+    try std.testing.expect(result.selection.status_request_acknowledged);
     try std.testing.expectEqual(
         result.transcript_state.digest(),
         transcript.hashFor(.sha256, &.{ hello.items, flight.items }),
@@ -1167,6 +1262,21 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
         parsed_server.suite,
     );
     try std.testing.expect(parsed_server.extended_master_secret);
+    try std.testing.expect(parsed_server.status_request_acknowledged);
+    try std.testing.expectEqualStrings(
+        "test-ocsp-response",
+        try parseCertificateStatus(messages.certificate_status.?),
+    );
+    var malformed_status = try allocator.dupe(
+        u8,
+        messages.certificate_status.?,
+    );
+    defer allocator.free(malformed_status);
+    malformed_status[4] = 2;
+    try std.testing.expectError(
+        error.InvalidCertificateStatus,
+        parseCertificateStatus(malformed_status),
+    );
     var parsed_certificate = try parseCertificate(
         allocator,
         messages.certificate,

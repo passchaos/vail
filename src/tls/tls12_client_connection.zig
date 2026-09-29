@@ -97,6 +97,7 @@ const Pending = struct {
     client_hello: []u8,
     server_flight: std.ArrayList(u8) = .empty,
     message_count: usize = 0,
+    saw_certificate_status: bool = false,
     suite: ?tls12.Suite = null,
     server_random: ?[32]u8 = null,
     transcript_state: ?transcript.State = null,
@@ -710,7 +711,15 @@ pub fn ClientConnection(
         ) Error!void {
             const pending = &(self.pending orelse unreachable);
             if (message.len < 4) return error.UnexpectedHandshakeMessage;
-            const valid = switch (pending.message_count) {
+            if (pending.message_count == 2 and
+                message[0] == handshake.handshake_type_certificate_status)
+            {
+                pending.saw_certificate_status = true;
+                return;
+            }
+            const logical_count = pending.message_count -
+                @intFromBool(pending.saw_certificate_status);
+            const valid = switch (logical_count) {
                 0 => message[0] == handshake.handshake_type_server_hello,
                 1 => message[0] == handshake.handshake_type_certificate,
                 2 => message[0] == handshake.handshake_type_server_key_exchange,
@@ -737,6 +746,14 @@ pub fn ClientConnection(
                 self.policy,
                 self.server_name != null,
             );
+            const offered_client_hello = try client_hello.parse(
+                pending.client_hello,
+            );
+            const ocsp_response = try validateServerOcspStatus(
+                offered_client_hello.requests_ocsp,
+                server_hello.status_request_acknowledged,
+                messages.certificate_status,
+            );
             try checkDowngradeSentinel(
                 pending.client_hello,
                 server_hello.random,
@@ -756,9 +773,10 @@ pub fn ClientConnection(
                 messages.certificate,
             );
             defer certificate.deinit(self.allocator);
-            try self.server_verifier.verifyTrust(
+            try self.server_verifier.verifyTrustWithOcsp(
                 self.server_name,
                 certificate.entries,
+                ocsp_response,
             );
             const server_key_exchange =
                 try handshake.parseAndVerifyServerKeyExchange(
@@ -820,6 +838,7 @@ pub fn ClientConnection(
             state.update(pending.client_hello);
             state.update(messages.server_hello);
             state.update(messages.certificate);
+            if (messages.certificate_status) |status| state.update(status);
             state.update(messages.server_key_exchange);
             if (messages.certificate_request) |request| state.update(request);
             state.update(messages.server_hello_done);
@@ -1040,6 +1059,9 @@ pub fn ClientConnection(
                 expected_session_id,
             )) {
                 return false;
+            }
+            if (server_hello.status_request_acknowledged) {
+                return error.UnexpectedHandshakeMessage;
             }
             if (server_hello.suite != session.suite or
                 !std.mem.eql(
@@ -1355,6 +1377,22 @@ fn checkDowngradeSentinel(
     )) return error.DowngradeDetected;
 }
 
+fn validateServerOcspStatus(
+    offered: bool,
+    acknowledged: bool,
+    certificate_status: ?[]const u8,
+) Error!?[]const u8 {
+    if ((acknowledged and !offered) or
+        acknowledged != (certificate_status != null))
+    {
+        return error.UnexpectedHandshakeMessage;
+    }
+    return if (certificate_status) |status|
+        try handshake.parseCertificateStatus(status)
+    else
+        null;
+}
+
 fn copyCertificateChain(
     allocator: std.mem.Allocator,
     certificates: []const []const u8,
@@ -1441,6 +1479,7 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
     const policy = handshake.Policy{
         .alpn_protocols = &.{"h2"},
         .new_session_id = &session_id,
+        .ocsp_response = "tls12-test-ocsp",
     };
     var client_wire: std.ArrayList(u8) = .empty;
     defer client_wire.deinit(allocator);
@@ -1451,7 +1490,8 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
         .server_name = "localhost",
         .client_private_key = &client_private,
         .policy = policy,
-        .server_verifier = .{ .verify_trust = acceptTestCertificate },
+        .request_ocsp = true,
+        .server_verifier = .{ .verify_trust = expectTestOcsp },
         .request_session_ticket = true,
     }, &client_wire);
     defer client.deinit();
@@ -2263,6 +2303,52 @@ fn acceptTestCertificate(
 ) anyerror!void {
     _ = context;
     if (trust.chain.len == 0) return error.EmptyCertificateChain;
+}
+
+test "TLS 1.2 OCSP negotiation rejects missing and unsolicited status" {
+    var status: std.ArrayList(u8) = .empty;
+    defer status.deinit(std.testing.allocator);
+    try handshake.writeCertificateStatus(
+        &status,
+        std.testing.allocator,
+        "ocsp",
+    );
+    try std.testing.expectEqualStrings(
+        "ocsp",
+        (try validateServerOcspStatus(true, true, status.items)).?,
+    );
+    try std.testing.expectEqual(
+        @as(?[]const u8, null),
+        try validateServerOcspStatus(true, false, null),
+    );
+    try std.testing.expectError(
+        error.UnexpectedHandshakeMessage,
+        validateServerOcspStatus(true, true, null),
+    );
+    try std.testing.expectError(
+        error.UnexpectedHandshakeMessage,
+        validateServerOcspStatus(false, true, status.items),
+    );
+    try std.testing.expectError(
+        error.UnexpectedHandshakeMessage,
+        validateServerOcspStatus(true, false, status.items),
+    );
+}
+
+fn expectTestOcsp(
+    context: ?*anyopaque,
+    trust: auth.TrustContext,
+) anyerror!void {
+    _ = context;
+    if (trust.chain.len == 0 or trust.ocsp_response == null or
+        !std.mem.eql(
+            u8,
+            trust.ocsp_response.?,
+            "tls12-test-ocsp",
+        ))
+    {
+        return error.UnexpectedOcspResponse;
+    }
 }
 
 fn decodeHex(comptime encoded: []const u8) [encoded.len / 2]u8 {

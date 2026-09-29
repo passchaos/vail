@@ -9,7 +9,9 @@ fn main() {
     let _exe = args.next();
     let cert_path = args.next().expect("certificate path");
     let key_path = args.next().expect("private-key path");
-    let client_ca_path = args.next();
+    let extra = args.next();
+    let staple_ocsp = extra.as_deref() == Some("ocsp");
+    let client_ca_path = if staple_ocsp { None } else { extra };
 
     let mut cert_reader = BufReader::new(File::open(cert_path).unwrap());
     let certificates = rustls_pemfile::certs(&mut cert_reader)
@@ -35,7 +37,13 @@ fn main() {
     } else {
         builder.with_no_client_auth()
     };
-    let mut config = builder.with_single_cert(certificates, key).unwrap();
+    let mut config = if staple_ocsp {
+        builder
+            .with_single_cert_with_ocsp(certificates, key, b"rustls-tls12-ocsp".to_vec())
+            .unwrap()
+    } else {
+        builder.with_single_cert(certificates, key).unwrap()
+    };
     config.alpn_protocols.push(b"http/1.1".to_vec());
 
     let listener = TcpListener::bind("127.0.0.1:24447").unwrap();

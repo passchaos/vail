@@ -58,7 +58,13 @@ pub fn main(init: std.process.Init) !void {
             &.{vail.tls.auth.signature_scheme_rsa_pkcs1_sha256}
         else
             &vail.tls.client_hello.default_signature_schemes,
-        .server_verifier = .{ .verify_trust = acceptTestCertificate },
+        .request_ocsp = profile.ocsp,
+        .server_verifier = .{
+            .verify_trust = if (profile.ocsp)
+                expectTestOcsp
+            else
+                acceptTestCertificate,
+        },
         .client_identity = if (profile.client_auth) .{
             .certificate_chain = &.{&client_certificate},
             .signer = if (profile.pkcs1)
@@ -128,6 +134,7 @@ const Profile = struct {
     group: u16 = vail.tls.key_exchange.named_group_secp256r1,
     client_auth: bool = false,
     pkcs1: bool = false,
+    ocsp: bool = false,
 };
 
 fn selectedProfile(init: std.process.Init) !Profile {
@@ -178,6 +185,12 @@ fn selectedProfile(init: std.process.Init) !Profile {
             .pkcs1 = true,
         };
     }
+    if (std.mem.eql(u8, name, "ocsp")) {
+        return .{
+            .suite = .ecdhe_rsa_aes_128_gcm_sha256,
+            .ocsp = true,
+        };
+    }
     return error.InvalidArguments;
 }
 
@@ -187,6 +200,18 @@ fn acceptTestCertificate(
 ) anyerror!void {
     _ = context;
     if (trust.chain.len == 0) return error.EmptyCertificateChain;
+}
+
+fn expectTestOcsp(
+    context: ?*anyopaque,
+    trust: vail.tls.auth.TrustContext,
+) anyerror!void {
+    _ = context;
+    if (trust.chain.len == 0 or trust.ocsp_response == null or
+        !std.mem.eql(u8, trust.ocsp_response.?, "rustls-tls12-ocsp"))
+    {
+        return error.UnexpectedOcspResponse;
+    }
 }
 
 const SocketClientDriver = struct {

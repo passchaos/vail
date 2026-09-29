@@ -51,6 +51,10 @@ pub fn main(init: std.process.Init) !void {
                 &.{}
             else
                 null,
+            .ocsp_response = if (profile.ocsp)
+                "vail-tls12-ocsp"
+            else
+                null,
         },
         .server_random = [_]u8{0x86} ** 32,
         .server_private_key = &ecdh_private,
@@ -134,6 +138,7 @@ const Profile = struct {
     suite: vail.tls.tls12.Suite,
     client_auth: bool = false,
     pkcs1: bool = false,
+    ocsp: bool = false,
 };
 
 fn selectedProfile(init: std.process.Init) !Profile {
@@ -170,6 +175,12 @@ fn selectedProfile(init: std.process.Init) !Profile {
             .suite = .ecdhe_rsa_aes_128_gcm_sha256,
             .client_auth = true,
             .pkcs1 = true,
+        };
+    }
+    if (std.mem.eql(u8, name, "ocsp")) {
+        return .{
+            .suite = .ecdhe_rsa_aes_128_gcm_sha256,
+            .ocsp = true,
         };
     }
     return error.InvalidArguments;

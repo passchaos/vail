@@ -10,6 +10,7 @@ use std::time::Duration;
 #[derive(Debug)]
 struct NoVerifier {
     pkcs1: bool,
+    expect_ocsp: bool,
 }
 
 impl ServerCertVerifier for NoVerifier {
@@ -18,9 +19,12 @@ impl ServerCertVerifier for NoVerifier {
         _end_entity: &CertificateDer<'_>,
         _intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
+        ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
+        if self.expect_ocsp && ocsp_response != b"vail-tls12-ocsp" {
+            return Err(Error::General("unexpected TLS 1.2 OCSP response".into()));
+        }
         Ok(ServerCertVerified::assertion())
     }
 
@@ -70,9 +74,10 @@ fn main() {
     let mode = args.next();
     let pkcs1 = matches!(mode.as_deref(), Some("pkcs1" | "mtls-pkcs1"));
     let mtls = mode.as_deref() == Some("mtls-pkcs1");
+    let expect_ocsp = mode.as_deref() == Some("ocsp");
     let builder = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerifier { pkcs1 }));
+        .with_custom_certificate_verifier(Arc::new(NoVerifier { pkcs1, expect_ocsp }));
     let mut config = if mtls {
         let cert_path = args.next().expect("client certificate path");
         let key_path = args.next().expect("client private-key path");

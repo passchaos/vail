@@ -630,6 +630,46 @@ pub fn build(b: *std.Build) void {
         &check_rustls_tls12_pkcs1_client.step,
     );
 
+    const check_rustls_tls12_ocsp_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_tls12_ocsp_server.step.dependOn(&build_rustls_min.step);
+    check_rustls_tls12_ocsp_server.addArg(
+        "timeout 15s $1 ocsp > /tmp/vail-rustls-tls12-ocsp-server.log 2>&1 & pid=$!; sleep 0.5; " ++
+            "timeout 10s bench/rustls_min_client/target/release/vail-rustls-tls12-client ocsp > /tmp/vail-rustls-tls12-ocsp-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'TLS 1.2 application data verified' /tmp/vail-rustls-tls12-ocsp-server.log && " ++
+            "grep -q 'rustls TLS 1.2 application data verified' /tmp/vail-rustls-tls12-ocsp-client.log",
+    );
+    check_rustls_tls12_ocsp_server.addArg("sh");
+    check_rustls_tls12_ocsp_server.addArtifactArg(min_tls12_server);
+    const interop_rustls_tls12_ocsp_server_step = b.step(
+        "interop-rustls-tls12-ocsp-server",
+        "Exercise Vail's TLS 1.2 OCSP stapling with rustls/AWS-LC",
+    );
+    interop_rustls_tls12_ocsp_server_step.dependOn(
+        &check_rustls_tls12_ocsp_server.step,
+    );
+
+    const check_rustls_tls12_ocsp_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_tls12_ocsp_client.step.dependOn(&build_rustls_server.step);
+    check_rustls_tls12_ocsp_client.addArg(
+        "timeout 15s bench/rustls_min_server/target/release/vail-rustls-tls12-server src/crypto/testdata/rsa_signing_cert.pem src/crypto/testdata/rsa_signing_key.pem ocsp > /tmp/vail-rustls-tls12-ocsp-client-server.log 2>&1 & pid=$!; sleep 0.5; " ++
+            "timeout 10s $1 ocsp > /tmp/vail-rustls-tls12-ocsp-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'rustls TLS 1.2 server completed' /tmp/vail-rustls-tls12-ocsp-client-server.log && " ++
+            "grep -q 'TLS 1.2 server application data verified' /tmp/vail-rustls-tls12-ocsp-client.log",
+    );
+    check_rustls_tls12_ocsp_client.addArg("sh");
+    check_rustls_tls12_ocsp_client.addArtifactArg(min_tls12_client);
+    const interop_rustls_tls12_ocsp_client_step = b.step(
+        "interop-rustls-tls12-ocsp-client",
+        "Exercise Vail's TLS 1.2 OCSP client against rustls/AWS-LC",
+    );
+    interop_rustls_tls12_ocsp_client_step.dependOn(
+        &check_rustls_tls12_ocsp_client.step,
+    );
+
     const min_tls12_resume_client = b.addExecutable(.{
         .name = "vail-min-tls12-resume-client",
         .root_module = b.createModule(.{

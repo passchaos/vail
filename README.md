@@ -69,9 +69,12 @@ The current foundation provides:
   including CertID binding, responder identity, responder certificate
   validity/KeyUsage, SHA-1/SHA-256 issuer hashes, ECDSA/RSA/Ed25519 signatures,
   bounded embedded certificates, response time windows, and
-  good/revoked/unknown handling. TLS 1.3 clients can request stapling, servers
-  attach the configured response only when requested, and bundle trust policy
-  supports ignore/if-present/require modes. Response and SingleResponse
+  good/revoked/unknown handling. TLS 1.2 and TLS 1.3 clients can request
+  stapling, servers attach the configured response only when requested, and
+  bundle trust policy supports ignore/if-present/require modes. TLS 1.2 binds
+  the RFC 6066 CertificateStatus message into the Finished transcript and
+  rejects unsolicited, missing, duplicated, or malformed status messages.
+  Response and SingleResponse
   extensions currently fail closed;
   An exact certificate or cross-signed form with the same Subject and complete
   SubjectPublicKeyInfo is recognized as a configured trust anchor without
@@ -249,6 +252,9 @@ TLS 1.2 AEAD suites, both RSA and ECDSA authentication, and P-256/P-384 ECDHE.
 `interop-rustls-tls12-rsa-pkcs1-client`, and
 `interop-rustls-tls12-rsa-pkcs1-server` force RSA PKCS#1 v1.5 SHA-256
 handshake signatures in both directions instead of accepting a PSS fallback.
+`interop-rustls-tls12-ocsp-client` and
+`interop-rustls-tls12-ocsp-server` require an exact stapled response to cross
+the Vail/rustls trust callbacks in both directions.
 `zig build interop-openssl-tls12-mtls-client` and
 `zig build interop-openssl-tls12-mtls-server` cover CertificateRequest,
 client Certificate/CertificateVerify possession, mandatory-certificate policy,
