@@ -68,6 +68,7 @@ pub const WriteOptions = struct {
     additional_cipher_suites: []const u16 = &.{},
     supported_versions: []const u16 = &.{tls13},
     alpn_protocols: []const []const u8 = &.{},
+    quic_transport_parameters: ?[]const u8 = null,
     signature_schemes: []const u16 = &default_signature_schemes,
     request_ocsp: bool = false,
     offer_extended_master_secret: bool = false,
@@ -102,6 +103,7 @@ pub const FlexibleWriteOptions = struct {
     additional_cipher_suites: []const u16 = &.{},
     supported_versions: []const u16 = &.{tls13},
     alpn_protocols: []const []const u8 = &.{},
+    quic_transport_parameters: ?[]const u8 = null,
     signature_schemes: []const u16 = &default_signature_schemes,
     request_ocsp: bool = false,
     offer_extended_master_secret: bool = false,
@@ -112,11 +114,9 @@ pub const FlexibleWriteOptions = struct {
     encrypted_client_hello: ?[]const u8 = null,
 };
 
-/// Write a standards-focused TLS 1.3 ClientHello for stream transports.
-///
-/// This intentionally advertises one X25519 key share. QUIC adapters can keep
-/// their larger hybrid/group offer while MQTT/HTTP-style stream clients avoid
-/// carrying QUIC-only transport parameters.
+/// Write a standards-focused TLS 1.3 ClientHello with one X25519 key share.
+/// QUIC callers may attach their opaque transport parameters; callers needing
+/// another classical or hybrid group should use `writeWithKeyShare`.
 pub fn write(
     out: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -135,6 +135,7 @@ pub fn write(
         .additional_cipher_suites = options.additional_cipher_suites,
         .supported_versions = options.supported_versions,
         .alpn_protocols = options.alpn_protocols,
+        .quic_transport_parameters = options.quic_transport_parameters,
         .signature_schemes = options.signature_schemes,
         .request_ocsp = options.request_ocsp,
         .offer_extended_master_secret = options.offer_extended_master_secret,
@@ -352,6 +353,15 @@ pub fn writeWithKeyShare(
             allocator,
             ext_application_layer_protocol_negotiation,
             alpn.items,
+        );
+    }
+
+    if (options.quic_transport_parameters) |parameters| {
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_quic_transport_parameters,
+            parameters,
         );
     }
 
@@ -1207,6 +1217,23 @@ test "ClientHello parser exposes QUIC transport parameters extension" {
     try std.testing.expectEqualSlices(
         u8,
         &.{ 1, 2, 3 },
+        parsed.quic_transport_parameters.?,
+    );
+}
+
+test "ClientHello writer round-trips QUIC transport parameters" {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    try write(&encoded, std.testing.allocator, .{
+        .random = [_]u8{0x23} ** 32,
+        .x25519_public_key = [_]u8{0x24} ** 32,
+        .alpn_protocols = &.{"h3"},
+        .quic_transport_parameters = &.{ 0x01, 0x02, 0x03 },
+    });
+    const parsed = try parse(encoded.items);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x01, 0x02, 0x03 },
         parsed.quic_transport_parameters.?,
     );
 }

@@ -361,6 +361,7 @@ pub const EncryptedExtensions = struct {
 
 pub const ParsedEncryptedExtensions = struct {
     alpn_protocol: ?[]const u8 = null,
+    quic_transport_parameters: ?[]const u8 = null,
     supported_groups: []const u8 = &.{},
     early_data_accepted: bool = false,
     client_certificate_type: ?auth.CertificateType = null,
@@ -429,6 +430,8 @@ pub fn parseEncryptedExtensions(
             {
                 return error.InvalidEncryptedExtensions;
             }
+        } else if (typ == ext_quic_transport_parameters) {
+            result.quic_transport_parameters = payload;
         } else if (typ == ext_early_data) {
             if (payload.len != 0) return error.InvalidEncryptedExtensions;
             result.early_data_accepted = true;
@@ -710,6 +713,12 @@ test "ServerHello and EncryptedExtensions encode TLS 1.3 extensions" {
     try std.testing.expectEqual(handshake_type_encrypted_extensions, out.items[0]);
     try std.testing.expect(std.mem.indexOf(u8, out.items, &.{ 0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, 'h', '2' }) != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, &.{ 0x00, 0x39, 0x00, 0x03, 0x00, 0x01, 0x00 }) != null);
+    const parsed_quic_extensions = try parseEncryptedExtensions(out.items);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x00, 0x01, 0x00 },
+        parsed_quic_extensions.quic_transport_parameters.?,
+    );
 
     out.clearRetainingCapacity();
     try writeEncryptedExtensions(&out, std.testing.allocator, .{

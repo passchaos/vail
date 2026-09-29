@@ -120,6 +120,11 @@ pub fn verifyServerAndWriteClientFlight(
     const parsed_client_hello = try client_hello.parse(
         options.client_hello_bytes,
     );
+    if (encrypted_extensions.quic_transport_parameters != null and
+        parsed_client_hello.quic_transport_parameters == null)
+    {
+        return error.InvalidServerFlight;
+    }
     const negotiated_server_certificate_type =
         encrypted_extensions.server_certificate_type orelse .x509;
     if ((encrypted_extensions.server_certificate_type != null and
@@ -164,6 +169,7 @@ pub fn verifyServerAndWriteClientFlight(
     if (flight.certificate_request) |request| state.update(request);
 
     var peer_certificate_chain = try allocator.alloc([]const u8, 0);
+    errdefer freeCertificateChain(allocator, peer_certificate_chain);
     var selected_certificate_compression: ?certificate_compression.Algorithm = null;
     if (!options.psk_resumed) {
         const certificate_wire = flight.certificate orelse
@@ -216,10 +222,12 @@ pub fn verifyServerAndWriteClientFlight(
             certificate_hash.bytes(),
         );
         state.update(flight.certificate_verify.?);
-        peer_certificate_chain = try copyCertificateChain(
+        const authenticated_chain = try copyCertificateChain(
             allocator,
             certificate.entries,
         );
+        allocator.free(peer_certificate_chain);
+        peer_certificate_chain = authenticated_chain;
     } else if (flight.certificate != null or
         flight.certificate_verify != null)
     {
@@ -246,7 +254,6 @@ pub fn verifyServerAndWriteClientFlight(
     }
     state.update(flight.finished);
     const transcript_after_server_finished = state.digest();
-    errdefer freeCertificateChain(allocator, peer_certificate_chain);
 
     var application = try key_schedule.deriveApplicationFor(
         options.handshake_secret,

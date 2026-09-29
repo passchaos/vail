@@ -32,6 +32,12 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.quic.retry, "computeIntegrityTagForVersion"));
     try std.testing.expect(@hasDecl(vail.quic, "tls_handshake"));
     try std.testing.expect(@hasDecl(vail.quic.tls_handshake, "writeServerCryptoFlight"));
+    try std.testing.expect(@hasDecl(vail.quic.tls_handshake, "writeClientCryptoFlight"));
+    try std.testing.expect(@hasDecl(vail.quic.tls_handshake, "ClientResult"));
+    try std.testing.expect(@hasDecl(
+        vail.quic.tls_handshake.ClientResult,
+        "deinit",
+    ));
     try std.testing.expect(@hasDecl(vail.quic, "tls_secrets"));
     try std.testing.expect(@hasDecl(vail.quic.tls_secrets, "applicationKeys"));
     try std.testing.expect(@hasDecl(vail.quic, "traffic_crypto"));
@@ -54,6 +60,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.tls, "client_auth"));
     try std.testing.expect(@hasDecl(vail.tls, "client_handshake"));
     try std.testing.expect(@hasDecl(vail.tls, "client_hello"));
+    try std.testing.expect(@hasField(
+        vail.tls.client_hello.WriteOptions,
+        "quic_transport_parameters",
+    ));
     try std.testing.expect(@hasDecl(vail.tls, "ech"));
     try std.testing.expect(@hasDecl(vail.tls.ech, "selectConfig"));
     try std.testing.expect(@hasDecl(vail.tls.ech, "writeConfig"));
