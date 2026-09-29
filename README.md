@@ -271,6 +271,10 @@ OpenSSL to observe warning `close_notify`. `zig build interop-rustls-min-server`
 performs the same minimal-server check with a zlib-enabled rustls client,
 requires RFC 8879 certificate compression to be negotiated, and checks both
 rustls connected state and Vail-side client Finished verification.
+`zig build interop-rustls-tls13-resumption-server` keeps one rustls/AWS-LC
+client session cache across two connections to Vail, processes Vail's
+encrypted NewSessionTicket, and requires the second connection to complete as
+an authenticated PSK-DHE resumed handshake before exchanging application data.
 `zig build interop-openssl-min-client` exercises the reverse direction: Vail's
 incremental client state authenticates an OpenSSL server and its Finished,
 sends its encrypted Finished, and verifies encrypted application data. The
