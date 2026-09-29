@@ -14,11 +14,15 @@ The current foundation provides:
   receiver contexts retain prepared AEAD state, implement the complete 96-bit
   nonce sequence space, reject weak X25519 inputs and authentication failures,
   expose RFC exporters, and explicitly wipe ephemeral and derived secrets;
-- RFC 9849 ECH wire foundations with strict ECHConfigList selection, public
-  name and mandatory-extension validation, ClientHelloInner padding and
-  linear-time `ech_outer_extensions` reconstruction, authenticated
-  ClientHelloOuter encryption/decryption, retained HPKE state across HRR, and
-  SHA-256/SHA-384/SM3 acceptance-confirmation derivation;
+- RFC 9849 ECH client and server handshakes with strict ECHConfigList
+  selection, public-name and mandatory-extension validation,
+  ClientHelloInner padding, linear-time `ech_outer_extensions`
+  reconstruction, authenticated ClientHelloOuter encryption/decryption,
+  retained HPKE state and acceptance confirmation across HRR, private-SNI
+  identity selection, and SHA-256/SHA-384/SM3 confirmation derivation. The
+  connection-level ECH path currently requires a fresh TLS 1.3 handshake;
+  PSK/0-RTT ECH offers are rejected until their inner-binder and outer-GREASE
+  handling is integrated;
 - TLS 1.3 ClientHello parsing, encrypted server-handshake flight construction,
   ServerHello/EncryptedExtensions, Certificate, CertificateVerify, Finished, and
   AEAD record-protection codecs;
@@ -208,6 +212,11 @@ decompression cost.
 constant-time RSA-2048 PSS and PKCS#1 v1.5 signing paths.
 `zig build -Doptimize=ReleaseFast bench-hpke` measures RFC 9180 sender/receiver
 setup plus stateful AES-128-GCM sealing and opening for ECH-sized payloads.
+`zig build -Doptimize=ReleaseFast bench-ech` measures complete RFC 9849
+ClientHelloInner encoding, HPKE protection, and server reconstruction.
+`zig build -Doptimize=ReleaseFast interop-rustls-ech-server` exercises an
+accepted ECH handshake from a rustls/AWS-LC client to the Vail server;
+`interop-rustls-ech-hrr-server` repeats it across HelloRetryRequest.
 `zig build -Doptimize=ReleaseFast bench-tls12-record-crypto` measures the
 TLS 1.2 AES-GCM and ChaCha20-Poly1305 record paths.
 `zig build -Doptimize=ReleaseFast bench-tls12-server-handshake` measures the

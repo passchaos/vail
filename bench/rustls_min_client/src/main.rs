@@ -1,14 +1,23 @@
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::client::EchConfig;
 use rustls::{
     ClientConfig, ClientConnection, DigitallySignedStruct, Error, RootCertStore, SignatureScheme,
 };
-use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls_pki_types::{CertificateDer, EchConfigListBytes, ServerName, UnixTime};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug)]
 struct NoVerifier;
+
+const ECH_CONFIG_LIST: &[u8] = &[
+    0x00, 0x41, 0xfe, 0x0d, 0x00, 0x3d, 0x01, 0x00, 0x20, 0x00, 0x20, 0xa6, 0x9a, 0x41, 0x48, 0x5d,
+    0x32, 0x96, 0xa4, 0xe0, 0xc3, 0x6a, 0xee, 0xf6, 0x63, 0x0f, 0x59, 0x32, 0x6f, 0xdc, 0xff, 0x81,
+    0x29, 0x59, 0xa5, 0x85, 0xd3, 0x9b, 0x3b, 0xde, 0x98, 0x55, 0x5c, 0x00, 0x04, 0x00, 0x01, 0x00,
+    0x01, 0x10, 0x0e, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c,
+    0x65, 0x00, 0x00,
+];
 
 impl ServerCertVerifier for NoVerifier {
     fn verify_server_cert(
@@ -51,7 +60,20 @@ impl ServerCertVerifier for NoVerifier {
 }
 
 fn main() {
-    let mut config = ClientConfig::builder()
+    let ech_enabled = std::env::args().nth(1).as_deref() == Some("ech");
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let builder = ClientConfig::builder_with_provider(provider);
+    let builder = if ech_enabled {
+        let ech_config = EchConfig::new(
+            EchConfigListBytes::from(ECH_CONFIG_LIST),
+            &[rustls::crypto::aws_lc_rs::hpke::DH_KEM_X25519_HKDF_SHA256_AES_128],
+        )
+        .unwrap();
+        builder.with_ech(ech_config.into()).unwrap()
+    } else {
+        builder.with_safe_default_protocol_versions().unwrap()
+    };
+    let mut config = builder
         .with_root_certificates(RootCertStore::empty())
         .with_no_client_auth();
     config
@@ -86,8 +108,9 @@ fn main() {
         conn.write_tls(&mut sock).unwrap();
     }
     println!(
-        "rustls connected: suite={:?} alpn={:?}",
+        "rustls connected: suite={:?} alpn={:?} ech={:?}",
         conn.negotiated_cipher_suite(),
-        conn.alpn_protocol()
+        conn.alpn_protocol(),
+        conn.ech_status(),
     );
 }

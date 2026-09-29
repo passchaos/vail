@@ -184,6 +184,22 @@ pub fn build(b: *std.Build) void {
     );
     hpke_bench_step.dependOn(&run_hpke_bench.step);
 
+    const ech_bench = b.addExecutable(.{
+        .name = "vail-bench-ech",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/ech.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_ech_bench = b.addRunArtifact(ech_bench);
+    const ech_bench_step = b.step(
+        "bench-ech",
+        "Benchmark RFC 9849 ClientHello protection",
+    );
+    ech_bench_step.dependOn(&run_ech_bench.step);
+
     const tls12_handshake_bench = b.addExecutable(.{
         .name = "vail-bench-tls12-server-handshake",
         .root_module = b.createModule(.{
@@ -330,6 +346,47 @@ pub fn build(b: *std.Build) void {
         "Exercise Vail's minimal TLS 1.3 server flight with rustls client",
     );
     interop_rustls_min_step.dependOn(&check_rustls_min.step);
+
+    const check_rustls_ech = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_ech.step.dependOn(&build_rustls_min.step);
+    check_rustls_ech.addArg(
+        "$1 ech > /tmp/vail-ech-rustls-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 4s bench/rustls_min_client/target/release/vail-rustls-min-client ech > /tmp/vail-ech-rustls-client.log 2>&1 || true; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'ech accepted' /tmp/vail-ech-rustls-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'client finished verified' /tmp/vail-ech-rustls-server.log && " ++
+            "grep -q 'ech accepted' /tmp/vail-ech-rustls-server.log && " ++
+            "grep -q 'ech=Accepted' /tmp/vail-ech-rustls-client.log",
+    );
+    check_rustls_ech.addArg("sh");
+    check_rustls_ech.addArtifactArg(min_tls13_server);
+    const interop_rustls_ech_step = b.step(
+        "interop-rustls-ech-server",
+        "Exercise Vail's RFC 9849 ECH server with a rustls/AWS-LC client",
+    );
+    interop_rustls_ech_step.dependOn(&check_rustls_ech.step);
+
+    const check_rustls_ech_hrr = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_ech_hrr.step.dependOn(&build_rustls_min.step);
+    check_rustls_ech_hrr.addArg(
+        "$1 ech-hrr > /tmp/vail-ech-hrr-rustls-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 4s bench/rustls_min_client/target/release/vail-rustls-min-client ech > /tmp/vail-ech-hrr-rustls-client.log 2>&1 || true; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'ech accepted' /tmp/vail-ech-hrr-rustls-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'hello retry request' /tmp/vail-ech-hrr-rustls-server.log && " ++
+            "grep -q 'client finished verified' /tmp/vail-ech-hrr-rustls-server.log && " ++
+            "grep -q 'ech accepted' /tmp/vail-ech-hrr-rustls-server.log && " ++
+            "grep -q 'ech=Accepted' /tmp/vail-ech-hrr-rustls-client.log",
+    );
+    check_rustls_ech_hrr.addArg("sh");
+    check_rustls_ech_hrr.addArtifactArg(min_tls13_server);
+    const interop_rustls_ech_hrr_step = b.step(
+        "interop-rustls-ech-hrr-server",
+        "Exercise Vail ECH HRR with a rustls/AWS-LC client",
+    );
+    interop_rustls_ech_hrr_step.dependOn(&check_rustls_ech_hrr.step);
 
     const min_tls13_client = b.addExecutable(.{
         .name = "vail-min-tls13-client",

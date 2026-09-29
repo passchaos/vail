@@ -14,6 +14,7 @@ const client_auth = @import("client_auth.zig");
 const client_handshake = @import("client_handshake.zig");
 const client_hello = @import("client_hello.zig");
 const connection = @import("connection.zig");
+const ech = @import("ech.zig");
 const key_exchange = @import("key_exchange.zig");
 const key_schedule = @import("key_schedule.zig");
 const psk = @import("psk.zig");
@@ -29,7 +30,7 @@ const transcript = @import("transcript.zig");
 pub const Error = std.mem.Allocator.Error || client_hello.Error ||
     server_hello.Error || key_exchange.Error || key_schedule.Error ||
     client_handshake.Error || psk.Error || stream.ProtectedError ||
-    connection.Error ||
+    connection.Error || ech.Error ||
     error{
         ClientHelloTooLarge,
         ServerFlightTooLarge,
@@ -49,7 +50,16 @@ pub const Error = std.mem.Allocator.Error || client_hello.Error ||
         PeerAbortedHandshake,
         AlreadyEstablished,
         ConnectionFailed,
+        EchRejected,
+        EchIncompatibleResumption,
     };
+
+pub const EchClientConfig = struct {
+    io: std.Io,
+    config: ech.Config,
+    /// Must be independently generated from the protected inner random.
+    outer_random: [32]u8,
+};
 
 pub const Stage = enum {
     server_hello,
@@ -83,6 +93,7 @@ pub const Config = struct {
     server_certificate_type: auth.CertificateType = .x509,
     client_identity: ?client_auth.ClientIdentity = null,
     resumption: ?ClientPsk = null,
+    ech: ?EchClientConfig = null,
 };
 
 pub const ClientPsk = struct {
@@ -129,6 +140,7 @@ pub fn ClientConnection(
             client_certificate_compression: ?certificate_compression.Algorithm,
             server_certificate_type: auth.CertificateType,
             client_certificate_type: auth.CertificateType,
+            ech_accepted: bool,
 
             pub fn cacheNewSessionTicket(
                 self: *const Established,
@@ -253,6 +265,9 @@ pub fn ClientConnection(
         retry_material: ?key_exchange.ClientKeyMaterial,
         retry_transcript: ?transcript.State = null,
         retry_suite: ?cipher_suite.Suite = null,
+        ech_context: ?ech.ClientContext = null,
+        ech_outer_random: ?[32]u8 = null,
+        ech_accepted: bool = false,
         retried: bool = false,
         saw_retry_change_cipher_spec: bool = false,
         resumption: ?StoredPsk,
@@ -269,6 +284,14 @@ pub fn ClientConnection(
             config: Config,
             output: *std.ArrayList(u8),
         ) Error!Self {
+            if (config.ech != null and
+                (config.resumption != null or
+                    config.tls12_session_ticket != null or
+                    config.additional_cipher_suites.len != 0 or
+                    config.offer_extended_master_secret))
+            {
+                return error.EchIncompatibleResumption;
+            }
             if (config.retry_key_material) |retry| {
                 if (retry == config.key_material) {
                     return error.DuplicateKeyMaterial;
@@ -343,10 +366,58 @@ pub fn ClientConnection(
                     null,
                 );
             }
-            if (hello.items.len > record.max_plaintext_len) {
+            var inner_hello: std.ArrayList(u8) = .empty;
+            defer inner_hello.deinit(config.allocator);
+            var outer_hello: std.ArrayList(u8) = .empty;
+            defer outer_hello.deinit(config.allocator);
+            var ech_context: ?ech.ClientContext = null;
+            errdefer if (ech_context) |*context| context.deinit();
+            const wire_hello: []const u8 = if (config.ech) |ech_config| blk: {
+                var outer_template: std.ArrayList(u8) = .empty;
+                defer outer_template.deinit(config.allocator);
+                try client_hello.writeWithKeyShare(
+                    &outer_template,
+                    config.allocator,
+                    .{
+                        .random = ech_config.outer_random,
+                        .session_id = config.session_id,
+                        .server_name = ech_config.config.public_name,
+                        .key_share = .{
+                            .group = exchange.namedGroup(),
+                            .key_exchange = exchange.clientShare(),
+                        },
+                        .supported_groups = supported_groups[0..if (retry_material == null) 1 else 2],
+                        .cipher_suites = config.cipher_suites,
+                        .supported_versions = config.supported_versions,
+                        .signature_schemes = config.signature_schemes,
+                    },
+                );
+                var context = try ech.ClientContext.init(
+                    config.allocator,
+                    ech_config.io,
+                    ech_config.config,
+                );
+                errdefer context.deinit();
+                try context.sealInitial(
+                    &inner_hello,
+                    &outer_hello,
+                    config.allocator,
+                    hello.items,
+                    outer_template.items,
+                );
+                ech_context = context;
+                break :blk outer_hello.items;
+            } else hello.items;
+            const transcript_hello = if (ech_context != null)
+                inner_hello.items
+            else
+                hello.items;
+            if (wire_hello.len > record.max_plaintext_len or
+                transcript_hello.len > record.max_plaintext_len)
+            {
                 return error.ClientHelloTooLarge;
             }
-            const owned_hello = try config.allocator.dupe(u8, hello.items);
+            const owned_hello = try config.allocator.dupe(u8, transcript_hello);
             errdefer config.allocator.free(owned_hello);
             const record_start = output.items.len;
             errdefer output.shrinkRetainingCapacity(record_start);
@@ -354,10 +425,10 @@ pub fn ClientConnection(
                 record.content_type_handshake,
                 3,
                 1,
-                @truncate(hello.items.len >> 8),
-                @truncate(hello.items.len),
+                @truncate(wire_hello.len >> 8),
+                @truncate(wire_hello.len),
             });
-            try output.appendSlice(config.allocator, hello.items);
+            try output.appendSlice(config.allocator, wire_hello);
             var early_write: ?traffic.State = null;
             if (resumption) |value| {
                 if (value.max_early_data_size != null) {
@@ -366,7 +437,7 @@ pub fn ClientConnection(
                     }
                     const hello_hash = transcript.hashFor(
                         value.secret.hash,
-                        &.{hello.items},
+                        &.{transcript_hello},
                     );
                     var early_secret =
                         try key_schedule.deriveClientEarlyTrafficSecretFor(
@@ -400,6 +471,11 @@ pub fn ClientConnection(
                 .client_hello_bytes = owned_hello,
                 .exchange = exchange,
                 .retry_material = retry_material,
+                .ech_context = ech_context,
+                .ech_outer_random = if (config.ech) |value|
+                    value.outer_random
+                else
+                    null,
                 .resumption = resumption,
                 .early_write = early_write,
             };
@@ -528,6 +604,29 @@ pub fn ClientConnection(
             const retry = try server_hello.parseHelloRetryRequest(message);
             const first_hello = self.client_hello_bytes orelse unreachable;
             const parsed_client = try client_hello.parse(first_hello);
+            if (self.ech_context != null) {
+                const confirmation = retry.ech_confirmation orelse
+                    return error.EchRejected;
+                const confirmation_transcript =
+                    try ech.helloRetryRequestConfirmationTranscript(
+                        retry.cipher_suite.hash(),
+                        first_hello,
+                        message,
+                        confirmation,
+                    );
+                const expected = try ech.hrrAcceptConfirmation(
+                    retry.cipher_suite.hash(),
+                    self.random,
+                    confirmation_transcript,
+                );
+                if (!std.crypto.timing_safe.eql(
+                    [ech.confirmation_len]u8,
+                    confirmation[0..ech.confirmation_len].*,
+                    expected,
+                )) return error.EchRejected;
+            } else if (retry.ech_confirmation != null) {
+                return error.InvalidServerHello;
+            }
             if (!parsed_client.hasCipherSuite(retry.cipher_suite.wireValue())) {
                 return error.ServerSelectedUnofferedSuite;
             }
@@ -609,12 +708,53 @@ pub fn ClientConnection(
                     retry_prefix,
                 );
             }
-            if (second_hello.items.len > record.max_plaintext_len) {
+            var ech_inner: std.ArrayList(u8) = .empty;
+            defer ech_inner.deinit(self.allocator);
+            var ech_outer: std.ArrayList(u8) = .empty;
+            defer ech_outer.deinit(self.allocator);
+            const wire_second: []const u8 = if (self.ech_context) |*context| blk: {
+                var outer_template: std.ArrayList(u8) = .empty;
+                defer outer_template.deinit(self.allocator);
+                try client_hello.writeWithKeyShare(
+                    &outer_template,
+                    self.allocator,
+                    .{
+                        .random = self.ech_outer_random orelse
+                            return error.InvalidRetry,
+                        .session_id = parsed_client.session_id,
+                        .server_name = context.config.public_name,
+                        .key_share = .{
+                            .group = retry_exchange.namedGroup(),
+                            .key_exchange = retry_exchange.clientShare(),
+                        },
+                        .supported_groups = &supported_groups,
+                        .cookie = retry.cookie,
+                        .cipher_suites = self.cipher_suites,
+                        .supported_versions = self.supported_versions,
+                        .signature_schemes = self.signature_schemes,
+                    },
+                );
+                try context.sealRetry(
+                    &ech_inner,
+                    &ech_outer,
+                    self.allocator,
+                    second_hello.items,
+                    outer_template.items,
+                );
+                break :blk ech_outer.items;
+            } else second_hello.items;
+            const transcript_second = if (self.ech_context != null)
+                ech_inner.items
+            else
+                second_hello.items;
+            if (wire_second.len > record.max_plaintext_len or
+                transcript_second.len > record.max_plaintext_len)
+            {
                 return error.ClientHelloTooLarge;
             }
             const second_owned = try self.allocator.dupe(
                 u8,
-                second_hello.items,
+                transcript_second,
             );
             errdefer self.allocator.free(second_owned);
             const output_start = output.items.len;
@@ -622,11 +762,11 @@ pub fn ClientConnection(
             try appendPlaintextHandshakeRecord(
                 output,
                 self.allocator,
-                second_hello.items,
+                wire_second,
             );
 
             self.retry_transcript = retry_prefix;
-            self.retry_transcript.?.update(second_hello.items);
+            self.retry_transcript.?.update(transcript_second);
             self.retry_suite = retry.cipher_suite;
             if (self.early_write) |*early| early.deinit();
             self.early_write = null;
@@ -655,6 +795,34 @@ pub fn ClientConnection(
                 parsed_client.session_id,
                 parsed_server.session_id_echo,
             )) return error.SessionIdMismatch;
+            if (self.ech_context != null) {
+                const confirmation_prefix = self.retry_transcript orelse blk: {
+                    var state = transcript.State.init(
+                        parsed_server.cipher_suite.hash(),
+                    );
+                    state.update(hello_bytes);
+                    break :blk state;
+                };
+                const confirmation_transcript =
+                    try ech.serverHelloConfirmationTranscript(
+                        confirmation_prefix,
+                        message,
+                    );
+                const expected = try ech.acceptConfirmation(
+                    parsed_server.cipher_suite.hash(),
+                    self.random,
+                    confirmation_transcript,
+                );
+                if (!std.crypto.timing_safe.eql(
+                    [ech.confirmation_len]u8,
+                    parsed_server.random[parsed_server.random.len -
+                        ech.confirmation_len ..][0..ech.confirmation_len].*,
+                    expected,
+                )) return error.EchRejected;
+                self.ech_accepted = true;
+                self.ech_context.?.deinit();
+                self.ech_context = null;
+            }
             const resumed = if (parsed_server.selected_psk_identity) |identity| blk: {
                 if (identity != psk.selected_identity_first) {
                     return error.InvalidPskSelection;
@@ -823,6 +991,7 @@ pub fn ClientConnection(
                     .transcript_prefix = pending.transcript_prefix,
                     .psk_resumed = pending.resumed,
                     .early_data_offered = pending.early_data_offered,
+                    .ech_accepted = self.ech_accepted,
                     .server_verifier = self.server_verifier,
                     .server_certificate_type = self.server_certificate_type,
                     .server_name = self.server_name,
@@ -889,6 +1058,7 @@ pub fn ClientConnection(
                 .client_certificate_compression = verified.client_certificate_compression,
                 .server_certificate_type = verified.server_certificate_type,
                 .client_certificate_type = verified.client_certificate_type,
+                .ech_accepted = self.ech_accepted,
             };
             verified_owned = false;
             pending.deinit();
@@ -917,6 +1087,8 @@ pub fn ClientConnection(
             self.resumption = null;
             if (self.pending) |*pending| pending.deinit();
             self.pending = null;
+            if (self.ech_context) |*context| context.deinit();
+            self.ech_context = null;
             if (self.client_hello_bytes) |bytes| self.allocator.free(bytes);
             self.client_hello_bytes = null;
         }
@@ -1422,6 +1594,420 @@ test "client and server establish mutual RFC 7250 raw public keys" {
         u8,
         &client_spki,
         established_server.peer_certificate_chain.?[0],
+    );
+}
+
+test "client and server establish with an accepted RFC 9849 ECH offer" {
+    const allocator = std.testing.allocator;
+    const Client = ClientConnection(64 * 1024, 256);
+    const ServerModule = @import("server_connection.zig");
+    const Server = ServerModule.ServerConnection(64 * 1024, 256);
+    const signing_key = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0xda} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const server_spki = ed25519SubjectPublicKeyInfo(
+        signing_key.public_key.toBytes(),
+    );
+    const ech_secret = [_]u8{0xdb} ** 32;
+    var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
+        .fromSecretKey(&ech_secret);
+    defer ech_key_pair.deinit();
+    var encoded_config: std.ArrayList(u8) = .empty;
+    defer encoded_config.deinit(allocator);
+    try ech.writeConfig(&encoded_config, allocator, .{
+        .config_id = 23,
+        .public_key = ech_key_pair.public_key,
+        .maximum_name_length = 32,
+        .public_name = "public.example",
+    });
+    const selected_ech = try ech.parseConfig(encoded_config.items);
+
+    var client_material = key_exchange.ClientKeyMaterial{
+        .x25519 = [_]u8{0xdc} ** key_exchange.secret_len,
+    };
+    var client_wire: std.ArrayList(u8) = .empty;
+    defer client_wire.deinit(allocator);
+    var client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0xdd} ** 32,
+        .session_id = "ech-session",
+        .server_name = "private.example",
+        .key_material = &client_material,
+        .cipher_suites = &.{.aes_256_gcm_sha384},
+        .alpn_protocols = &.{"h2"},
+        .server_verifier = .{ .pinned_raw_public_key = &server_spki },
+        .server_certificate_type = .raw_public_key,
+        .ech = .{
+            .io = std.testing.io,
+            .config = selected_ech,
+            .outer_random = [_]u8{0xde} ** 32,
+        },
+    }, &client_wire);
+    defer client.deinit();
+
+    const outer = try client_hello.parse(
+        client_wire.items[record.header_len..],
+    );
+    try std.testing.expectEqualStrings("public.example", outer.server_name.?);
+    try std.testing.expect(outer.encrypted_client_hello != null);
+    try std.testing.expect(!outer.supportsServerCertificateType(
+        .raw_public_key,
+    ));
+
+    var server_material = key_exchange.ServerKeyMaterial{
+        .x25519 = [_]u8{0xdf} ** key_exchange.secret_len,
+    };
+    const identity_set = ServerModule.IdentitySet{
+        .entries = &.{.{
+            .server_name_pattern = "private.example",
+            .identity = .{
+                .certificate_chain = &.{&server_spki},
+                .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+                .certificate_type = .raw_public_key,
+            },
+        }},
+    };
+    var server = Server.init(.{
+        .allocator = allocator,
+        .policy = .{
+            .cipher_suites = &.{.aes_256_gcm_sha384},
+            .groups = &.{key_exchange.named_group_x25519},
+            .alpn_protocols = &.{"h2"},
+        },
+        .server_random = [_]u8{0xe0} ** 32,
+        .key_material = &server_material,
+        .certificate_chain = &.{&server_spki},
+        .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+        .server_certificate_type = .raw_public_key,
+        .identity_resolver = identity_set.resolver(),
+        .ech = .{
+            .config = selected_ech,
+            .key_pair = &ech_key_pair,
+            .require_public_name_match = true,
+        },
+    });
+    defer server.deinit();
+
+    var server_flight: std.ArrayList(u8) = .empty;
+    defer server_flight.deinit(allocator);
+    const server_result = try server.receive(client_wire.items, &server_flight);
+    switch (server_result.event.?) {
+        .server_flight => {},
+        else => return error.ExpectedServerFlight,
+    }
+    const server_hello_len = 4 +
+        ((@as(usize, server_flight.items[1]) << 16) |
+            (@as(usize, server_flight.items[2]) << 8) |
+            server_flight.items[3]);
+    const parsed_server_hello = try server_hello.parseServerHello(
+        server_flight.items[0..server_hello_len],
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        parsed_server_hello.random[24..],
+        &([_]u8{0xe0} ** 8),
+    ));
+
+    var server_wire: std.ArrayList(u8) = .empty;
+    defer server_wire.deinit(allocator);
+    try appendPlaintextHandshakeRecord(
+        &server_wire,
+        allocator,
+        server_flight.items[0..server_hello_len],
+    );
+    try server_wire.appendSlice(
+        allocator,
+        server_flight.items[server_hello_len..],
+    );
+
+    var client_finished: std.ArrayList(u8) = .empty;
+    defer client_finished.deinit(allocator);
+    var established_client: ?Client.Established = null;
+    var offset: usize = 0;
+    while (offset < server_wire.items.len) {
+        const received = try client.receive(
+            server_wire.items[offset..],
+            &client_finished,
+        );
+        if (received.consumed == 0 and received.event == null) {
+            return error.ClientStateStalled;
+        }
+        offset += received.consumed;
+        if (received.event) |event| switch (event) {
+            .server_hello, .compatibility_change_cipher_spec => {},
+            .established => |established| established_client = established,
+            .hello_retry_request => return error.UnexpectedHelloRetryRequest,
+            .peer_alert => return error.PeerAbortedHandshake,
+        };
+    }
+    var client_established = established_client orelse
+        return error.ClientDidNotEstablish;
+    defer client_established.deinit();
+    try std.testing.expect(client_established.ech_accepted);
+    try std.testing.expectEqualStrings(
+        "h2",
+        client_established.selected_alpn.?,
+    );
+
+    const server_established_result = try server.receive(
+        client_finished.items,
+        &server_flight,
+    );
+    var server_established = server_established_result.event.?.established;
+    defer server_established.deinit();
+    try std.testing.expect(server_established.ech_accepted);
+}
+
+test "accepted RFC 9849 ECH survives HelloRetryRequest" {
+    const allocator = std.testing.allocator;
+    const Client = ClientConnection(64 * 1024, 256);
+    const ServerModule = @import("server_connection.zig");
+    const Server = ServerModule.ServerConnection(64 * 1024, 256);
+    const signing_key = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0xe1} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const server_spki = ed25519SubjectPublicKeyInfo(
+        signing_key.public_key.toBytes(),
+    );
+    const ech_secret = [_]u8{0xe2} ** 32;
+    var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
+        .fromSecretKey(&ech_secret);
+    defer ech_key_pair.deinit();
+    var encoded_config: std.ArrayList(u8) = .empty;
+    defer encoded_config.deinit(allocator);
+    try ech.writeConfig(&encoded_config, allocator, .{
+        .config_id = 24,
+        .public_key = ech_key_pair.public_key,
+        .maximum_name_length = 32,
+        .public_name = "public.example",
+    });
+    const selected_ech = try ech.parseConfig(encoded_config.items);
+
+    var initial_material = key_exchange.ClientKeyMaterial{
+        .x25519 = [_]u8{0xe3} ** key_exchange.secret_len,
+    };
+    var retry_material = key_exchange.ClientKeyMaterial{
+        .secp256r1 = [_]u8{0} ** (key_exchange.p256.secret_len - 1) ++ .{1},
+    };
+    var client_output: std.ArrayList(u8) = .empty;
+    defer client_output.deinit(allocator);
+    var client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0xe4} ** 32,
+        .session_id = "ech-hrr-session",
+        .server_name = "private.example",
+        .key_material = &initial_material,
+        .retry_key_material = &retry_material,
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .alpn_protocols = &.{"h2"},
+        .server_verifier = .{ .pinned_raw_public_key = &server_spki },
+        .server_certificate_type = .raw_public_key,
+        .ech = .{
+            .io = std.testing.io,
+            .config = selected_ech,
+            .outer_random = [_]u8{0xe5} ** 32,
+        },
+    }, &client_output);
+    defer client.deinit();
+
+    var server_material = key_exchange.ServerKeyMaterial{
+        .secp256r1 = [_]u8{0} ** (key_exchange.p256.secret_len - 1) ++ .{2},
+    };
+    var server = Server.init(.{
+        .allocator = allocator,
+        .policy = .{
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .groups = &.{key_exchange.named_group_secp256r1},
+            .alpn_protocols = &.{"h2"},
+        },
+        .server_random = [_]u8{0xe6} ** 32,
+        .key_material = &server_material,
+        .certificate_chain = &.{&server_spki},
+        .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+        .server_certificate_type = .raw_public_key,
+        .retry_cookie = "ech-retry-cookie",
+        .ech = .{
+            .config = selected_ech,
+            .key_pair = &ech_key_pair,
+        },
+    });
+    defer server.deinit();
+
+    var server_output: std.ArrayList(u8) = .empty;
+    defer server_output.deinit(allocator);
+    const retry_result = try server.receive(client_output.items, &server_output);
+    switch (retry_result.event.?) {
+        .hello_retry_request => {},
+        else => return error.ExpectedHelloRetryRequest,
+    }
+    const parsed_retry = try server_hello.parseHelloRetryRequest(
+        server_output.items,
+    );
+    try std.testing.expectEqual(
+        @as(usize, ech.confirmation_len),
+        parsed_retry.ech_confirmation.?.len,
+    );
+
+    var retry_record: std.ArrayList(u8) = .empty;
+    defer retry_record.deinit(allocator);
+    try appendPlaintextHandshakeRecord(
+        &retry_record,
+        allocator,
+        server_output.items,
+    );
+    client_output.clearRetainingCapacity();
+    const client_retry = try client.receive(retry_record.items, &client_output);
+    switch (client_retry.event.?) {
+        .hello_retry_request => {},
+        else => return error.ExpectedHelloRetryRequest,
+    }
+    const second_outer = try client_hello.parse(
+        client_output.items[record.header_len..],
+    );
+    try std.testing.expectEqualStrings(
+        "public.example",
+        second_outer.server_name.?,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try ech.parseClientHelloExtension(
+            second_outer.encrypted_client_hello.?,
+        )).outer.enc.len,
+    );
+
+    server_output.clearRetainingCapacity();
+    const flight_result = try server.receive(
+        client_output.items,
+        &server_output,
+    );
+    switch (flight_result.event.?) {
+        .server_flight => {},
+        else => return error.ExpectedServerFlight,
+    }
+    const server_hello_len = 4 +
+        ((@as(usize, server_output.items[1]) << 16) |
+            (@as(usize, server_output.items[2]) << 8) |
+            server_output.items[3]);
+    var server_wire: std.ArrayList(u8) = .empty;
+    defer server_wire.deinit(allocator);
+    try appendPlaintextHandshakeRecord(
+        &server_wire,
+        allocator,
+        server_output.items[0..server_hello_len],
+    );
+    try server_wire.appendSlice(
+        allocator,
+        server_output.items[server_hello_len..],
+    );
+
+    client_output.clearRetainingCapacity();
+    var established_client: ?Client.Established = null;
+    var offset: usize = 0;
+    while (offset < server_wire.items.len) {
+        const received = try client.receive(
+            server_wire.items[offset..],
+            &client_output,
+        );
+        if (received.consumed == 0 and received.event == null) {
+            return error.ClientStateStalled;
+        }
+        offset += received.consumed;
+        if (received.event) |event| switch (event) {
+            .server_hello, .compatibility_change_cipher_spec => {},
+            .established => |established| established_client = established,
+            .hello_retry_request => return error.DuplicateHelloRetryRequest,
+            .peer_alert => return error.PeerAbortedHandshake,
+        };
+    }
+    var client_established = established_client orelse
+        return error.ClientDidNotEstablish;
+    defer client_established.deinit();
+    try std.testing.expect(client_established.ech_accepted);
+    try std.testing.expectEqualStrings(
+        "h2",
+        client_established.selected_alpn.?,
+    );
+
+    const server_established_result = try server.receive(
+        client_output.items,
+        &server_output,
+    );
+    var server_established = server_established_result.event.?.established;
+    defer server_established.deinit();
+    try std.testing.expect(server_established.ech_accepted);
+}
+
+test "ECH client rejects a forged ServerHello acceptance signal" {
+    const allocator = std.testing.allocator;
+    const Client = ClientConnection(64 * 1024, 256);
+    const signing_key = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0xf1} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const server_spki = ed25519SubjectPublicKeyInfo(
+        signing_key.public_key.toBytes(),
+    );
+    const ech_secret = [_]u8{0xf2} ** 32;
+    var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
+        .fromSecretKey(&ech_secret);
+    defer ech_key_pair.deinit();
+    var encoded_config: std.ArrayList(u8) = .empty;
+    defer encoded_config.deinit(allocator);
+    try ech.writeConfig(&encoded_config, allocator, .{
+        .config_id = 25,
+        .public_key = ech_key_pair.public_key,
+        .public_name = "public.example",
+    });
+
+    var client_material = key_exchange.ClientKeyMaterial{
+        .x25519 = [_]u8{0xf3} ** key_exchange.secret_len,
+    };
+    var client_wire: std.ArrayList(u8) = .empty;
+    defer client_wire.deinit(allocator);
+    var client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0xf4} ** 32,
+        .session_id = "ech-reject",
+        .server_name = "private.example",
+        .key_material = &client_material,
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .server_verifier = .{ .pinned_raw_public_key = &server_spki },
+        .server_certificate_type = .raw_public_key,
+        .ech = .{
+            .io = std.testing.io,
+            .config = try ech.parseConfig(encoded_config.items),
+            .outer_random = [_]u8{0xf5} ** 32,
+        },
+    }, &client_wire);
+    defer client.deinit();
+
+    var forged_hello: std.ArrayList(u8) = .empty;
+    defer forged_hello.deinit(allocator);
+    try server_hello.writeServerHello(&forged_hello, allocator, .{
+        .random = [_]u8{0xf6} ** 32,
+        .session_id_echo = "ech-reject",
+        .cipher_suite = .aes_128_gcm_sha256,
+        .key_share_group = key_exchange.named_group_x25519,
+        .key_share = &([_]u8{0xf7} ** 32),
+    });
+    var server_wire: std.ArrayList(u8) = .empty;
+    defer server_wire.deinit(allocator);
+    try appendPlaintextHandshakeRecord(
+        &server_wire,
+        allocator,
+        forged_hello.items,
+    );
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    try std.testing.expectError(
+        error.EchRejected,
+        client.receive(server_wire.items, &output),
+    );
+    try std.testing.expectError(
+        error.ConnectionFailed,
+        client.receive("", &output),
     );
 }
 

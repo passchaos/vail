@@ -83,6 +83,14 @@ pub const ConfigOptions = struct {
     extensions: []const ConfigExtension = &.{},
 };
 
+pub const ServerConfig = struct {
+    config: Config,
+    key_pair: *const hpke.KeyPair,
+    /// RFC 9849 permits this check but does not require it because one key may
+    /// be published under more than one public name.
+    require_public_name_match: bool = false,
+};
+
 pub const Outer = struct {
     cipher_suite: CipherSuite,
     config_id: u8,
@@ -98,12 +106,9 @@ pub const ClientHelloExtension = union(enum) {
 /// Selects the first structurally valid config supporting Vail's HPKE suite.
 /// Unknown versions and otherwise well-framed unsupported configs are skipped.
 pub fn selectConfig(config_list: []const u8) Error!Config {
+    try validateConfigList(config_list);
     var list_pos: usize = 0;
-    const list = readU16Vector(config_list, &list_pos) catch
-        return error.InvalidConfigList;
-    if (list_pos != config_list.len or list.len < 4) {
-        return error.InvalidConfigList;
-    }
+    const list = readU16Vector(config_list, &list_pos) catch unreachable;
 
     var config_pos: usize = 0;
     while (config_pos < list.len) {
@@ -128,6 +133,26 @@ pub fn selectConfig(config_list: []const u8) Error!Config {
         return selected;
     }
     return error.NoSupportedConfig;
+}
+
+/// Validates only the version-independent ECHConfigList framing. Individual
+/// versions remain opaque so retry lists can carry future ECH versions.
+pub fn validateConfigList(config_list: []const u8) Error!void {
+    var list_pos: usize = 0;
+    const list = readU16Vector(config_list, &list_pos) catch
+        return error.InvalidConfigList;
+    if (list_pos != config_list.len or list.len < 4) {
+        return error.InvalidConfigList;
+    }
+    var config_pos: usize = 0;
+    while (config_pos < list.len) {
+        _ = readInt(u16, list, &config_pos) catch
+            return error.InvalidConfigList;
+        const contents_len = readInt(u16, list, &config_pos) catch
+            return error.InvalidConfigList;
+        _ = readSlice(list, &config_pos, contents_len) catch
+            return error.InvalidConfigList;
+    }
 }
 
 /// Parses one exact ECHConfig and requires the mandatory Vail HPKE suite.
@@ -167,7 +192,6 @@ pub fn parseConfig(encoded: []const u8) Error!Config {
     try validateConfigExtensions(extensions);
 
     const public_key = public_key_bytes[0..hpke.public_key_len].*;
-    try validatePublicKey(public_key);
     var selected_suite: ?CipherSuite = null;
     var suite_pos: usize = 0;
     while (suite_pos < cipher_suites.len) : (suite_pos += 4) {
@@ -187,11 +211,13 @@ pub fn parseConfig(encoded: []const u8) Error!Config {
             selected_suite = suite;
         }
     }
+    if (selected_suite == null) return error.UnsupportedConfig;
+    try validatePublicKey(public_key);
     return .{
         .encoded = encoded,
         .config_id = config_id,
         .public_key = public_key,
-        .cipher_suite = selected_suite orelse return error.UnsupportedConfig,
+        .cipher_suite = selected_suite.?,
         .maximum_name_length = maximum_name_length,
         .public_name = public_name,
         .extensions = extensions,
@@ -619,6 +645,23 @@ pub fn openInitial(
 ) Error!ServerContext {
     var key_pair = try hpke.KeyPair.fromSecretKey(secret_key);
     defer key_pair.deinit();
+    return openInitialWithKeyPair(
+        inner_output,
+        allocator,
+        outer_client_hello,
+        config,
+        &key_pair,
+    );
+}
+
+/// Opens an initial ClientHelloOuter with a reusable, prevalidated key pair.
+pub fn openInitialWithKeyPair(
+    inner_output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    outer_client_hello: []const u8,
+    config: Config,
+    key_pair: *const hpke.KeyPair,
+) Error!ServerContext {
     if (!std.crypto.timing_safe.eql(
         hpke.PublicKey,
         key_pair.public_key,
@@ -649,9 +692,9 @@ pub fn openInitial(
     defer info.deinit(allocator);
     try appendHpkeInfo(&info, allocator, config.encoded);
     var context = ServerContext{
-        .receiver = try hpke.setupBaseReceiver(
+        .receiver = try hpke.setupBaseReceiverWithKeyPair(
             outer.enc[0..hpke.encapsulated_key_len].*,
-            secret_key,
+            key_pair,
             info.items,
         ),
         .config_id = config.config_id,
@@ -724,6 +767,68 @@ pub fn hrrAcceptConfirmation(
             "hrr ech accept confirmation",
         ),
     };
+}
+
+/// Computes the transcript digest used to verify a ServerHello acceptance
+/// signal without copying the message. The caller supplies the transcript
+/// state through the accepted ClientHelloInner (and HRR/ClientHelloInner2, if
+/// present).
+pub fn serverHelloConfirmationTranscript(
+    prefix: transcript.State,
+    server_hello: []const u8,
+) Error!transcript.Digest {
+    const confirmation_offset = 4 + 2 + 32 - confirmation_len;
+    if (server_hello.len < confirmation_offset + confirmation_len or
+        server_hello[0] != 2 or
+        readU24At(server_hello[1..4]) != server_hello.len - 4)
+    {
+        return error.InvalidClientHello;
+    }
+    var state = prefix;
+    state.update(server_hello[0..confirmation_offset]);
+    state.update(&([_]u8{0} ** confirmation_len));
+    state.update(server_hello[confirmation_offset + confirmation_len ..]);
+    return state.digest();
+}
+
+/// Computes the HRR confirmation transcript by replacing the borrowed
+/// confirmation field with zeroes and applying TLS 1.3's message_hash rollup.
+pub fn helloRetryRequestConfirmationTranscript(
+    algorithm: secret.Hash,
+    first_inner_client_hello: []const u8,
+    hello_retry_request: []const u8,
+    confirmation: []const u8,
+) Error!transcript.Digest {
+    if (confirmation.len != confirmation_len) {
+        return error.InvalidEchExtension;
+    }
+    const message_start = @intFromPtr(hello_retry_request.ptr);
+    const confirmation_start = @intFromPtr(confirmation.ptr);
+    if (confirmation_start < message_start) return error.InvalidEchExtension;
+    const offset = confirmation_start - message_start;
+    if (offset > hello_retry_request.len or
+        confirmation.len > hello_retry_request.len - offset)
+    {
+        return error.InvalidEchExtension;
+    }
+
+    const first_hash = transcript.hashFor(
+        algorithm,
+        &.{first_inner_client_hello},
+    );
+    const message_hash_header = [4]u8{
+        254,
+        0,
+        0,
+        @intCast(first_hash.bytes().len),
+    };
+    var state = transcript.State.init(algorithm);
+    state.update(&message_hash_header);
+    state.update(first_hash.bytes());
+    state.update(hello_retry_request[0..offset]);
+    state.update(&([_]u8{0} ** confirmation_len));
+    state.update(hello_retry_request[offset + confirmation_len ..]);
+    return state.digest();
 }
 
 fn confirmationFor(
@@ -1188,6 +1293,12 @@ fn readU24(bytes: []const u8, pos: *usize) error{InvalidEncoding}!usize {
     return (@as(usize, value[0]) << 16) |
         (@as(usize, value[1]) << 8) |
         value[2];
+}
+
+fn readU24At(bytes: *const [3]u8) usize {
+    return (@as(usize, bytes[0]) << 16) |
+        (@as(usize, bytes[1]) << 8) |
+        bytes[2];
 }
 
 fn readU8Vector(

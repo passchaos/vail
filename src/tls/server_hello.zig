@@ -7,6 +7,7 @@
 const std = @import("std");
 const auth = @import("auth.zig");
 const cipher_suite = @import("cipher_suite.zig");
+const ech = @import("ech.zig");
 
 pub const handshake_type_server_hello: u8 = 0x02;
 pub const handshake_type_encrypted_extensions: u8 = 0x08;
@@ -58,6 +59,7 @@ pub const HelloRetryRequest = struct {
     cipher_suite: cipher_suite.Suite,
     selected_group: u16,
     cookie: ?[]const u8 = null,
+    ech_confirmation: ?[ech.confirmation_len]u8 = null,
 };
 
 pub const ParsedHelloRetryRequest = struct {
@@ -65,6 +67,7 @@ pub const ParsedHelloRetryRequest = struct {
     cipher_suite: cipher_suite.Suite,
     selected_group: u16,
     cookie: ?[]const u8,
+    ech_confirmation: ?[]const u8,
 };
 
 pub fn isHelloRetryRequest(bytes: []const u8) bool {
@@ -107,6 +110,7 @@ pub fn parseHelloRetryRequest(
 
     var selected_group: ?u16 = null;
     var cookie: ?[]const u8 = null;
+    var ech_confirmation: ?[]const u8 = null;
     var saw_version = false;
     var seen = std.StaticBitSet(65536).initEmpty();
     var ext_pos: usize = 0;
@@ -137,6 +141,12 @@ pub fn parseHelloRetryRequest(
                     return error.InvalidServerHello;
                 }
             },
+            ech.extension_type => {
+                if (payload.len != ech.confirmation_len) {
+                    return error.InvalidServerHello;
+                }
+                ech_confirmation = payload;
+            },
             else => return error.InvalidServerHello,
         }
     }
@@ -148,6 +158,7 @@ pub fn parseHelloRetryRequest(
         .cipher_suite = suite,
         .selected_group = selected_group.?,
         .cookie = cookie,
+        .ech_confirmation = ech_confirmation,
     };
 }
 
@@ -184,6 +195,15 @@ pub fn writeHelloRetryRequest(
         );
         try appendInt(&extensions, allocator, u16, cookie.len);
         try extensions.appendSlice(allocator, cookie);
+    }
+    if (retry.ech_confirmation) |confirmation| {
+        try appendExtensionHeader(
+            &extensions,
+            allocator,
+            ech.extension_type,
+            confirmation.len,
+        );
+        try extensions.appendSlice(allocator, &confirmation);
     }
     try appendInt(&body, allocator, u16, extensions.items.len);
     try body.appendSlice(allocator, extensions.items);
@@ -335,6 +355,8 @@ pub const EncryptedExtensions = struct {
     accept_early_data: bool = false,
     client_certificate_type: ?auth.CertificateType = null,
     server_certificate_type: ?auth.CertificateType = null,
+    /// Exact RFC 9849 ECHConfigList returned after rejecting an ECH offer.
+    ech_retry_configs: ?[]const u8 = null,
 };
 
 pub const ParsedEncryptedExtensions = struct {
@@ -343,6 +365,7 @@ pub const ParsedEncryptedExtensions = struct {
     early_data_accepted: bool = false,
     client_certificate_type: ?auth.CertificateType = null,
     server_certificate_type: ?auth.CertificateType = null,
+    ech_retry_configs: ?[]const u8 = null,
 };
 
 pub fn parseEncryptedExtensions(
@@ -417,6 +440,10 @@ pub fn parseEncryptedExtensions(
             if (payload.len != 1) return error.InvalidEncryptedExtensions;
             result.server_certificate_type = parseCertificateType(payload[0]) catch
                 return error.InvalidEncryptedExtensions;
+        } else if (typ == ech.extension_type) {
+            ech.validateConfigList(payload) catch
+                return error.InvalidEncryptedExtensions;
+            result.ech_retry_configs = payload;
         } else {
             // A stream TLS adapter does not understand QUIC extensions or
             // early-data acceptance and must fail closed rather than silently
@@ -493,6 +520,17 @@ pub fn writeEncryptedExtensions(
             @intFromEnum(certificate_type),
         );
     }
+    if (extensions.ech_retry_configs) |retry_configs| {
+        ech.validateConfigList(retry_configs) catch
+            return error.InvalidEncryptedExtensions;
+        try appendExtensionHeader(
+            &extension_bytes,
+            allocator,
+            ech.extension_type,
+            retry_configs.len,
+        );
+        try extension_bytes.appendSlice(allocator, retry_configs);
+    }
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
     try appendInt(&body, allocator, u16, extension_bytes.items.len);
@@ -542,6 +580,37 @@ test "HelloRetryRequest codec preserves selected group and cookie" {
     try std.testing.expectError(
         error.InvalidServerHello,
         parseServerHello(encoded.items),
+    );
+}
+
+test "ECH HRR confirmation and rejection configs round trip" {
+    const allocator = std.testing.allocator;
+    const confirmation = [_]u8{0xa5} ** ech.confirmation_len;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeHelloRetryRequest(&encoded, allocator, .{
+        .session_id_echo = "session",
+        .cipher_suite = .aes_128_gcm_sha256,
+        .selected_group = 0x001d,
+        .ech_confirmation = confirmation,
+    });
+    const parsed_retry = try parseHelloRetryRequest(encoded.items);
+    try std.testing.expectEqualSlices(
+        u8,
+        &confirmation,
+        parsed_retry.ech_confirmation.?,
+    );
+
+    const retry_configs = [_]u8{ 0, 4, 0xaa, 0xaa, 0, 0 };
+    encoded.clearRetainingCapacity();
+    try writeEncryptedExtensions(&encoded, allocator, .{
+        .ech_retry_configs = &retry_configs,
+    });
+    const parsed_extensions = try parseEncryptedExtensions(encoded.items);
+    try std.testing.expectEqualSlices(
+        u8,
+        &retry_configs,
+        parsed_extensions.ech_retry_configs.?,
     );
 }
 

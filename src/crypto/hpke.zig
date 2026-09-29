@@ -167,7 +167,19 @@ pub fn setupBaseReceiver(
     recipient_secret_key: *const SecretKey,
     info: []const u8,
 ) Error!ReceiverContext {
-    var shared_secret = try decap(enc, recipient_secret_key);
+    var recipient = try KeyPair.fromSecretKey(recipient_secret_key);
+    defer recipient.deinit();
+    return setupBaseReceiverWithKeyPair(enc, &recipient, info);
+}
+
+/// Creates a receiver context from a key pair prepared once by the caller.
+/// This avoids repeating X25519 public-key recovery for every encapsulation.
+pub fn setupBaseReceiverWithKeyPair(
+    enc: EncapsulatedKey,
+    recipient: *const KeyPair,
+    info: []const u8,
+) Error!ReceiverContext {
+    var shared_secret = try decap(enc, recipient);
     defer std.crypto.secureZero(u8, &shared_secret);
     return .{ .state = keySchedule(&shared_secret, info) };
 }
@@ -208,17 +220,14 @@ fn encap(
 
 fn decap(
     enc: EncapsulatedKey,
-    recipient_secret_key: *const SecretKey,
+    recipient: *const KeyPair,
 ) Error!SharedSecret {
-    const recipient_public_key = X25519.recoverPublicKey(
-        recipient_secret_key.*,
-    ) catch return error.InvalidSecretKey;
-    var dh = try exchange(recipient_secret_key, enc);
+    var dh = try exchange(&recipient.secret_key, enc);
     defer std.crypto.secureZero(u8, &dh);
 
     var kem_context: [encapsulated_key_len + public_key_len]u8 = undefined;
     @memcpy(kem_context[0..encapsulated_key_len], &enc);
-    @memcpy(kem_context[encapsulated_key_len..], &recipient_public_key);
+    @memcpy(kem_context[encapsulated_key_len..], &recipient.public_key);
     return extractAndExpand(&dh, &kem_context);
 }
 
@@ -540,7 +549,7 @@ test "RFC 9180 A.1 DHKEM and base-mode key schedule" {
     var shared_secret = try encap(&ephemeral, vector_pk_r);
     defer std.crypto.secureZero(u8, &shared_secret);
     try std.testing.expectEqual(vector_shared_secret, shared_secret);
-    var decapped = try decap(vector_pk_e, &vector_sk_r);
+    var decapped = try decap(vector_pk_e, &recipient);
     defer std.crypto.secureZero(u8, &decapped);
     try std.testing.expectEqual(shared_secret, decapped);
 

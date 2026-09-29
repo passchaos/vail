@@ -10,6 +10,7 @@ const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
 const client_auth = @import("client_auth.zig");
 const client_hello = @import("client_hello.zig");
+const ech = @import("ech.zig");
 const key_exchange = @import("key_exchange.zig");
 const key_schedule = @import("key_schedule.zig");
 const record = @import("record.zig");
@@ -27,7 +28,7 @@ pub const Error = std.mem.Allocator.Error || server_flight.Error ||
     key_schedule.Error || record.Error || traffic.Error || auth.Error ||
     certificate_compression.Error ||
     key_exchange.Error ||
-    client_auth.Error || error{
+    client_auth.Error || ech.Error || error{
     InvalidFinished,
     InvalidPskSelection,
     MissingServerKeyMaterial,
@@ -58,6 +59,9 @@ pub const Options = struct {
     psk: ?secret.Secret = null,
     selected_psk_identity: ?u16 = null,
     accept_early_data: bool = false,
+    /// Present only when `client_hello_bytes` is an accepted ECH inner hello.
+    ech_inner_random: ?[32]u8 = null,
+    ech_retry_configs: ?[]const u8 = null,
     /// Transcript through ClientHello2 for a HelloRetryRequest handshake.
     /// Null starts the ordinary transcript with `client_hello_bytes`.
     transcript_prefix: ?transcript.State = null,
@@ -86,6 +90,8 @@ pub const ManagedOptions = struct {
     psk: ?secret.Secret = null,
     selected_psk_identity: ?u16 = null,
     accept_early_data: bool = false,
+    ech_inner_random: ?[32]u8 = null,
+    ech_retry_configs: ?[]const u8 = null,
     transcript_prefix: ?transcript.State = null,
     client_auth: ?ClientAuthOptions = null,
 };
@@ -135,6 +141,8 @@ pub fn writeServerHandshakeFlightManaged(
         .psk = options.psk,
         .selected_psk_identity = options.selected_psk_identity,
         .accept_early_data = options.accept_early_data,
+        .ech_inner_random = options.ech_inner_random,
+        .ech_retry_configs = options.ech_retry_configs,
         .transcript_prefix = options.transcript_prefix,
         .client_auth = options.client_auth,
     }, selection);
@@ -171,6 +179,11 @@ fn writeServerHandshakeFlightSelected(
     if (options.accept_early_data and options.psk == null) {
         return error.InvalidPskSelection;
     }
+    if (options.ech_inner_random != null and
+        options.ech_retry_configs != null)
+    {
+        return error.InvalidEchExtension;
+    }
     if (options.psk) |psk_secret| {
         if (psk_secret.hash != selection.suite.hash()) {
             return error.HashMismatch;
@@ -178,14 +191,34 @@ fn writeServerHandshakeFlightSelected(
     }
     var server_hello_msg: std.ArrayList(u8) = .empty;
     defer server_hello_msg.deinit(allocator);
+    var server_random = options.server_random;
+    if (options.ech_inner_random != null) {
+        @memset(server_random[server_random.len - ech.confirmation_len ..], 0);
+    }
     try server_hello.writeServerHello(&server_hello_msg, allocator, .{
-        .random = options.server_random,
+        .random = server_random,
         .session_id_echo = options.parsed_client_hello.session_id,
         .cipher_suite = selection.suite,
         .key_share_group = selection.key_share_group,
         .key_share = options.server_key_share,
         .selected_psk_identity = options.selected_psk_identity,
     });
+    if (options.ech_inner_random) |inner_random| {
+        var confirmation_transcript = options.transcript_prefix orelse blk: {
+            var state = transcript.State.init(selection.suite.hash());
+            state.update(options.client_hello_bytes);
+            break :blk state;
+        };
+        confirmation_transcript.update(server_hello_msg.items);
+        const confirmation = try ech.acceptConfirmation(
+            selection.suite.hash(),
+            inner_random,
+            confirmation_transcript.digest(),
+        );
+        const confirmation_offset = 4 + 2 + 32 - ech.confirmation_len;
+        server_hello_msg.items[confirmation_offset..][0..ech.confirmation_len].* =
+            confirmation;
+    }
     try out.appendSlice(allocator, server_hello_msg.items);
 
     var transcript_state = options.transcript_prefix orelse blk: {
@@ -222,6 +255,7 @@ fn writeServerHandshakeFlightSelected(
             selection.client_certificate_type
         else
             null,
+        .ech_retry_configs = options.ech_retry_configs,
     });
     try appendEncryptedHandshake(
         out,

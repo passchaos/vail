@@ -48,6 +48,7 @@ pub const Options = struct {
     transcript_prefix: ?transcript.State = null,
     psk_resumed: bool = false,
     early_data_offered: bool = false,
+    ech_accepted: bool = false,
     server_verifier: auth.ClientVerifier,
     server_certificate_type: auth.CertificateType = .x509,
     server_name: ?[]const u8,
@@ -107,6 +108,11 @@ pub fn verifyServerAndWriteClientFlight(
         try server_hello.parseEncryptedExtensions(
             flight.encrypted_extensions,
         );
+    if (options.ech_accepted and
+        encrypted_extensions.ech_retry_configs != null)
+    {
+        return error.InvalidServerFlight;
+    }
     const parsed_client_hello = try client_hello.parse(
         options.client_hello_bytes,
     );

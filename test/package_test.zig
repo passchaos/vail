@@ -8,6 +8,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.crypto, "hpke"));
     try std.testing.expect(@hasDecl(vail.crypto.hpke, "setupBaseSender"));
     try std.testing.expect(@hasDecl(vail.crypto.hpke, "setupBaseReceiver"));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.hpke,
+        "setupBaseReceiverWithKeyPair",
+    ));
     try std.testing.expect(@hasDecl(vail.crypto.hpke, "SenderContext"));
     try std.testing.expect(@hasDecl(vail.crypto.hpke, "ReceiverContext"));
     try std.testing.expect(@hasDecl(
@@ -48,8 +52,25 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.tls.ech, "writeConfig"));
     try std.testing.expect(@hasDecl(vail.tls.ech, "ClientContext"));
     try std.testing.expect(@hasDecl(vail.tls.ech, "ServerContext"));
+    try std.testing.expect(@hasDecl(vail.tls.ech, "ServerConfig"));
     try std.testing.expect(@hasDecl(vail.tls.ech, "openInitial"));
     try std.testing.expect(@hasDecl(vail.tls.ech, "acceptConfirmation"));
+    try std.testing.expect(@hasDecl(
+        vail.tls.client_connection,
+        "EchClientConfig",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.client_connection.Config,
+        "ech",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.server_connection.Config,
+        "ech",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.client_connection.ClientConnection(1024, 256).Established,
+        "ech_accepted",
+    ));
     try std.testing.expect(@hasDecl(vail.tls, "key_schedule"));
     try std.testing.expect(@hasDecl(
         vail.tls.key_schedule,

@@ -17,6 +17,20 @@ const rsa_cert_der = decodeHex(rsa_vectors.certificate_hex);
 const rsa_private_key_der = decodeHex(rsa_vectors.private_key_pkcs8_hex);
 
 pub fn main(init: std.process.Init) !void {
+    var args = try init.minimal.args.iterateAllocator(init.gpa);
+    defer args.deinit();
+    _ = args.next();
+    const mode = args.next();
+    const use_ech = if (mode) |argument|
+        std.mem.eql(u8, argument, "ech") or
+            std.mem.eql(u8, argument, "ech-hrr")
+    else
+        false;
+    const force_ech_hrr = if (mode) |argument|
+        std.mem.eql(u8, argument, "ech-hrr")
+    else
+        false;
+    if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
     try sysReuseAddr(fd);
@@ -28,11 +42,15 @@ pub fn main(init: std.process.Init) !void {
     try sysListen(fd, 1);
     const client = try sysAccept(fd);
     defer _ = linux.close(client);
-    const server_secret = [_]u8{0} **
-        (vail.tls.key_exchange.p256.secret_len - 1) ++ .{1};
-    var key_material = vail.tls.key_exchange.ServerKeyMaterial{
-        .secp256r1 = server_secret,
-    };
+    var key_material = if (use_ech and !force_ech_hrr)
+        vail.tls.key_exchange.ServerKeyMaterial{
+            .x25519 = [_]u8{0x71} ** vail.tls.key_exchange.secret_len,
+        }
+    else
+        vail.tls.key_exchange.ServerKeyMaterial{
+            .secp256r1 = [_]u8{0} **
+                (vail.tls.key_exchange.p256.secret_len - 1) ++ .{1},
+        };
     const private_key = try vail.crypto.rsa.PrivateKey.fromDer(
         &rsa_private_key_der,
     );
@@ -62,11 +80,42 @@ pub fn main(init: std.process.Init) !void {
         [_]vail.tls.certificate_compression.PreparedView{
             prepared_certificate.view(),
         };
+    const ech_secret = [_]u8{
+        0xbc, 0xb5, 0x51, 0x29, 0x31, 0x10, 0x30, 0xc9,
+        0xed, 0x26, 0xde, 0xd4, 0xb3, 0xdf, 0x3a, 0xce,
+        0x06, 0x8a, 0xee, 0x17, 0xab, 0xce, 0xd7, 0xdb,
+        0xf3, 0x11, 0xe5, 0xa8, 0xf3, 0xb1, 0x8e, 0x24,
+    };
+    var ech_key_pair = try vail.crypto.hpke.KeyPair.fromSecretKey(&ech_secret);
+    defer ech_key_pair.deinit();
+    var ech_config_bytes: std.ArrayList(u8) = .empty;
+    defer ech_config_bytes.deinit(std.heap.smp_allocator);
+    if (use_ech) {
+        try vail.tls.ech.writeConfig(
+            &ech_config_bytes,
+            std.heap.smp_allocator,
+            .{
+                .config_id = 1,
+                .public_key = ech_key_pair.public_key,
+                .maximum_name_length = 16,
+                .public_name = "public.example",
+            },
+        );
+    }
+    const selected_ech = if (use_ech)
+        try vail.tls.ech.parseConfig(ech_config_bytes.items)
+    else
+        null;
+    const regular_groups = [_]u16{vail.tls.key_exchange.named_group_secp256r1};
+    const ech_groups = [_]u16{vail.tls.key_exchange.named_group_x25519};
     var handshake = HandshakeServer.init(.{
         .allocator = std.heap.smp_allocator,
         .policy = .{
             .cipher_suites = &.{.aes_128_gcm_sha256},
-            .groups = &.{vail.tls.key_exchange.named_group_secp256r1},
+            .groups = if (use_ech and !force_ech_hrr)
+                &ech_groups
+            else
+                &regular_groups,
             .alpn_protocols = &.{ "h2", "http/1.1" },
             .compressed_certificates = &compressed_certificates,
         },
@@ -74,6 +123,11 @@ pub fn main(init: std.process.Init) !void {
         .key_material = &key_material,
         .certificate_chain = &.{&rsa_cert_der},
         .signer = signer,
+        .ech = if (selected_ech) |config| .{
+            .config = config,
+            .key_pair = &ech_key_pair,
+            .require_public_name_match = true,
+        } else null,
     });
     defer handshake.deinit();
     var driver = SocketHandshakeDriver{ .fd = client };
@@ -83,6 +137,7 @@ pub fn main(init: std.process.Init) !void {
         const event = try driver.next(&handshake, &flight);
         switch (event) {
             .hello_retry_request => {
+                std.debug.print("hello retry request\n", .{});
                 try writePlaintextHandshakeRecord(client, flight.items);
                 flight.clearRetainingCapacity();
             },
@@ -115,6 +170,9 @@ pub fn main(init: std.process.Init) !void {
     };
     defer established.deinit();
     std.debug.print("client finished verified\n", .{});
+    if (established.ech_accepted) {
+        std.debug.print("ech accepted\n", .{});
+    }
     if (established.certificate_compression) |algorithm| {
         std.debug.print(
             "certificate compression={s}\n",

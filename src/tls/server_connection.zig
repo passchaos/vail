@@ -14,6 +14,7 @@ const cipher_suite = @import("cipher_suite.zig");
 const client_hello = @import("client_hello.zig");
 const connection = @import("connection.zig");
 const early_data = @import("early_data.zig");
+const ech = @import("ech.zig");
 const key_exchange = @import("key_exchange.zig");
 const key_schedule = @import("key_schedule.zig");
 const psk = @import("psk.zig");
@@ -30,7 +31,7 @@ const transcript = @import("transcript.zig");
 
 pub const Error = std.mem.Allocator.Error || client_hello.Error ||
     server_handshake.Error || stream.ProtectedError || key_schedule.Error ||
-    secret.Error || psk.Error || connection.Error || error{
+    secret.Error || psk.Error || connection.Error || ech.Error || error{
     UnexpectedRecord,
     UnexpectedHandshakeMessage,
     UnexpectedApplicationData,
@@ -70,6 +71,7 @@ pub const Config = struct {
     retry_cookie: ?[]const u8 = null,
     resumption: ?ServerResumption = null,
     early_data: ?EarlyDataPolicy = null,
+    ech: ?ech.ServerConfig = null,
 };
 
 pub const ResolvedIdentity = struct {
@@ -218,6 +220,7 @@ pub fn ServerConnection(
             server_certificate_type: auth.CertificateType,
             client_certificate_type: auth.CertificateType,
             peer_certificate_chain: ?[][]u8 = null,
+            ech_accepted: bool,
 
             pub const TicketOptions = struct {
                 keyring: *const ticket_keyring.Keyring,
@@ -394,6 +397,9 @@ pub fn ServerConnection(
             max_handshake_message_len,
         ) = .{},
         retry: ?RetryState = null,
+        ech_context: ?ech.ServerContext = null,
+        ech_offered: bool = false,
+        ech_accepted: bool = false,
         saw_retry_change_cipher_spec: bool = false,
         pending: ?PendingHandshake = null,
 
@@ -504,11 +510,17 @@ pub fn ServerConnection(
                 {
                     return error.UnexpectedHandshakeMessage;
                 }
-                const parsed = try client_hello.parse(message);
+                var inner_hello: std.ArrayList(u8) = .empty;
+                defer inner_hello.deinit(self.config.allocator);
+                const effective_message = try self.clientHelloForNegotiation(
+                    message,
+                    &inner_hello,
+                );
+                const parsed = try client_hello.parse(effective_message);
                 if (self.stage == .second_client_hello) {
                     return self.acceptSecondClientHello(
                         record_result.consumed,
-                        message,
+                        effective_message,
                         parsed,
                         output,
                     );
@@ -517,13 +529,13 @@ pub fn ServerConnection(
                 if (try parsed.keyShareForGroup(material_group) == null) {
                     return self.sendHelloRetryRequest(
                         record_result.consumed,
-                        message,
+                        effective_message,
                         parsed,
                         output,
                     );
                 }
                 try self.startServerFlight(
-                    message,
+                    effective_message,
                     parsed,
                     null,
                     null,
@@ -540,6 +552,66 @@ pub fn ServerConnection(
                 .consumed = record_result.consumed,
                 .event = null,
             };
+        }
+
+        fn clientHelloForNegotiation(
+            self: *Self,
+            outer_message: []const u8,
+            inner_output: *std.ArrayList(u8),
+        ) Error![]const u8 {
+            const parsed_outer = try client_hello.parse(outer_message);
+            if (parsed_outer.encrypted_client_hello != null) {
+                self.ech_offered = true;
+            }
+            if (self.stage == .second_client_hello) {
+                const context = &(self.ech_context orelse
+                    return outer_message);
+                try context.openRetry(
+                    inner_output,
+                    self.config.allocator,
+                    outer_message,
+                );
+                return inner_output.items;
+            }
+            const server_config = self.config.ech orelse return outer_message;
+            const encoded_extension = parsed_outer.encrypted_client_hello orelse
+                return outer_message;
+            const outer = switch (try ech.parseClientHelloExtension(
+                encoded_extension,
+            )) {
+                .outer => |value| value,
+                .inner => return error.InvalidEchExtension,
+            };
+            if (outer.config_id != server_config.config.config_id or
+                !std.meta.eql(
+                    outer.cipher_suite,
+                    server_config.config.cipher_suite,
+                ))
+            {
+                return outer_message;
+            }
+            if (server_config.require_public_name_match and
+                (parsed_outer.server_name == null or
+                    !server_config.config.outerNameMatches(
+                        parsed_outer.server_name.?,
+                    )))
+            {
+                return error.InvalidClientHello;
+            }
+            var context = ech.openInitialWithKeyPair(
+                inner_output,
+                self.config.allocator,
+                outer_message,
+                server_config.config,
+                server_config.key_pair,
+            ) catch |err| switch (err) {
+                error.AuthenticationFailed => return outer_message,
+                else => return err,
+            };
+            errdefer context.deinit();
+            self.ech_context = context;
+            self.ech_accepted = true;
+            return inner_output.items;
         }
 
         fn sendHelloRetryRequest(
@@ -576,8 +648,27 @@ pub fn ServerConnection(
                     .cipher_suite = selected.suite,
                     .selected_group = selected.selected_group,
                     .cookie = self.config.retry_cookie,
+                    .ech_confirmation = if (self.ech_context != null)
+                        [_]u8{0} ** ech.confirmation_len
+                    else
+                        null,
                 },
             );
+            if (self.ech_context != null) {
+                const retry_bytes = output.items[retry_start..];
+                const confirmation_transcript =
+                    transcript.afterHelloRetryRequest(
+                        selected.suite.hash(),
+                        message,
+                        retry_bytes,
+                    ).digest();
+                const confirmation = try ech.hrrAcceptConfirmation(
+                    selected.suite.hash(),
+                    parsed.random.*,
+                    confirmation_transcript,
+                );
+                output.items[output.items.len - ech.confirmation_len ..][0..ech.confirmation_len].* = confirmation;
+            }
             self.retry = .{
                 .allocator = self.config.allocator,
                 .first_client_hello = first_client_hello,
@@ -699,6 +790,17 @@ pub fn ServerConnection(
             errdefer if (early_records) |*early| early.deinit();
             self.consumeFixedPsk();
             self.key_material_consumed = true;
+            var ech_retry_configs: std.ArrayList(u8) = .empty;
+            defer ech_retry_configs.deinit(self.config.allocator);
+            if (self.ech_offered and !self.ech_accepted) {
+                if (self.config.ech) |server_ech| {
+                    try ech.writeConfigList(
+                        &ech_retry_configs,
+                        self.config.allocator,
+                        &.{server_ech.config.encoded},
+                    );
+                }
+            }
             var result = try server_handshake
                 .writeServerHandshakeFlightManaged(
                 output,
@@ -720,6 +822,14 @@ pub fn ServerConnection(
                     else
                         null,
                     .accept_early_data = early_limit != null,
+                    .ech_inner_random = if (self.ech_context != null)
+                        parsed.random.*
+                    else
+                        null,
+                    .ech_retry_configs = if (ech_retry_configs.items.len != 0)
+                        ech_retry_configs.items
+                    else
+                        null,
                     .transcript_prefix = transcript_prefix,
                     .client_auth = self.config.client_auth,
                 },
@@ -753,6 +863,8 @@ pub fn ServerConnection(
                 .expect_end_of_early_data = early_limit != null,
                 .saw_change_cipher_spec = self.saw_retry_change_cipher_spec,
             };
+            if (self.ech_context) |*context| context.deinit();
+            self.ech_context = null;
             self.stage = .client_finished;
         }
 
@@ -1175,6 +1287,7 @@ pub fn ServerConnection(
                 .server_certificate_type = pending.server_certificate_type,
                 .client_certificate_type = pending.client_certificate_type,
                 .peer_certificate_chain = pending.authenticated_client_chain,
+                .ech_accepted = self.ech_accepted,
             };
             pending.authenticated_client_chain = null;
             pending.deinit();
@@ -1193,6 +1306,8 @@ pub fn ServerConnection(
             self.pending = null;
             if (self.retry) |*retry| retry.deinit();
             self.retry = null;
+            if (self.ech_context) |*context| context.deinit();
+            self.ech_context = null;
             if (!self.key_material_consumed) {
                 self.config.key_material.wipe();
                 self.key_material_consumed = true;
@@ -1237,6 +1352,10 @@ fn validateSecondClientHello(
         !std.mem.eql(u8, first.alpn_protocols, second.alpn_protocols) or
         !std.mem.eql(u8, first.supported_versions, second.supported_versions) or
         !std.mem.eql(u8, first.psk_key_exchange_modes, second.psk_key_exchange_modes) or
+        !optionalBytesEql(
+            first.encrypted_client_hello,
+            second.encrypted_client_hello,
+        ) or
         !optionalBytesEql(
             first.quic_transport_parameters,
             second.quic_transport_parameters,
