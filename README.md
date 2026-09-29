@@ -175,11 +175,14 @@ The current foundation provides:
   binder, disables 0-RTT, and enforces ClientHello2 consistency on both
   endpoints. Accepted ECH uses the reconstructed ClientHelloInner transcript
   and authenticates both ordinary and HRR acceptance confirmations, including
-  combinations with PSK and rejected 0-RTT. The server can request and
-  authenticate mTLS and verifies the client's Finished before returning an
-  owned peer chain. Both sides require QUIC transport parameters and a common
-  ALPN, while packetization, retransmission, packet-number spaces, and
-  congestion/recovery remain transport responsibilities.
+  combinations with PSK and rejected 0-RTT. Rejected ECH switches to the Outer
+  transcript, authenticates the public name before returning owned retry
+  configs, and reports the RFC 9001 `CRYPTO_ERROR` code for `ech_required`
+  without exposing application keys. The server can request and authenticate
+  mTLS and verifies the client's Finished before returning an owned peer chain.
+  Both sides require QUIC transport parameters and a common ALPN, while
+  packetization, retransmission, packet-number spaces, and congestion/recovery
+  remain transport responsibilities.
 - ShangMi coverage: SM2 signs and verifies ZA-bound raw/DER signatures against
   SEC1 public keys and SM2 X.509 SubjectPublicKeyInfo, and is wired into TLS
   CertificateVerify generation/verification for raw and X.509 SM2 keys,

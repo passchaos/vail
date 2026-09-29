@@ -9,6 +9,7 @@
 
 const std = @import("std");
 
+const alert = @import("../tls/alert.zig");
 const auth = @import("../tls/auth.zig");
 const certificate_compression = @import("../tls/certificate_compression.zig");
 const cipher_suite = @import("../tls/cipher_suite.zig");
@@ -26,6 +27,14 @@ const traffic = @import("traffic_crypto.zig");
 const tls_secrets = @import("tls_secrets.zig");
 
 pub const handshake_type_finished: u8 = 0x14;
+pub const ech_required_crypto_error: u64 =
+    0x100 + @as(u64, @intFromEnum(alert.Description.ech_required));
+
+const EchStatus = enum {
+    not_offered,
+    accepted,
+    rejected,
+};
 
 pub const Error = std.mem.Allocator.Error || server_flight.Error ||
     server_hello.Error || client_handshake.Error || key_schedule.Error ||
@@ -63,6 +72,7 @@ pub const Result = struct {
     client_auth: ?ClientAuthState,
     resumed: bool,
     ech_accepted: bool,
+    ech_rejected: bool,
 
     pub fn deinit(self: *Result) void {
         if (self.client_auth) |state| {
@@ -96,6 +106,9 @@ pub const Options = struct {
     /// The caller sets this only after authenticating and reconstructing a
     /// ClientHelloInner with the ECH server context.
     ech_accepted: bool = false,
+    /// An authenticated replacement ECHConfigList to send only when the
+    /// supplied ClientHello is an outer ECH offer that could not be decrypted.
+    ech_retry_configs: ?[]const u8 = null,
     retry: ?RetryState = null,
     labels: traffic.Labels = traffic.labels_v1,
 };
@@ -106,6 +119,7 @@ pub const RetryState = struct {
     transcript_prefix: transcript.State,
     binder_prefix: transcript.State,
     second_client_hello_hash: transcript.Digest,
+    ech_offered: bool,
     ech_accepted: bool,
 };
 
@@ -131,10 +145,8 @@ pub fn prepareRetryState(
     }
     if (first.alpn_protocols.len == 0) return error.MissingAlpn;
     const retry = try server_hello.parseHelloRetryRequest(hello_retry_request);
-    const ech_accepted = if (first.encrypted_client_hello) |encoded| blk: {
-        if (try ech.parseClientHelloExtension(encoded) != .inner) {
-            return error.UnsupportedEch;
-        }
+    const ech_status = try clientHelloEchStatus(first);
+    const ech_accepted = if (ech_status == .accepted) blk: {
         const confirmation = retry.ech_confirmation orelse
             return error.EchRejected;
         const confirmation_transcript =
@@ -207,6 +219,7 @@ pub fn prepareRetryState(
             retry.cipher_suite.hash(),
             &.{second_client_hello},
         ),
+        .ech_offered = ech_status != .not_offered,
         .ech_accepted = ech_accepted,
     };
 }
@@ -280,6 +293,31 @@ pub const ClientResult = struct {
     }
 };
 
+pub const EchRejectionOptions = struct {
+    outer_client_hello_bytes: []const u8,
+    server_hello_bytes: []const u8,
+    server_handshake_crypto: []const u8,
+    shared_secret: []const u8,
+    server_verifier: auth.ClientVerifier,
+    certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
+    max_decompressed_certificate_len: usize = 64 * 1024,
+    server_certificate_type: auth.CertificateType = .x509,
+    retry: ?RetryState = null,
+};
+
+/// Authenticated ECH rejection. QUIC transports close the connection with
+/// `crypto_error_code` and may cache `retry_configs` only for a fresh attempt.
+pub const EchRejection = struct {
+    allocator: std.mem.Allocator,
+    retry_configs: ?[]u8,
+    crypto_error_code: u64 = ech_required_crypto_error,
+
+    pub fn deinit(self: *EchRejection) void {
+        if (self.retry_configs) |configs| self.allocator.free(configs);
+        self.* = undefined;
+    }
+};
+
 /// Derive the client write keys used for QUIC 0-RTT packets. The ClientHello
 /// must contain an authenticated binder and an early_data offer for this PSK.
 pub fn clientEarlyPacketKeys(
@@ -342,7 +380,9 @@ pub fn writeClientCryptoFlight(
         return error.MissingQuicTransportParameters;
     }
     if (parsed_client.alpn_protocols.len == 0) return error.MissingAlpn;
-    const ech_accepted = try isInnerEch(parsed_client);
+    const ech_status = try clientHelloEchStatus(parsed_client);
+    if (ech_status == .rejected) return error.UnsupportedEch;
+    const ech_accepted = ech_status == .accepted;
     if (options.resumption) |resumption| {
         if (parsed_client.pre_shared_key == null) return error.MissingPskOffer;
         const offer = try psk.parseClientOfferForHash(
@@ -404,6 +444,7 @@ pub fn writeClientCryptoFlight(
             parsed_server.cipher_suite,
             parsed_server.key_share_group,
             options.client_hello_bytes,
+            ech_status != .not_offered,
             ech_accepted,
         );
     }
@@ -538,6 +579,134 @@ pub fn writeClientCryptoFlight(
     };
 }
 
+/// Authenticate an ECH rejection against ClientHelloOuter and its public
+/// name. No client Finished or application keys are exposed for the rejected
+/// connection; QUIC must close it with `crypto_error_code`.
+pub fn authenticateEchRejection(
+    allocator: std.mem.Allocator,
+    options: EchRejectionOptions,
+) Error!EchRejection {
+    const parsed_outer = try client_hello.parse(
+        options.outer_client_hello_bytes,
+    );
+    if (try clientHelloEchStatus(parsed_outer) != .rejected) {
+        return error.InvalidEchExtension;
+    }
+    if (!parsed_outer.offersTls13()) return error.InvalidClientHello;
+    if (parsed_outer.server_name == null) return error.InvalidClientHello;
+    if (parsed_outer.quic_transport_parameters == null) {
+        return error.MissingQuicTransportParameters;
+    }
+    if (parsed_outer.alpn_protocols.len == 0) return error.MissingAlpn;
+    for (options.certificate_compression_algorithms) |algorithm| {
+        if (!parsed_outer.supportsCertificateCompression(algorithm)) {
+            return error.InvalidClientHello;
+        }
+    }
+
+    const parsed_server = try server_hello.parseServerHello(
+        options.server_hello_bytes,
+    );
+    if (!parsed_outer.hasCipherSuite(parsed_server.cipher_suite.wireValue())) {
+        return error.ServerSelectedUnofferedSuite;
+    }
+    if (!std.mem.eql(
+        u8,
+        parsed_outer.session_id,
+        parsed_server.session_id_echo,
+    )) return error.SessionIdMismatch;
+    if (!try parsed_outer.supportsGroup(parsed_server.key_share_group) or
+        try parsed_outer.keyShareForGroup(parsed_server.key_share_group) == null)
+    {
+        return error.ServerSelectedUnofferedGroup;
+    }
+    if (parsed_server.selected_psk_identity != null) {
+        return error.InvalidServerHello;
+    }
+    if (options.retry) |retry| {
+        try validateRetryState(
+            retry,
+            parsed_server.cipher_suite,
+            parsed_server.key_share_group,
+            options.outer_client_hello_bytes,
+            true,
+            false,
+        );
+    }
+
+    const flight = try client_handshake.splitServerFlight(
+        options.server_handshake_crypto,
+    );
+    const extensions = try server_hello.parseEncryptedExtensions(
+        flight.encrypted_extensions,
+    );
+    _ = extensions.quic_transport_parameters orelse
+        return error.MissingQuicTransportParameters;
+    const selected_alpn = extensions.alpn_protocol orelse
+        return error.MissingAlpn;
+    if (!try parsed_outer.supportsAlpnProtocol(selected_alpn)) {
+        return error.ServerSelectedUnofferedAlpn;
+    }
+    if (extensions.early_data_accepted) {
+        return error.InvalidEarlyDataConfiguration;
+    }
+
+    var hello_transcript = if (options.retry) |retry|
+        retry.transcript_prefix
+    else blk: {
+        var state = transcript.State.init(parsed_server.cipher_suite.hash());
+        state.update(options.outer_client_hello_bytes);
+        break :blk state;
+    };
+    hello_transcript.update(options.server_hello_bytes);
+    var handshake = try key_schedule.deriveHandshakeFor(
+        parsed_server.cipher_suite.hash(),
+        options.shared_secret,
+        hello_transcript.digest(),
+        null,
+    );
+    defer handshake.early_secret.deinit();
+    defer handshake.handshake_secret.deinit();
+    defer handshake.client_traffic_secret.deinit();
+    defer handshake.server_traffic_secret.deinit();
+
+    var discarded_client_flight: std.ArrayList(u8) = .empty;
+    defer discarded_client_flight.deinit(allocator);
+    var verified = try client_handshake.verifyServerAndWriteClientFlight(
+        &discarded_client_flight,
+        allocator,
+        .{
+            .client_hello_bytes = options.outer_client_hello_bytes,
+            .server_hello_bytes = options.server_hello_bytes,
+            .encrypted_server_flight = options.server_handshake_crypto,
+            .handshake_secret = handshake.handshake_secret,
+            .client_handshake_traffic_secret = handshake.client_traffic_secret,
+            .server_handshake_traffic_secret = handshake.server_traffic_secret,
+            .transcript_prefix = if (options.retry) |retry|
+                retry.transcript_prefix
+            else
+                null,
+            .ech_offered = true,
+            .server_verifier = options.server_verifier,
+            .server_certificate_type = options.server_certificate_type,
+            .server_name = parsed_outer.server_name,
+            .certificate_compression_algorithms = options.certificate_compression_algorithms,
+            .max_decompressed_certificate_len = options.max_decompressed_certificate_len,
+            .send_end_of_early_data = false,
+        },
+    );
+    defer verified.deinit();
+
+    const retry_configs = if (verified.ech_retry_configs) |configs|
+        try allocator.dupe(u8, configs)
+    else
+        null;
+    return .{
+        .allocator = allocator,
+        .retry_configs = retry_configs,
+    };
+}
+
 pub fn writeServerCryptoFlight(
     initial_crypto: *std.ArrayList(u8),
     handshake_crypto: *std.ArrayList(u8),
@@ -559,9 +728,14 @@ pub fn writeServerCryptoFlight(
     {
         return error.MissingAlpn;
     }
-    const ech_accepted = try isInnerEch(options.parsed_client_hello);
-    if (ech_accepted != options.ech_accepted) {
-        return error.UnsupportedEch;
+    const ech_status = try clientHelloEchStatus(options.parsed_client_hello);
+    const ech_accepted = ech_status == .accepted;
+    const ech_rejected = ech_status == .rejected;
+    if (ech_accepted != options.ech_accepted or
+        (options.ech_retry_configs != null and !ech_rejected) or
+        (ech_rejected and options.parsed_client_hello.server_name == null))
+    {
+        return error.InvalidEchExtension;
     }
     const selection = try server_flight.select(
         options.parsed_client_hello,
@@ -576,10 +750,13 @@ pub fn writeServerCryptoFlight(
             selection.suite,
             selection.key_share_group,
             options.client_hello_bytes,
+            ech_status != .not_offered,
             ech_accepted,
         );
     }
-    const selected_psk: ?secret.Secret = if (options.resumption) |resumption| blk: {
+    const selected_psk: ?secret.Secret = if (ech_rejected)
+        null
+    else if (options.resumption) |resumption| blk: {
         if (options.parsed_client_hello.pre_shared_key == null or
             resumption.secret.hash != selection.suite.hash())
         {
@@ -693,6 +870,10 @@ pub fn writeServerCryptoFlight(
         .alpn_protocol = selection.alpn_protocol,
         .quic_transport_parameters = options.policy.quic_transport_parameters,
         .accept_early_data = early_data_accepted,
+        .ech_retry_configs = if (ech_rejected)
+            options.ech_retry_configs
+        else
+            null,
         .server_certificate_type = if (selection.send_server_certificate_type)
             selection.server_certificate_type
         else
@@ -824,6 +1005,7 @@ pub fn writeServerCryptoFlight(
         .client_auth = retained_client_auth,
         .resumed = selected_psk != null,
         .ech_accepted = ech_accepted,
+        .ech_rejected = ech_rejected,
     };
 }
 
@@ -910,10 +1092,12 @@ fn validateRetryState(
     suite: cipher_suite.Suite,
     selected_group: u16,
     second_client_hello: []const u8,
+    ech_offered: bool,
     ech_accepted: bool,
 ) Error!void {
     if (retry.cipher_suite != suite or
         retry.selected_group != selected_group or
+        retry.ech_offered != ech_offered or
         retry.ech_accepted != ech_accepted or
         retry.transcript_prefix.digest().hash != suite.hash())
     {
@@ -930,11 +1114,11 @@ fn validateRetryState(
     )) return error.InvalidRetryState;
 }
 
-fn isInnerEch(parsed: client_hello.Parsed) Error!bool {
-    const encoded = parsed.encrypted_client_hello orelse return false;
+fn clientHelloEchStatus(parsed: client_hello.Parsed) Error!EchStatus {
+    const encoded = parsed.encrypted_client_hello orelse return .not_offered;
     return switch (try ech.parseClientHelloExtension(encoded)) {
-        .inner => true,
-        .outer => error.UnsupportedEch,
+        .inner => .accepted,
+        .outer => .rejected,
     };
 }
 
@@ -1416,6 +1600,258 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
         u8,
         &public_key_spki,
         client_result.verified.peer_certificate_chain[0],
+    );
+}
+
+test "QUIC ECH rejection authenticates the outer public name and retry configs" {
+    const allocator = std.testing.allocator;
+    const signing_key = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0xb1} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const public_key_spki = ed25519SubjectPublicKeyInfo(
+        signing_key.public_key.toBytes(),
+    );
+    const ech_secret = [_]u8{0xb2} ** 32;
+    var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
+        .fromSecretKey(&ech_secret);
+    defer ech_key_pair.deinit();
+    var encoded_config: std.ArrayList(u8) = .empty;
+    defer encoded_config.deinit(allocator);
+    try ech.writeConfig(&encoded_config, allocator, .{
+        .config_id = 29,
+        .public_key = ech_key_pair.public_key,
+        .public_name = "public.example",
+    });
+    const ech_config = try ech.parseConfig(encoded_config.items);
+
+    const client_share = [_]u8{0xb3} ** 32;
+    var inner_template: std.ArrayList(u8) = .empty;
+    defer inner_template.deinit(allocator);
+    try client_hello.writeWithKeyShare(&inner_template, allocator, .{
+        .random = [_]u8{0xb4} ** 32,
+        .session_id = "quic-ech-reject",
+        .server_name = "private.example",
+        .key_share = .{ .group = 0x001d, .key_exchange = &client_share },
+        .supported_groups = &.{ 0x001d, 0x0017 },
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .alpn_protocols = &.{"h3"},
+        .quic_transport_parameters = &.{ 1, 2, 3 },
+        .server_certificate_types = &.{.raw_public_key},
+    });
+    var outer_template: std.ArrayList(u8) = .empty;
+    defer outer_template.deinit(allocator);
+    try client_hello.writeWithKeyShare(&outer_template, allocator, .{
+        .random = [_]u8{0xb5} ** 32,
+        .session_id = "quic-ech-reject",
+        .server_name = "public.example",
+        .key_share = .{ .group = 0x001d, .key_exchange = &client_share },
+        .supported_groups = &.{ 0x001d, 0x0017 },
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .alpn_protocols = &.{"h3"},
+        .quic_transport_parameters = &.{ 1, 2, 3 },
+        .server_certificate_types = &.{.raw_public_key},
+    });
+    var inner: std.ArrayList(u8) = .empty;
+    defer inner.deinit(allocator);
+    var outer: std.ArrayList(u8) = .empty;
+    defer outer.deinit(allocator);
+    var context = try ech.ClientContext.init(
+        allocator,
+        std.testing.io,
+        ech_config,
+    );
+    defer context.deinit();
+    try context.sealInitial(
+        &inner,
+        &outer,
+        allocator,
+        inner_template.items,
+        outer_template.items,
+    );
+
+    var retry_configs: std.ArrayList(u8) = .empty;
+    defer retry_configs.deinit(allocator);
+    try ech.writeConfigList(
+        &retry_configs,
+        allocator,
+        &.{ech_config.encoded},
+    );
+    const TrustState = struct {
+        saw_public_name: bool = false,
+
+        fn verify(
+            opaque_context: ?*anyopaque,
+            trust: auth.TrustContext,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(
+                opaque_context orelse return error.MissingContext,
+            ));
+            if (trust.server_name == null or
+                !std.mem.eql(u8, trust.server_name.?, "public.example"))
+            {
+                return error.UnexpectedServerName;
+            }
+            self.saw_public_name = true;
+        }
+    };
+    var trust_state = TrustState{};
+    const shared_secret = [_]u8{0xb6} ** 32;
+    var initial_crypto: std.ArrayList(u8) = .empty;
+    defer initial_crypto.deinit(allocator);
+    var server_crypto: std.ArrayList(u8) = .empty;
+    defer server_crypto.deinit(allocator);
+    var server_result = try writeServerCryptoFlight(
+        &initial_crypto,
+        &server_crypto,
+        allocator,
+        .{
+            .client_hello_bytes = outer.items,
+            .parsed_client_hello = try client_hello.parse(outer.items),
+            .policy = .{
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .alpn_protocols = &.{"h3"},
+                .quic_transport_parameters = &.{ 4, 5, 6 },
+                .server_certificate_type = .raw_public_key,
+            },
+            .server_random = [_]u8{0xb7} ** 32,
+            .server_key_share = &([_]u8{0xb8} ** 32),
+            .shared_secret = &shared_secret,
+            .certificate_chain = &.{&public_key_spki},
+            .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+            .ech_retry_configs = retry_configs.items,
+        },
+    );
+    defer server_result.deinit();
+    try std.testing.expect(server_result.ech_rejected);
+    try std.testing.expect(!server_result.ech_accepted);
+    try std.testing.expect(!server_result.resumed);
+
+    var rejection = try authenticateEchRejection(allocator, .{
+        .outer_client_hello_bytes = outer.items,
+        .server_hello_bytes = initial_crypto.items,
+        .server_handshake_crypto = server_crypto.items,
+        .shared_secret = &shared_secret,
+        .server_verifier = .{
+            .verify_trust = TrustState.verify,
+            .context = @ptrCast(&trust_state),
+        },
+        .server_certificate_type = .raw_public_key,
+    });
+    defer rejection.deinit();
+    try std.testing.expect(trust_state.saw_public_name);
+    try std.testing.expectEqual(
+        ech_required_crypto_error,
+        rejection.crypto_error_code,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        retry_configs.items,
+        rejection.retry_configs.?,
+    );
+
+    const tampered_server_crypto = try allocator.dupe(u8, server_crypto.items);
+    defer allocator.free(tampered_server_crypto);
+    tampered_server_crypto[tampered_server_crypto.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.BadServerFinished,
+        authenticateEchRejection(allocator, .{
+            .outer_client_hello_bytes = outer.items,
+            .server_hello_bytes = initial_crypto.items,
+            .server_handshake_crypto = tampered_server_crypto,
+            .shared_secret = &shared_secret,
+            .server_verifier = .{
+                .verify_trust = TrustState.verify,
+                .context = @ptrCast(&trust_state),
+            },
+            .server_certificate_type = .raw_public_key,
+        }),
+    );
+    @memset(server_crypto.items, 0);
+    try std.testing.expectEqualSlices(
+        u8,
+        retry_configs.items,
+        rejection.retry_configs.?,
+    );
+
+    var retry_bytes: std.ArrayList(u8) = .empty;
+    defer retry_bytes.deinit(allocator);
+    try server_hello.writeHelloRetryRequest(&retry_bytes, allocator, .{
+        .session_id_echo = "quic-ech-reject",
+        .cipher_suite = .aes_128_gcm_sha256,
+        .selected_group = 0x0017,
+        .cookie = "ech-reject-cookie",
+    });
+    const parsed_outer = try client_hello.parse(outer.items);
+    const p256_share = [_]u8{0x04} ++ ([_]u8{0xb9} ** 64);
+    var second_outer: std.ArrayList(u8) = .empty;
+    defer second_outer.deinit(allocator);
+    try client_hello.writeWithKeyShare(&second_outer, allocator, .{
+        .random = parsed_outer.random.*,
+        .session_id = parsed_outer.session_id,
+        .server_name = parsed_outer.server_name,
+        .key_share = .{ .group = 0x0017, .key_exchange = &p256_share },
+        .supported_groups = &.{ 0x001d, 0x0017 },
+        .cookie = "ech-reject-cookie",
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .alpn_protocols = &.{"h3"},
+        .quic_transport_parameters = &.{ 1, 2, 3 },
+        .server_certificate_types = &.{.raw_public_key},
+        .encrypted_client_hello = parsed_outer.encrypted_client_hello,
+    });
+    const retry = try prepareRetryState(
+        outer.items,
+        retry_bytes.items,
+        second_outer.items,
+    );
+    try std.testing.expect(retry.ech_offered);
+    try std.testing.expect(!retry.ech_accepted);
+
+    var retry_initial: std.ArrayList(u8) = .empty;
+    defer retry_initial.deinit(allocator);
+    var retry_server_crypto: std.ArrayList(u8) = .empty;
+    defer retry_server_crypto.deinit(allocator);
+    var retry_server = try writeServerCryptoFlight(
+        &retry_initial,
+        &retry_server_crypto,
+        allocator,
+        .{
+            .client_hello_bytes = second_outer.items,
+            .parsed_client_hello = try client_hello.parse(second_outer.items),
+            .policy = .{
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .groups = &.{0x0017},
+                .alpn_protocols = &.{"h3"},
+                .quic_transport_parameters = &.{ 4, 5, 6 },
+                .server_certificate_type = .raw_public_key,
+            },
+            .server_random = [_]u8{0xba} ** 32,
+            .server_key_share = &p256_share,
+            .shared_secret = &shared_secret,
+            .certificate_chain = &.{&public_key_spki},
+            .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+            .ech_retry_configs = retry_configs.items,
+            .retry = retry,
+        },
+    );
+    defer retry_server.deinit();
+    var retry_rejection = try authenticateEchRejection(allocator, .{
+        .outer_client_hello_bytes = second_outer.items,
+        .server_hello_bytes = retry_initial.items,
+        .server_handshake_crypto = retry_server_crypto.items,
+        .shared_secret = &shared_secret,
+        .server_verifier = .{
+            .verify_trust = TrustState.verify,
+            .context = @ptrCast(&trust_state),
+        },
+        .server_certificate_type = .raw_public_key,
+        .retry = retry,
+    });
+    defer retry_rejection.deinit();
+    try std.testing.expectEqualSlices(
+        u8,
+        retry_configs.items,
+        retry_rejection.retry_configs.?,
     );
 }
 
