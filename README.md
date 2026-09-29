@@ -9,6 +9,11 @@ The current foundation provides:
 - domain-separated HMAC-SHA256 and constant-time tag verification;
 - fixed-size SHA-256 and SM3 digests, portable SM2 signing/verification,
   SM4 block/SM4-GCM primitives, and explicit secure-memory wiping;
+- allocation-free RFC 9180 HPKE base mode with the ECH mandatory suite:
+  DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, and AES-128-GCM. Sender and
+  receiver contexts retain prepared AEAD state, implement the complete 96-bit
+  nonce sequence space, reject weak X25519 inputs and authentication failures,
+  expose RFC exporters, and explicitly wipe ephemeral and derived secrets;
 - TLS 1.3 ClientHello parsing, encrypted server-handshake flight construction,
   ServerHello/EncryptedExtensions, Certificate, CertificateVerify, Finished, and
   AEAD record-protection codecs;
@@ -196,6 +201,8 @@ RFC 8879 zlib wire-size ratio, amortized preparation cost, and per-handshake
 decompression cost.
 `zig build -Doptimize=ReleaseFast bench-rsa-pss` measures the built-in
 constant-time RSA-2048 PSS and PKCS#1 v1.5 signing paths.
+`zig build -Doptimize=ReleaseFast bench-hpke` measures RFC 9180 sender/receiver
+setup plus stateful AES-128-GCM sealing and opening for ECH-sized payloads.
 `zig build -Doptimize=ReleaseFast bench-tls12-record-crypto` measures the
 TLS 1.2 AES-GCM and ChaCha20-Poly1305 record paths.
 `zig build -Doptimize=ReleaseFast bench-tls12-server-handshake` measures the

@@ -11,6 +11,7 @@ pub const quic = @import("quic/mod.zig");
 
 test {
     _ = crypto.aes_gcm;
+    _ = crypto.hpke;
     _ = crypto.mac;
     _ = crypto.memory;
     _ = crypto.rsa;

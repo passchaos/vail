@@ -5,6 +5,15 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail, "crypto"));
     try std.testing.expect(@hasDecl(vail.crypto, "aes_gcm"));
     try std.testing.expect(@hasDecl(vail.crypto.aes_gcm, "Context"));
+    try std.testing.expect(@hasDecl(vail.crypto, "hpke"));
+    try std.testing.expect(@hasDecl(vail.crypto.hpke, "setupBaseSender"));
+    try std.testing.expect(@hasDecl(vail.crypto.hpke, "setupBaseReceiver"));
+    try std.testing.expect(@hasDecl(vail.crypto.hpke, "SenderContext"));
+    try std.testing.expect(@hasDecl(vail.crypto.hpke, "ReceiverContext"));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.hpke.SenderContext,
+        "exportSecret",
+    ));
     try std.testing.expect(@hasDecl(vail.crypto, "mac"));
     try std.testing.expect(@hasDecl(vail.crypto, "memory"));
     try std.testing.expect(@hasDecl(vail.crypto, "rsa"));

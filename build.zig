@@ -168,6 +168,22 @@ pub fn build(b: *std.Build) void {
     );
     rsa_pss_bench_step.dependOn(&run_rsa_pss_bench.step);
 
+    const hpke_bench = b.addExecutable(.{
+        .name = "vail-bench-hpke",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/hpke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_hpke_bench = b.addRunArtifact(hpke_bench);
+    const hpke_bench_step = b.step(
+        "bench-hpke",
+        "Benchmark RFC 9180 base-mode setup and traffic",
+    );
+    hpke_bench_step.dependOn(&run_hpke_bench.step);
+
     const tls12_handshake_bench = b.addExecutable(.{
         .name = "vail-bench-tls12-server-handshake",
         .root_module = b.createModule(.{
