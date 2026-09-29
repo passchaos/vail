@@ -942,6 +942,43 @@ pub fn appendGreasePskFromInner(
     );
 }
 
+/// Preserves the first outer hello's GREASE PSK shape across HRR while
+/// dropping early_data as required by TLS 1.3.
+pub fn appendGreasePskForRetry(
+    second_outer: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    first_outer: []const u8,
+) Error!void {
+    const first = client_hello.parse(first_outer) catch
+        return error.InvalidClientHello;
+    const psk_payload = first.pre_shared_key orelse return;
+    if (first.psk_key_exchange_modes.len == 0) {
+        return error.InvalidClientHello;
+    }
+    var modes_payload: std.ArrayList(u8) = .empty;
+    defer modes_payload.deinit(allocator);
+    if (first.psk_key_exchange_modes.len > std.math.maxInt(u8)) {
+        return error.InvalidClientHello;
+    }
+    try modes_payload.append(
+        allocator,
+        @intCast(first.psk_key_exchange_modes.len),
+    );
+    try modes_payload.appendSlice(allocator, first.psk_key_exchange_modes);
+    try appendClientHelloExtensionInPlace(
+        second_outer,
+        allocator,
+        client_hello.ext_psk_key_exchange_modes,
+        modes_payload.items,
+    );
+    try appendClientHelloExtensionInPlace(
+        second_outer,
+        allocator,
+        client_hello.ext_pre_shared_key,
+        psk_payload,
+    );
+}
+
 fn randomizePskPayload(io: std.Io, payload: []u8) Error!void {
     var pos: usize = 0;
     const identities_len = readInt(u16, payload, &pos) catch

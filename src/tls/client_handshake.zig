@@ -49,6 +49,7 @@ pub const Options = struct {
     psk_resumed: bool = false,
     early_data_offered: bool = false,
     ech_accepted: bool = false,
+    ech_offered: bool = false,
     server_verifier: auth.ClientVerifier,
     server_certificate_type: auth.CertificateType = .x509,
     server_name: ?[]const u8,
@@ -78,6 +79,7 @@ pub const Result = struct {
     client_certificate_compression: ?certificate_compression.Algorithm,
     server_certificate_type: auth.CertificateType,
     client_certificate_type: auth.CertificateType,
+    ech_retry_configs: ?[]const u8,
 
     pub fn deinit(self: *Result) void {
         self.application.master_secret.deinit();
@@ -108,8 +110,10 @@ pub fn verifyServerAndWriteClientFlight(
         try server_hello.parseEncryptedExtensions(
             flight.encrypted_extensions,
         );
-    if (options.ech_accepted and
-        encrypted_extensions.ech_retry_configs != null)
+    if ((!options.ech_offered and
+        encrypted_extensions.ech_retry_configs != null) or
+        (options.ech_accepted and
+            encrypted_extensions.ech_retry_configs != null))
     {
         return error.InvalidServerFlight;
     }
@@ -342,6 +346,7 @@ pub fn verifyServerAndWriteClientFlight(
         .client_certificate_compression = selected_client_certificate_compression,
         .server_certificate_type = negotiated_server_certificate_type,
         .client_certificate_type = negotiated_client_certificate_type,
+        .ech_retry_configs = encrypted_extensions.ech_retry_configs,
     };
 }
 

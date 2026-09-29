@@ -34,6 +34,7 @@ pub const Description = enum(u8) {
     unknown_psk_identity = 115,
     certificate_required = 116,
     no_application_protocol = 120,
+    ech_required = 121,
     _,
 };
 

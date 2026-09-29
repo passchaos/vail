@@ -82,6 +82,10 @@ test "public modules are reachable" {
         vail.tls.client_connection.ClientConnection(1024, 256).Established,
         "ech_accepted",
     ));
+    const Tls13Client = vail.tls.client_connection.ClientConnection(1024, 256);
+    try std.testing.expect(@hasDecl(Tls13Client, "EchRejection"));
+    try std.testing.expect(@hasField(Tls13Client.EchRejection, "retry_configs"));
+    try std.testing.expect(@hasField(Tls13Client.Event, "ech_rejected"));
     try std.testing.expect(@hasDecl(vail.tls, "key_schedule"));
     try std.testing.expect(@hasDecl(
         vail.tls.key_schedule,

@@ -18,8 +18,11 @@ The current foundation provides:
   selection, public-name and mandatory-extension validation,
   ClientHelloInner padding, linear-time `ech_outer_extensions`
   reconstruction, authenticated ClientHelloOuter encryption/decryption,
-  retained HPKE state and acceptance confirmation across HRR, private-SNI
-  identity selection, SHA-256/SHA-384/SM3 confirmation derivation, and
+  retained HPKE state and acceptance confirmation across HRR, authenticated
+  rejection fallback to the ClientHelloOuter transcript and public name,
+  owned retry-config reporting plus an encrypted `ech_required` alert,
+  private-SNI identity selection, SHA-256/SHA-384/SM3 confirmation derivation,
+  and
   PSK-DHE/0-RTT resumption with real binders confined to ClientHelloInner and
   independently randomized, length-matched GREASE PSKs in ClientHelloOuter;
 - TLS 1.3 ClientHello parsing, encrypted server-handshake flight construction,
@@ -223,6 +226,12 @@ ClientHelloInner encoding, HPKE protection, and server reconstruction.
 `zig build -Doptimize=ReleaseFast interop-rustls-ech-server` exercises an
 accepted ECH handshake from a rustls/AWS-LC client to the Vail server;
 `interop-rustls-ech-hrr-server` repeats it across HelloRetryRequest.
+When a Vail client receives no valid ECH acceptance confirmation, it switches
+to the outer transcript, authenticates the ECH public name and server Finished,
+then returns an owning `ech_rejected` event with any authenticated
+`retry_configs`; callers must call `deinit()` on that event value. The client
+also emits the RFC 9849 fatal `ech_required` alert and never exposes an
+application connection for the rejected attempt.
 `zig build -Doptimize=ReleaseFast bench-tls12-record-crypto` measures the
 TLS 1.2 AES-GCM and ChaCha20-Poly1305 record paths.
 `zig build -Doptimize=ReleaseFast bench-tls12-server-handshake` measures the

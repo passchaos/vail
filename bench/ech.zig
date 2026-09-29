@@ -69,6 +69,35 @@ pub fn main(init: std.process.Init) !void {
     }
     const client_ns = nowNs(init.io) -| client_start;
 
+    const Client = vail.tls.client_connection.ClientConnection(64 * 1024, 256);
+    var client_wire: std.ArrayList(u8) = .empty;
+    defer client_wire.deinit(allocator);
+    const connection_start = nowNs(init.io);
+    for (0..iterations) |_| {
+        client_wire.clearRetainingCapacity();
+        var key_material = vail.tls.key_exchange.ClientKeyMaterial{
+            .x25519 = [_]u8{0x65} ** 32,
+        };
+        var client = try Client.init(.{
+            .allocator = allocator,
+            .random = [_]u8{0x63} ** 32,
+            .session_id = "ech-benchmark",
+            .server_name = "private.example",
+            .key_material = &key_material,
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .alpn_protocols = &.{ "h2", "http/1.1" },
+            .server_verifier = .{},
+            .ech = .{
+                .io = init.io,
+                .config = config,
+                .outer_random = [_]u8{0x64} ** 32,
+            },
+        }, &client_wire);
+        checksum +%= client_wire.items[client_wire.items.len - 1];
+        client.deinit();
+    }
+    const connection_ns = nowNs(init.io) -| connection_start;
+
     var recovered: std.ArrayList(u8) = .empty;
     defer recovered.deinit(allocator);
     const server_start = nowNs(init.io);
@@ -103,10 +132,12 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         "rfc9849_x25519_aes128gcm: client={d} ns/op " ++
+            "client_connection_init={d} ns/op " ++
             "server_prepared={d} ns/op server_unprepared={d} ns/op " ++
             "inner={d} outer={d} checksum={d}\n",
         .{
             client_ns / iterations,
+            connection_ns / iterations,
             server_ns / iterations,
             unprepared_server_ns / iterations,
             inner.items.len,

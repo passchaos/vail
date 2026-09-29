@@ -61,6 +61,11 @@ pub fn main(init: std.process.Init) !void {
                 output.clearRetainingCapacity();
             },
             .peer_alert => return error.PeerAbortedHandshake,
+            .ech_rejected => |value| {
+                var rejection = value;
+                rejection.deinit();
+                return error.EchRejected;
+            },
             .established => |value| break value,
         }
     };
