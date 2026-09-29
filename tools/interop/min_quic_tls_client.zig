@@ -6,7 +6,7 @@ const max_crypto_flight = 64 * 1024;
 const client_transport_parameters = [_]u8{ 0x01, 0x02, 0x03 };
 const server_transport_parameters = [_]u8{ 0x04, 0x05, 0x06 };
 const certificate_der = decodeHex(vail.crypto.testing.rsa_signing.certificate_hex);
-const GroupMode = enum { x25519, hybrid, mlkem };
+const GroupMode = enum { x25519, hybrid, mlkem768, mlkem1024 };
 
 pub fn main(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(init.gpa);
@@ -16,7 +16,9 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, value, "hybrid"))
             .hybrid
         else if (std.mem.eql(u8, value, "mlkem"))
-            .mlkem
+            .mlkem768
+        else if (std.mem.eql(u8, value, "mlkem1024"))
+            .mlkem1024
         else
             return error.InvalidArguments
     else
@@ -30,7 +32,8 @@ pub fn main(init: std.process.Init) !void {
     address.port = std.mem.nativeToBig(u16, switch (mode) {
         .x25519 => 24457,
         .hybrid => 24461,
-        .mlkem => 24463,
+        .mlkem768 => 24463,
+        .mlkem1024 => 24465,
     });
     address.addr = std.mem.nativeToBig(u32, 0x7f000001);
     try sysConnect(socket, @ptrCast(&address), @sizeOf(linux.sockaddr.in));
@@ -45,9 +48,13 @@ pub fn main(init: std.process.Init) !void {
             .mlkem_seed = [_]u8{0xd3} **
                 vail.tls.key_exchange.x25519_mlkem768.mlkem_seed_len,
         } },
-        .mlkem => .{
+        .mlkem768 => .{
             .mlkem768 = [_]u8{0xd4} **
                 vail.tls.key_exchange.mlkem768.seed_len,
+        },
+        .mlkem1024 => .{
+            .mlkem1024 = [_]u8{0xd5} **
+                vail.tls.key_exchange.mlkem1024.seed_len,
         },
     };
     var exchange = try key_material.start();
@@ -120,7 +127,8 @@ pub fn main(init: std.process.Init) !void {
         .{switch (mode) {
             .x25519 => "X25519",
             .hybrid => "X25519MLKEM768",
-            .mlkem => "MLKEM768",
+            .mlkem768 => "MLKEM768",
+            .mlkem1024 => "MLKEM1024",
         }},
     );
 }

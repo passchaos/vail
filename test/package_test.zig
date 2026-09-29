@@ -158,6 +158,7 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(vail.tls, "key_exchange"));
     try std.testing.expect(@hasDecl(vail.tls.key_exchange, "mlkem768"));
+    try std.testing.expect(@hasDecl(vail.tls.key_exchange, "mlkem1024"));
     try std.testing.expect(@hasField(
         vail.tls.key_exchange.ClientKeyMaterial,
         "mlkem768",
@@ -165,6 +166,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         vail.tls.key_exchange.ServerKeyMaterial,
         "mlkem768",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.key_exchange.ClientKeyMaterial,
+        "mlkem1024",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.key_exchange.ServerKeyMaterial,
+        "mlkem1024",
     ));
     try std.testing.expect(@hasDecl(vail.tls, "psk"));
     try std.testing.expect(@hasDecl(vail.tls, "record"));

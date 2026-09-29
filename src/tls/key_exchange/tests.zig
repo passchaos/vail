@@ -3,6 +3,7 @@ const target = @import("x25519_mlkem768.zig");
 
 test {
     _ = @import("mlkem768.zig");
+    _ = @import("mlkem1024.zig");
 }
 
 test "X25519MLKEM768 agrees and preserves the registered TLS layout" {

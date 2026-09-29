@@ -15,7 +15,8 @@ const SERVER_TRANSPORT_PARAMETERS: &[u8] = &[0x04, 0x05, 0x06];
 enum GroupMode {
     X25519,
     Hybrid,
-    MlKem,
+    MlKem768,
+    MlKem1024,
 }
 
 fn main() {
@@ -25,8 +26,9 @@ fn main() {
     let mode = match args.next().as_deref() {
         None => GroupMode::X25519,
         Some("hybrid") => GroupMode::Hybrid,
-        Some("mlkem") => GroupMode::MlKem,
-        Some(_) => panic!("expected optional hybrid or mlkem mode"),
+        Some("mlkem") => GroupMode::MlKem768,
+        Some("mlkem1024") => GroupMode::MlKem1024,
+        Some(_) => panic!("expected optional hybrid, mlkem, or mlkem1024 mode"),
     };
     assert!(args.next().is_none());
     let mut certificate_reader = BufReader::new(File::open(certificate_path).unwrap());
@@ -44,7 +46,8 @@ fn main() {
         GroupMode::Hybrid => {
             vec![rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768]
         }
-        GroupMode::MlKem => vec![rustls::crypto::aws_lc_rs::kx_group::MLKEM768],
+        GroupMode::MlKem768 => vec![rustls::crypto::aws_lc_rs::kx_group::MLKEM768],
+        GroupMode::MlKem1024 => vec![rustls::crypto::aws_lc_rs::kx_group::MLKEM1024],
     };
     let mut config = ClientConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -63,7 +66,8 @@ fn main() {
     let mut socket = TcpStream::connect(match mode {
         GroupMode::X25519 => "127.0.0.1:24456",
         GroupMode::Hybrid => "127.0.0.1:24460",
-        GroupMode::MlKem => "127.0.0.1:24462",
+        GroupMode::MlKem768 => "127.0.0.1:24462",
+        GroupMode::MlKem1024 => "127.0.0.1:24464",
     })
     .unwrap();
     socket
@@ -108,7 +112,8 @@ fn main() {
         match mode {
             GroupMode::X25519 => "X25519",
             GroupMode::Hybrid => "X25519MLKEM768",
-            GroupMode::MlKem => "MLKEM768",
+            GroupMode::MlKem768 => "MLKEM768",
+            GroupMode::MlKem1024 => "MLKEM1024",
         }
     );
 }

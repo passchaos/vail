@@ -115,6 +115,8 @@ The current foundation provides:
 - Explicit pure ML-KEM-768 key exchange with registered TLS group `0x0201`,
   compact seeded client state, implicit ciphertext rejection, and direct
   32-byte KEM output into the TLS 1.3 key schedule.
+- Explicit pure ML-KEM-1024 key exchange with registered TLS group `0x0202`
+  and the same bounded, seed-backed state and implicit-rejection semantics.
 - Registered classical-first secp256r1MLKEM768 (`0x11eb`) and
   secp384r1MLKEM1024 (`0x11ed`) TLS groups, including exact SEC1/ML-KEM wire
   layouts, 64/80-byte hybrid HKDF inputs, and shared generic secret handling.
@@ -309,6 +311,8 @@ AWS-LC agree on the complete hybrid wire shares and derived handshake secrets.
 The corresponding `interop-rustls-quic-mlkem-client` and
 `interop-rustls-quic-mlkem-server` checks cover the explicit pure ML-KEM-768
 group (`0x0201`) in both directions.
+`interop-rustls-quic-mlkem1024-client` and
+`interop-rustls-quic-mlkem1024-server` cover pure ML-KEM-1024 (`0x0202`).
 `zig build interop-openssl-tls12-server` and
 `zig build interop-rustls-tls12-server` exercise Vail's incremental TLS 1.2
 server, requiring ECDHE-RSA-AES128-GCM-SHA256, Extended Master Secret,
