@@ -31,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
         .retry_key_material = &retry_material,
         .cipher_suites = &.{.aes_128_gcm_sha256},
         .alpn_protocols = &.{"h2"},
+        .certificate_compression_algorithms = &.{.brotli},
         .server_verifier = .{ .verify_trust = acceptTestCertificate },
     }, &client_hello_record);
     defer client.deinit();

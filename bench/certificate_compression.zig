@@ -21,56 +21,79 @@ pub fn main(init: std.process.Init) !void {
         &ocsp_response,
     );
 
+    try benchmarkAlgorithm(init.io, allocator, certificate.items, .zlib);
+    try benchmarkAlgorithm(init.io, allocator, certificate.items, .brotli);
+}
+
+fn benchmarkAlgorithm(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    certificate: []const u8,
+    algorithm: vail.tls.certificate_compression.Algorithm,
+) !void {
     var checksum: u64 = 0;
-    const prepare_start = nowNs(init.io);
+    const prepare_start = nowNs(io);
     for (0..prepare_iterations) |_| {
-        var prepared = try vail.tls.certificate_compression.Prepared.initZlib(
-            allocator,
-            certificate.items,
-            .amortized,
-        );
+        var prepared = try prepare(allocator, certificate, algorithm);
         checksum +%= prepared.compressed[prepared.compressed.len - 1];
         prepared.deinit();
     }
-    const prepare_ns = nowNs(init.io) -| prepare_start;
+    const prepare_ns = nowNs(io) -| prepare_start;
 
-    var prepared = try vail.tls.certificate_compression.Prepared.initZlib(
-        allocator,
-        certificate.items,
-        .amortized,
-    );
+    var prepared = try prepare(allocator, certificate, algorithm);
     defer prepared.deinit();
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try prepared.view().write(&encoded, allocator);
 
-    const decompress_start = nowNs(init.io);
+    const decompress_start = nowNs(io);
     for (0..decompress_iterations) |_| {
         const restored = try vail.tls.certificate_compression
             .decompressCertificate(
             allocator,
             encoded.items,
-            &.{.zlib},
-            certificate.items.len,
+            &.{algorithm},
+            certificate.len,
         );
         checksum +%= restored[restored.len - 1];
         allocator.free(restored);
     }
-    const decompress_ns = nowNs(init.io) -| decompress_start;
+    const decompress_ns = nowNs(io) -| decompress_start;
 
     std.debug.print(
-        "certificate={d} bytes compressed={d} bytes ratio={d:.2}% " ++
+        "{s}: certificate={d} bytes compressed={d} bytes ratio={d:.2}% " ++
             "prepare={d} ns/op decompress={d} ns/op checksum={d}\n",
         .{
-            certificate.items.len,
+            @tagName(algorithm),
+            certificate.len,
             encoded.items.len,
             100.0 * @as(f64, @floatFromInt(encoded.items.len)) /
-                @as(f64, @floatFromInt(certificate.items.len)),
+                @as(f64, @floatFromInt(certificate.len)),
             prepare_ns / prepare_iterations,
             decompress_ns / decompress_iterations,
             checksum,
         },
     );
+}
+
+fn prepare(
+    allocator: std.mem.Allocator,
+    certificate: []const u8,
+    algorithm: vail.tls.certificate_compression.Algorithm,
+) !vail.tls.certificate_compression.Prepared {
+    return switch (algorithm) {
+        .zlib => vail.tls.certificate_compression.Prepared.initZlib(
+            allocator,
+            certificate,
+            .amortized,
+        ),
+        .brotli => vail.tls.certificate_compression.Prepared.initBrotli(
+            allocator,
+            certificate,
+            .amortized,
+        ),
+        else => error.UnsupportedCompressionAlgorithm,
+    };
 }
 
 fn decodeHex(comptime encoded: []const u8) [encoded.len / 2]u8 {

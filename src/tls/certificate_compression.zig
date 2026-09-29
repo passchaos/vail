@@ -6,6 +6,7 @@
 //! explicit uncompressed-size limit before allocating or decompressing.
 
 const std = @import("std");
+const vort = @import("vort");
 
 pub const handshake_type_compressed_certificate: u8 = 0x19;
 pub const extension_type_compress_certificate: u16 = 0x001b;
@@ -17,7 +18,7 @@ pub const Algorithm = enum(u16) {
     _,
 
     pub fn supported(self: Algorithm) bool {
-        return self == .zlib;
+        return self == .zlib or self == .brotli;
     }
 };
 
@@ -151,6 +152,40 @@ pub const Prepared = struct {
         };
     }
 
+    pub fn initBrotli(
+        allocator: std.mem.Allocator,
+        certificate_message: []const u8,
+        level: CompressionLevel,
+    ) Error!Prepared {
+        const body = try certificateBody(certificate_message);
+        const output = vort.brEncodePlannedStreamWithOptionsAlloc(
+            allocator,
+            body,
+            .{ .level = switch (level) {
+                .interactive => .fast,
+                .amortized => .ratio,
+            } },
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.CompressionFailed,
+        };
+        errdefer allocator.free(output);
+        if (output.len == 0 or output.len > std.math.maxInt(u24)) {
+            return error.CompressionFailed;
+        }
+        var uncompressed_sha256: [
+            std.crypto.hash.sha2.Sha256.digest_length
+        ]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(body, &uncompressed_sha256, .{});
+        return .{
+            .allocator = allocator,
+            .algorithm = .brotli,
+            .uncompressed_length = @intCast(body.len),
+            .uncompressed_sha256 = uncompressed_sha256,
+            .compressed = output,
+        };
+    }
+
     pub fn view(self: *const Prepared) PreparedView {
         return .{
             .algorithm = self.algorithm,
@@ -231,8 +266,30 @@ pub fn decompressCertificate(
     result[2] = @truncate(uncompressed_length >> 8);
     result[3] = @truncate(uncompressed_length);
 
-    var input: std.Io.Reader = .fixed(parsed.compressed);
-    var output: std.Io.Writer = .fixed(result[4..]);
+    switch (parsed.algorithm) {
+        .zlib => try decompressZlib(parsed.compressed, result[4..], allocator),
+        .brotli => {
+            const written = vort.brDecodeStreamIntoExactSize(
+                parsed.compressed,
+                result[4..],
+                uncompressed_length,
+            ) catch return error.InvalidCompressedCertificate;
+            if (written != uncompressed_length) {
+                return error.InvalidCompressedCertificate;
+            }
+        },
+        else => unreachable,
+    }
+    return result;
+}
+
+fn decompressZlib(
+    compressed: []const u8,
+    output_bytes: []u8,
+    allocator: std.mem.Allocator,
+) Error!void {
+    var input: std.Io.Reader = .fixed(compressed);
+    var output: std.Io.Writer = .fixed(output_bytes);
     const decompression_buffer = try allocator.alloc(
         u8,
         std.compress.flate.max_window_len,
@@ -255,13 +312,12 @@ pub fn decompressCertificate(
         .zlib => |metadata| metadata.adler,
         else => unreachable,
     };
-    if (decompressor.err != null or written != uncompressed_length or
-        output.end != uncompressed_length or input.seek != input.end or
-        expected_adler != std.hash.Adler32.hash(result[4..]))
+    if (decompressor.err != null or written != output_bytes.len or
+        output.end != output_bytes.len or input.seek != input.end or
+        expected_adler != std.hash.Adler32.hash(output_bytes))
     {
         return error.InvalidCompressedCertificate;
     }
-    return result;
 }
 
 pub fn validateAlgorithms(algorithms: []const Algorithm) Error!void {
@@ -405,13 +461,13 @@ test "zlib certificate compression round trips and enforces bounds" {
 
     var unsupported = try allocator.dupe(u8, encoded.items);
     defer allocator.free(unsupported);
-    std.mem.writeInt(u16, unsupported[4..6], @intFromEnum(Algorithm.brotli), .big);
+    std.mem.writeInt(u16, unsupported[4..6], @intFromEnum(Algorithm.zstd), .big);
     try std.testing.expectError(
         error.UnsupportedCompressionAlgorithm,
         decompressCertificate(
             allocator,
             unsupported,
-            &.{.brotli},
+            &.{.zstd},
             certificate.len,
         ),
     );
@@ -432,4 +488,85 @@ test "zlib certificate compression round trips and enforces bounds" {
             certificate.len,
         ),
     );
+}
+
+test "Brotli certificate compression round trips and decodes libbrotli" {
+    const allocator = std.testing.allocator;
+    const body = [_]u8{0x42} ** 8192;
+    var certificate: [4 + body.len]u8 = undefined;
+    certificate[0] = 0x0b;
+    certificate[1] = @truncate(body.len >> 16);
+    certificate[2] = @truncate(body.len >> 8);
+    certificate[3] = @truncate(body.len);
+    @memcpy(certificate[4..], &body);
+
+    var prepared = try Prepared.initBrotli(
+        allocator,
+        &certificate,
+        .interactive,
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(Algorithm.brotli, prepared.algorithm);
+    try std.testing.expect(prepared.compressed.len < body.len);
+    try std.testing.expect(prepared.view().savesBytes(certificate.len));
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try prepared.view().write(&encoded, allocator);
+    const decompressed = try decompressCertificate(
+        allocator,
+        encoded.items,
+        &.{.brotli},
+        certificate.len,
+    );
+    defer allocator.free(decompressed);
+    try std.testing.expectEqualSlices(u8, &certificate, decompressed);
+
+    const external_compressed = try hexBytes(
+        "8bc7000080aaaaaaeadfdd6df1c5dcdcdd36775b16df36f1653335f3ed7456505" ++
+            "0035700073b28283880c3061cb88609603888cf017026348472c10a46b0a0403" ++
+            "e9895404bc1fff90fb32ff082209466101f9b57aa354956d47aa3d9d2da7aa7" ++
+            "db334ccb76fa03d7f383308a93e1683c99cee68be56abdd9c26e7f389ece97e" ++
+            "b2d45597e7f3c5fef01",
+    );
+    var external_message: [12 + external_compressed.len]u8 = undefined;
+    external_message[0] = handshake_type_compressed_certificate;
+    const message_body_len = external_message.len - 4;
+    external_message[1] = @truncate(message_body_len >> 16);
+    external_message[2] = @truncate(message_body_len >> 8);
+    external_message[3] = @truncate(message_body_len);
+    std.mem.writeInt(u16, external_message[4..6], @intFromEnum(Algorithm.brotli), .big);
+    external_message[6..9].* = .{ 0, 1, 0x90 };
+    external_message[9] = @truncate(external_compressed.len >> 16);
+    external_message[10] = @truncate(external_compressed.len >> 8);
+    external_message[11] = @truncate(external_compressed.len);
+    @memcpy(external_message[12..], &external_compressed);
+    const external_plain = try decompressCertificate(
+        allocator,
+        &external_message,
+        &.{.brotli},
+        400,
+    );
+    defer allocator.free(external_plain);
+    const prefix = "certificate-chain-entry:" ++ ("vail-rfc8879-" ** 24);
+    try std.testing.expectEqual(@as(usize, 400), external_plain.len - 4);
+    try std.testing.expectEqualSlices(u8, prefix, external_plain[4..][0..prefix.len]);
+    for (external_plain[4 + prefix.len ..], 0..) |byte, index| {
+        try std.testing.expectEqual(@as(u8, @intCast(index)), byte);
+    }
+
+    try std.testing.expectError(
+        error.InvalidCompressedCertificate,
+        decompressCertificate(
+            allocator,
+            external_message[0 .. external_message.len - 1],
+            &.{.brotli},
+            400,
+        ),
+    );
+}
+
+fn hexBytes(comptime hex: []const u8) ![hex.len / 2]u8 {
+    var result: [hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&result, hex);
+    return result;
 }

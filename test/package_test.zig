@@ -44,6 +44,13 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail, "tls"));
     try std.testing.expect(@hasDecl(vail.tls, "auth"));
     try std.testing.expect(@hasDecl(vail.tls, "certificate_compression"));
+    try std.testing.expect(
+        vail.tls.certificate_compression.Algorithm.brotli.supported(),
+    );
+    try std.testing.expect(@hasDecl(
+        vail.tls.certificate_compression.Prepared,
+        "initBrotli",
+    ));
     try std.testing.expect(@hasDecl(vail.tls, "client_auth"));
     try std.testing.expect(@hasDecl(vail.tls, "client_handshake"));
     try std.testing.expect(@hasDecl(vail.tls, "client_hello"));

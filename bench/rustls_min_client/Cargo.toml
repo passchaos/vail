@@ -5,6 +5,6 @@ edition = "2021"
 publish = false
 
 [dependencies]
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "zlib"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "brotli", "zlib"] }
 rustls-pki-types = "1"
 rustls-pemfile = "2"

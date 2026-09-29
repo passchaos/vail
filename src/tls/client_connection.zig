@@ -87,7 +87,7 @@ pub const Config = struct {
     offer_extended_master_secret: bool = false,
     alpn_protocols: []const []const u8 = &.{},
     request_ocsp: bool = false,
-    certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{.zlib},
+    certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{ .zlib, .brotli },
     max_decompressed_certificate_len: usize = 64 * 1024,
     server_verifier: auth.ClientVerifier,
     server_certificate_type: auth.CertificateType = .x509,

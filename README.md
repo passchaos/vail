@@ -55,9 +55,12 @@ The current foundation provides:
   decoding without an external PKI or crypto library;
 - CertificateRequest codec and mTLS policy types;
 - RFC 8879 TLS 1.3 certificate compression in both directions using Zig std's
-  zlib implementation, with reusable server/client precompression, transcript-
-  correct CompressedCertificate processing, exact decompressed lengths, zlib
-  checksum verification, and configurable decompression limits;
+  zlib implementation and Vort's pure-Zig Brotli codec, with reusable
+  server/client precompression, transcript-correct CompressedCertificate
+  processing, exact decompressed lengths, zlib checksum verification, and
+  configurable decompression limits. Zlib remains first in the default offer
+  because it is faster on the current certificate benchmark; Zstd remains
+  disabled until Vort's documented format-subset gap is closed;
 - X.509 bounded path construction over unordered intermediates, alternate
   issuers and cross-signs, with hostname, validity, custom-bundle, and
   system-CA verification; explicit depth/candidate/certificate budgets prevent
@@ -172,8 +175,9 @@ The current foundation provides:
 
 ## Pure-Zig cryptography
 
-Vail's cryptographic implementation is self-contained Zig and does not require
-an external crypto library. SHA-256 uses Zig's standard implementation. TLS and
+Vail's cryptographic implementation is entirely Zig and does not require a C,
+C++, or Rust crypto library. SHA-256 uses Zig's standard implementation, while
+RFC 8879 Brotli uses the sibling pure-Zig Vort package. TLS and
 QUIC AES-128-GCM/AES-256-GCM keys retain a reusable pure-Zig context that caches
 the expanded AES key and GHASH table, avoiding per-record key-dependent setup.
 SM2, SM3, and SM4 are implemented in Vail.
@@ -204,9 +208,12 @@ X25519/Ed25519 TLS 1.3 server flights, including key exchange, signing, and
 record protection.
 `zig build -Doptimize=ReleaseFast bench-x509-path` measures bounded unordered
 and cross-signed certificate-path construction plus issuer/delegated OCSP.
-`zig build -Doptimize=ReleaseFast bench-certificate-compression` reports the
-RFC 8879 zlib wire-size ratio, amortized preparation cost, and per-handshake
-decompression cost.
+`zig build -Doptimize=ReleaseFast bench-certificate-compression` compares the
+RFC 8879 zlib and Brotli wire-size ratios, amortized preparation costs, and
+per-handshake decompression costs.
+`zig build -Doptimize=ReleaseFast interop-rustls-brotli-server` verifies Vort
+Brotli output with a rustls decoder; `interop-rustls-min-client` verifies the
+Vort decoder against rustls's independent Brotli encoder.
 `zig build -Doptimize=ReleaseFast bench-rsa-pss` measures the built-in
 constant-time RSA-2048 PSS and PKCS#1 v1.5 signing paths.
 `zig build -Doptimize=ReleaseFast bench-hpke` measures RFC 9180 sender/receiver

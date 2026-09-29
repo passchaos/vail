@@ -30,6 +30,10 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "ech-hrr")
     else
         false;
+    const use_brotli = if (mode) |argument|
+        std.mem.eql(u8, argument, "brotli")
+    else
+        false;
     if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
@@ -69,16 +73,27 @@ pub fn main(init: std.process.Init) !void {
         std.heap.smp_allocator,
         &.{&rsa_cert_der},
     );
-    var prepared_certificate =
+    var prepared_zlib_certificate =
         try vail.tls.certificate_compression.Prepared.initZlib(
             std.heap.smp_allocator,
             certificate_message.items,
             .amortized,
         );
-    defer prepared_certificate.deinit();
-    const compressed_certificates =
+    defer prepared_zlib_certificate.deinit();
+    var prepared_brotli_certificate =
+        try vail.tls.certificate_compression.Prepared.initBrotli(
+            std.heap.smp_allocator,
+            certificate_message.items,
+            .amortized,
+        );
+    defer prepared_brotli_certificate.deinit();
+    const zlib_certificates =
         [_]vail.tls.certificate_compression.PreparedView{
-            prepared_certificate.view(),
+            prepared_zlib_certificate.view(),
+        };
+    const brotli_certificates =
+        [_]vail.tls.certificate_compression.PreparedView{
+            prepared_brotli_certificate.view(),
         };
     const ech_secret = [_]u8{
         0xbc, 0xb5, 0x51, 0x29, 0x31, 0x10, 0x30, 0xc9,
@@ -117,7 +132,10 @@ pub fn main(init: std.process.Init) !void {
             else
                 &regular_groups,
             .alpn_protocols = &.{ "h2", "http/1.1" },
-            .compressed_certificates = &compressed_certificates,
+            .compressed_certificates = if (use_brotli)
+                &brotli_certificates
+            else
+                &zlib_certificates,
         },
         .server_random = [_]u8{0x73} ** 32,
         .key_material = &key_material,

@@ -19,11 +19,17 @@ pub fn build(b: *std.Build) void {
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const vort_dep = b.dependency("vort", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const vort = vort_dep.module("vort");
 
     const vail = b.addModule("vail", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "vort", .module = vort }},
     });
     _ = b.addModule("vail_sm", .{
         .root_source_file = b.path("src/crypto/sm.zig"),
@@ -347,6 +353,26 @@ pub fn build(b: *std.Build) void {
     );
     interop_rustls_min_step.dependOn(&check_rustls_min.step);
 
+    const check_rustls_brotli = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_brotli.step.dependOn(&build_rustls_min.step);
+    check_rustls_brotli.addArg(
+        "$1 brotli > /tmp/vail-brotli-rustls-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 4s bench/rustls_min_client/target/release/vail-rustls-min-client > /tmp/vail-brotli-rustls-client.log 2>&1 || true; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'client finished verified' /tmp/vail-brotli-rustls-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'client finished verified' /tmp/vail-brotli-rustls-server.log && " ++
+            "grep -q 'certificate compression=brotli' /tmp/vail-brotli-rustls-server.log && " ++
+            "grep -q 'rustls connected' /tmp/vail-brotli-rustls-client.log",
+    );
+    check_rustls_brotli.addArg("sh");
+    check_rustls_brotli.addArtifactArg(min_tls13_server);
+    const interop_rustls_brotli_step = b.step(
+        "interop-rustls-brotli-server",
+        "Exercise Vort Brotli certificates with a rustls client",
+    );
+    interop_rustls_brotli_step.dependOn(&check_rustls_brotli.step);
+
     const check_rustls_ech = b.addSystemCommand(&.{ "sh", "-c" });
     check_rustls_ech.step.dependOn(&build_rustls_min.step);
     check_rustls_ech.addArg(
@@ -435,14 +461,14 @@ pub fn build(b: *std.Build) void {
             "wait $pid; " ++
             "grep -q 'rustls server completed' \"$work/server.log\" && " ++
             "grep -q 'server authenticated and finished verified' \"$work/client.log\" && " ++
-            "grep -q 'certificate compression=zlib' \"$work/client.log\" && " ++
+            "grep -q 'certificate compression=brotli' \"$work/client.log\" && " ++
             "grep -q 'server application data verified' \"$work/client.log\"",
     );
     check_vail_rustls_server.addArg("sh");
     check_vail_rustls_server.addArtifactArg(min_tls13_client);
     const interop_vail_rustls_server_step = b.step(
         "interop-rustls-min-client",
-        "Exercise Vail's TLS 1.3 client against a zlib-enabled rustls server",
+        "Exercise Vail's TLS 1.3 client against a Brotli-enabled rustls server",
     );
     interop_vail_rustls_server_step.dependOn(
         &check_vail_rustls_server.step,
