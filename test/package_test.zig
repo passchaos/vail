@@ -150,6 +150,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.tls.auth, "Signer"));
     try std.testing.expect(@hasDecl(vail.tls.auth, "CustomSigner"));
     try std.testing.expect(@hasDecl(vail.tls.auth, "RsaPssSigner"));
+    try std.testing.expect(@hasDecl(vail.tls.auth, "RsaPkcs1Signer"));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PreparedPrivateKey,
+        "signPkcs1v15Sha256",
+    ));
     try std.testing.expect(@hasDecl(
         vail.tls.auth,
         "verifySignedContent",

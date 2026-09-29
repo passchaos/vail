@@ -1,4 +1,4 @@
-use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::net::TcpListener;
@@ -9,6 +9,7 @@ fn main() {
     let _exe = args.next();
     let cert_path = args.next().expect("certificate path");
     let key_path = args.next().expect("private-key path");
+    let client_ca_path = args.next();
 
     let mut cert_reader = BufReader::new(File::open(cert_path).unwrap());
     let certificates = rustls_pemfile::certs(&mut cert_reader)
@@ -19,10 +20,22 @@ fn main() {
         .unwrap()
         .expect("private key");
 
-    let mut config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
-        .with_no_client_auth()
-        .with_single_cert(certificates, key)
-        .unwrap();
+    let builder = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12]);
+    let builder = if let Some(client_ca_path) = client_ca_path {
+        let mut roots = RootCertStore::empty();
+        let mut reader = BufReader::new(File::open(client_ca_path).unwrap());
+        for certificate in rustls_pemfile::certs(&mut reader) {
+            roots.add(certificate.unwrap()).unwrap();
+        }
+        builder.with_client_cert_verifier(
+            rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+                .build()
+                .unwrap(),
+        )
+    } else {
+        builder.with_no_client_auth()
+    };
+    let mut config = builder.with_single_cert(certificates, key).unwrap();
     config.alpn_protocols.push(b"http/1.1".to_vec());
 
     let listener = TcpListener::bind("127.0.0.1:24447").unwrap();
@@ -36,6 +49,9 @@ fn main() {
         tls.conn.protocol_version(),
         Some(rustls::ProtocolVersion::TLSv1_2)
     );
+    if tls.conn.peer_certificates().is_some() {
+        println!("rustls TLS 1.2 client certificate verified");
+    }
     assert_eq!(
         tls.conn.negotiated_cipher_suite().unwrap().suite(),
         rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,

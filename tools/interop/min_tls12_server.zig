@@ -32,6 +32,13 @@ pub fn main(init: std.process.Init) !void {
     var ecdh_private = [_]u8{0} **
         vail.tls.key_exchange.p256.secret_len;
     ecdh_private[ecdh_private.len - 1] = 2;
+    const signer: vail.tls.auth.Signer = if (profile.pkcs1)
+        .{ .rsa_pkcs1 = .{ .prepared_key = &prepared_key } }
+    else
+        .{ .rsa_pss = .{
+            .prepared_key = &prepared_key,
+            .io = init.io,
+        } };
     var server = Server.init(.{
         .allocator = std.heap.smp_allocator,
         .policy = .{
@@ -48,10 +55,7 @@ pub fn main(init: std.process.Init) !void {
         .server_random = [_]u8{0x86} ** 32,
         .server_private_key = &ecdh_private,
         .certificate_chain = &.{&certificate},
-        .signer = .{ .rsa_pss = .{
-            .prepared_key = &prepared_key,
-            .io = init.io,
-        } },
+        .signer = signer,
         .client_auth_policy = if (profile.client_auth) .{
             .verifier = .{ .verify_trust = acceptTestCertificate },
             .requirement = .required,
@@ -129,6 +133,7 @@ pub fn main(init: std.process.Init) !void {
 const Profile = struct {
     suite: vail.tls.tls12.Suite,
     client_auth: bool = false,
+    pkcs1: bool = false,
 };
 
 fn selectedProfile(init: std.process.Init) !Profile {
@@ -152,6 +157,19 @@ fn selectedProfile(init: std.process.Init) !Profile {
         return .{
             .suite = .ecdhe_rsa_aes_128_gcm_sha256,
             .client_auth = true,
+        };
+    }
+    if (std.mem.eql(u8, name, "pkcs1")) {
+        return .{
+            .suite = .ecdhe_rsa_aes_128_gcm_sha256,
+            .pkcs1 = true,
+        };
+    }
+    if (std.mem.eql(u8, name, "mtls-pkcs1")) {
+        return .{
+            .suite = .ecdhe_rsa_aes_128_gcm_sha256,
+            .client_auth = true,
+            .pkcs1 = true,
         };
     }
     return error.InvalidArguments;

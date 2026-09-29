@@ -549,6 +549,87 @@ pub fn build(b: *std.Build) void {
         &check_vail_rustls_tls12_server.step,
     );
 
+    const check_openssl_tls12_pkcs1_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_openssl_tls12_pkcs1_server.addArg(
+        "timeout 15s $1 mtls-pkcs1 > /tmp/vail-openssl-tls12-pkcs1-server.log 2>&1 & pid=$!; sleep 0.5; " ++
+            "printf ping | timeout 10s openssl s_client -connect 127.0.0.1:24446 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-256 -sigalgs rsa_pkcs1_sha256 -no_ticket -cert src/crypto/testdata/rsa_signing_client_cert.pem -key src/crypto/testdata/rsa_signing_key.pem -ign_eof > /tmp/vail-openssl-tls12-pkcs1-client.log 2>&1 || true; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $server_status -eq 0 && " ++
+            "grep -q 'TLS 1.2 client certificate verified' /tmp/vail-openssl-tls12-pkcs1-server.log && " ++
+            "grep -q 'TLS 1.2 application data verified' /tmp/vail-openssl-tls12-pkcs1-server.log && " ++
+            "grep -q 'Peer signature type: rsa_pkcs1_sha256' /tmp/vail-openssl-tls12-pkcs1-client.log",
+    );
+    check_openssl_tls12_pkcs1_server.addArg("sh");
+    check_openssl_tls12_pkcs1_server.addArtifactArg(min_tls12_server);
+    const interop_openssl_tls12_pkcs1_server_step = b.step(
+        "interop-openssl-tls12-rsa-pkcs1-server",
+        "Exercise Vail's TLS 1.2 RSA PKCS#1 server against OpenSSL",
+    );
+    interop_openssl_tls12_pkcs1_server_step.dependOn(
+        &check_openssl_tls12_pkcs1_server.step,
+    );
+
+    const check_rustls_tls12_pkcs1_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_tls12_pkcs1_server.step.dependOn(&build_rustls_min.step);
+    check_rustls_tls12_pkcs1_server.addArg(
+        "timeout 15s $1 mtls-pkcs1 > /tmp/vail-rustls-tls12-pkcs1-server.log 2>&1 & pid=$!; sleep 0.5; " ++
+            "timeout 10s bench/rustls_min_client/target/release/vail-rustls-tls12-client mtls-pkcs1 src/crypto/testdata/rsa_signing_client_cert.pem src/crypto/testdata/rsa_signing_key.pem > /tmp/vail-rustls-tls12-pkcs1-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'TLS 1.2 client certificate verified' /tmp/vail-rustls-tls12-pkcs1-server.log && " ++
+            "grep -q 'TLS 1.2 application data verified' /tmp/vail-rustls-tls12-pkcs1-server.log && " ++
+            "grep -q 'rustls TLS 1.2 application data verified' /tmp/vail-rustls-tls12-pkcs1-client.log",
+    );
+    check_rustls_tls12_pkcs1_server.addArg("sh");
+    check_rustls_tls12_pkcs1_server.addArtifactArg(min_tls12_server);
+    const interop_rustls_tls12_pkcs1_server_step = b.step(
+        "interop-rustls-tls12-rsa-pkcs1-server",
+        "Exercise Vail's TLS 1.2 RSA PKCS#1 server against rustls/AWS-LC",
+    );
+    interop_rustls_tls12_pkcs1_server_step.dependOn(
+        &check_rustls_tls12_pkcs1_server.step,
+    );
+
+    const check_openssl_tls12_pkcs1_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_openssl_tls12_pkcs1_client.addArg(
+        "timeout 15s openssl s_server -accept 127.0.0.1:24447 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-256 -sigalgs rsa_pkcs1_sha256 -no_ticket -cert src/crypto/testdata/rsa_signing_cert.pem -key src/crypto/testdata/rsa_signing_key.pem -alpn http/1.1 -Verify 1 -verify_return_error -CAfile src/crypto/testdata/rsa_signing_client_cert.pem -www -naccept 1 > /tmp/vail-openssl-tls12-pkcs1-client-server.log 2>&1 & pid=$!; sleep 0.5; " ++
+            "timeout 10s $1 mtls-pkcs1 > /tmp/vail-openssl-tls12-pkcs1-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'verify return:1' /tmp/vail-openssl-tls12-pkcs1-client-server.log && " ++
+            "grep -q 'TLS 1.2 server application data verified' /tmp/vail-openssl-tls12-pkcs1-client.log",
+    );
+    check_openssl_tls12_pkcs1_client.addArg("sh");
+    check_openssl_tls12_pkcs1_client.addArtifactArg(min_tls12_client);
+    const interop_openssl_tls12_pkcs1_client_step = b.step(
+        "interop-openssl-tls12-rsa-pkcs1-client",
+        "Exercise Vail's TLS 1.2 RSA PKCS#1 client against OpenSSL",
+    );
+    interop_openssl_tls12_pkcs1_client_step.dependOn(
+        &check_openssl_tls12_pkcs1_client.step,
+    );
+
+    const check_rustls_tls12_pkcs1_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_tls12_pkcs1_client.step.dependOn(&build_rustls_server.step);
+    check_rustls_tls12_pkcs1_client.addArg(
+        "timeout 15s bench/rustls_min_server/target/release/vail-rustls-tls12-server src/crypto/testdata/rsa_signing_cert.pem src/crypto/testdata/rsa_signing_key.pem src/crypto/testdata/rsa_signing_client_cert.pem > /tmp/vail-rustls-tls12-pkcs1-client-server.log 2>&1 & pid=$!; sleep 0.5; " ++
+            "timeout 10s $1 mtls-pkcs1 > /tmp/vail-rustls-tls12-pkcs1-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'rustls TLS 1.2 client certificate verified' /tmp/vail-rustls-tls12-pkcs1-client-server.log && " ++
+            "grep -q 'rustls TLS 1.2 server completed' /tmp/vail-rustls-tls12-pkcs1-client-server.log && " ++
+            "grep -q 'TLS 1.2 server application data verified' /tmp/vail-rustls-tls12-pkcs1-client.log",
+    );
+    check_rustls_tls12_pkcs1_client.addArg("sh");
+    check_rustls_tls12_pkcs1_client.addArtifactArg(min_tls12_client);
+    const interop_rustls_tls12_pkcs1_client_step = b.step(
+        "interop-rustls-tls12-rsa-pkcs1-client",
+        "Exercise Vail's TLS 1.2 RSA PKCS#1 client against rustls/AWS-LC",
+    );
+    interop_rustls_tls12_pkcs1_client_step.dependOn(
+        &check_rustls_tls12_pkcs1_client.step,
+    );
+
     const min_tls12_resume_client = b.addExecutable(.{
         .name = "vail-min-tls12-resume-client",
         .root_module = b.createModule(.{

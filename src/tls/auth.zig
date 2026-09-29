@@ -1,10 +1,11 @@
 //! TLS 1.3 server Certificate and CertificateVerify helpers.
 //!
 //! The handshake codec is certificate-format agnostic. Built-in possession
-//! verification supports Ed25519, ECDSA P-256/P-384, SM2, and RSA-PSS X.509
-//! CertificateVerify. An allocation-free signer callback supports additional
-//! pure-Zig or hardware-backed private-key implementations. Applications can
-//! separately provide a trust callback for chain, validity, EKU, and policy.
+//! verification supports Ed25519, ECDSA P-256/P-384, SM2, RSA-PSS, and the
+//! TLS 1.2 RSA PKCS#1 v1.5 schemes. An allocation-free signer callback supports
+//! additional pure-Zig or hardware-backed private-key implementations.
+//! Applications can separately provide a trust callback for chain, validity,
+//! EKU, and policy.
 
 const std = @import("std");
 
@@ -28,6 +29,9 @@ const Sha512 = std.crypto.hash.sha2.Sha512;
 
 pub const signature_scheme_ecdsa_secp256r1_sha256: u16 = 0x0403;
 pub const signature_scheme_ecdsa_secp384r1_sha384: u16 = 0x0503;
+pub const signature_scheme_rsa_pkcs1_sha256: u16 = 0x0401;
+pub const signature_scheme_rsa_pkcs1_sha384: u16 = 0x0501;
+pub const signature_scheme_rsa_pkcs1_sha512: u16 = 0x0601;
 pub const signature_scheme_rsa_pss_rsae_sha256: u16 = 0x0804;
 pub const signature_scheme_rsa_pss_rsae_sha384: u16 = 0x0805;
 pub const signature_scheme_rsa_pss_rsae_sha512: u16 = 0x0806;
@@ -109,6 +113,7 @@ pub const Signer = union(enum) {
         nonce: [sm2.scalar_len]u8,
     },
     rsa_pss: RsaPssSigner,
+    rsa_pkcs1: RsaPkcs1Signer,
     /// Allocation-free extension point for pure-Zig software keys, hardware
     /// keys, or signature schemes whose private-key operation is not provided
     /// by Zig std. TLS framing and transcript construction remain inside Vail.
@@ -121,6 +126,7 @@ pub const Signer = union(enum) {
             .ecdsa_p384_sha384 => signature_scheme_ecdsa_secp384r1_sha384,
             .sm2sig_sm3 => signature_scheme_sm2sig_sm3,
             .rsa_pss => |rsa_signer| rsa_signer.signature_scheme,
+            .rsa_pkcs1 => |rsa_signer| rsa_signer.signature_scheme,
             .custom => |custom| custom.signature_scheme,
         };
     }
@@ -178,6 +184,22 @@ pub const Signer = union(enum) {
                 const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
                     certificate,
                     expected_key_algorithm,
+                );
+                const public_key = Certificate.rsa.PublicKey.parseDer(
+                    public_key_der,
+                ) catch return error.InvalidCertificate;
+                if (!signer.prepared_key.matchesPublicKey(
+                    public_key.modulus,
+                    public_key.exponent,
+                )) return error.InvalidCertificate;
+            },
+            .rsa_pkcs1 => |signer| {
+                if (!isRsaPkcs1Scheme(signer.signature_scheme)) {
+                    return error.UnsupportedSignatureScheme;
+                }
+                const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
+                    certificate,
+                    .rsaEncryption,
                 );
                 const public_key = Certificate.rsa.PublicKey.parseDer(
                     public_key_der,
@@ -302,6 +324,26 @@ pub const Signer = union(enum) {
                     else => error.UnsupportedSignatureScheme,
                 } catch return error.InvalidCertificateVerify;
             },
+            .rsa_pkcs1 => |rsa_signer| blk: {
+                if (output.len < rsa_signer.prepared_key.signatureLength()) {
+                    return error.InvalidCertificateVerify;
+                }
+                break :blk switch (rsa_signer.signature_scheme) {
+                    signature_scheme_rsa_pkcs1_sha256 => rsa_signer.prepared_key.signPkcs1v15Sha256(
+                        content,
+                        output,
+                    ),
+                    signature_scheme_rsa_pkcs1_sha384 => rsa_signer.prepared_key.signPkcs1v15Sha384(
+                        content,
+                        output,
+                    ),
+                    signature_scheme_rsa_pkcs1_sha512 => rsa_signer.prepared_key.signPkcs1v15Sha512(
+                        content,
+                        output,
+                    ),
+                    else => error.UnsupportedSignatureScheme,
+                } catch return error.InvalidCertificateVerify;
+            },
             .custom => |custom| blk: {
                 if (!isTls13CertificateVerifyScheme(
                     custom.signature_scheme,
@@ -346,6 +388,11 @@ pub const RsaPssSigner = struct {
             else => 0,
         };
     }
+};
+
+pub const RsaPkcs1Signer = struct {
+    prepared_key: *const rsa.PreparedPrivateKey,
+    signature_scheme: u16 = signature_scheme_rsa_pkcs1_sha256,
 };
 
 pub const CustomSigner = struct {
@@ -759,6 +806,9 @@ pub fn writeCertificateVerifyForRole(
     transcript_hash: []const u8,
     role: EndpointRole,
 ) Error!void {
+    if (!isTls13CertificateVerifyScheme(signer.scheme())) {
+        return error.UnsupportedSignatureScheme;
+    }
     if (transcript_hash.len != Sha256.digest_length and
         transcript_hash.len != Sha384.digest_length and
         transcript_hash.len != Sha512.digest_length)
@@ -808,6 +858,12 @@ fn isTls13CertificateVerifyScheme(scheme: u16) bool {
         scheme == signature_scheme_sm2sig_sm3;
 }
 
+fn isRsaPkcs1Scheme(scheme: u16) bool {
+    return scheme == signature_scheme_rsa_pkcs1_sha256 or
+        scheme == signature_scheme_rsa_pkcs1_sha384 or
+        scheme == signature_scheme_rsa_pkcs1_sha512;
+}
+
 pub fn parseCertificateVerify(
     bytes: []const u8,
 ) Error!ParsedCertificateVerify {
@@ -821,6 +877,9 @@ pub fn parseCertificateVerify(
     if (scheme != signature_scheme_ed25519 and
         scheme != signature_scheme_ecdsa_secp256r1_sha256 and
         scheme != signature_scheme_ecdsa_secp384r1_sha384 and
+        scheme != signature_scheme_rsa_pkcs1_sha256 and
+        scheme != signature_scheme_rsa_pkcs1_sha384 and
+        scheme != signature_scheme_rsa_pkcs1_sha512 and
         scheme != signature_scheme_rsa_pss_rsae_sha256 and
         scheme != signature_scheme_rsa_pss_rsae_sha384 and
         scheme != signature_scheme_rsa_pss_rsae_sha512 and
@@ -956,13 +1015,32 @@ pub fn verifySignedContent(
 
 /// TLS 1.2 ECDSA SignatureScheme values bind only the hash and signature
 /// algorithm; unlike TLS 1.3, they do not constrain the certificate curve.
-/// RSA-PSS and Ed25519 retain their ordinary scheme semantics.
+/// RSA-PSS, RSA PKCS#1 v1.5, and Ed25519 retain their ordinary scheme
+/// semantics. PKCS#1 v1.5 is deliberately accepted only by this TLS 1.2 path.
 pub fn verifyTls12SignedContent(
     certificate: []const u8,
     parsed: ParsedCertificateVerify,
     content: []const u8,
 ) Error!void {
     switch (parsed.scheme) {
+        signature_scheme_rsa_pkcs1_sha256 => try verifyRsaPkcs1Content(
+            Sha256,
+            certificate,
+            parsed.signature,
+            content,
+        ),
+        signature_scheme_rsa_pkcs1_sha384 => try verifyRsaPkcs1Content(
+            Sha384,
+            certificate,
+            parsed.signature,
+            content,
+        ),
+        signature_scheme_rsa_pkcs1_sha512 => try verifyRsaPkcs1Content(
+            Sha512,
+            certificate,
+            parsed.signature,
+            content,
+        ),
         signature_scheme_ecdsa_secp256r1_sha256 => {
             const curve = try certificateCurve(certificate);
             switch (curve) {
@@ -998,6 +1076,44 @@ pub fn verifyTls12SignedContent(
             }
         },
         else => try verifySignedContent(certificate, parsed, content),
+    }
+}
+
+fn verifyRsaPkcs1Content(
+    comptime Hash: type,
+    certificate: []const u8,
+    signature_bytes: []const u8,
+    content: []const u8,
+) Error!void {
+    const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
+        certificate,
+        .rsaEncryption,
+    );
+    const components = Certificate.rsa.PublicKey.parseDer(
+        public_key_der,
+    ) catch return error.InvalidCertificate;
+    switch (components.modulus.len) {
+        inline 128, 256, 384, 512 => |modulus_len| {
+            if (signature_bytes.len != modulus_len) {
+                return error.InvalidCertificateVerify;
+            }
+            const public_key = Certificate.rsa.PublicKey.fromBytes(
+                components.exponent,
+                components.modulus,
+            ) catch return error.InvalidCertificate;
+            const signature = Certificate.rsa.PKCS1v1_5Signature.fromBytes(
+                modulus_len,
+                signature_bytes,
+            );
+            Certificate.rsa.PKCS1v1_5Signature.verify(
+                modulus_len,
+                signature,
+                content,
+                public_key,
+                Hash,
+            ) catch return error.BadCertificateVerify;
+        },
+        else => return error.UnsupportedCertificateKey,
     }
 }
 
@@ -1906,6 +2022,65 @@ test "RFC 7250 RSA SubjectPublicKeyInfo signs and verifies" {
             .verifyRawPublicKey("localhost", &.{&wrong}),
     );
     _ = allocator;
+}
+
+test "TLS 1.2 RSA PKCS1 v1.5 signer supports SHA-256 SHA-384 and SHA-512" {
+    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    const private_der = decodeHex(vectors.private_key_pkcs8_hex);
+    const certificate = decodeHex(vectors.certificate_hex);
+    const private = try rsa.PrivateKey.fromDer(&private_der);
+    var prepared = try private.prepare();
+    defer prepared.deinit();
+    const message = "tls12 rsa pkcs1 server key exchange";
+
+    inline for (.{
+        signature_scheme_rsa_pkcs1_sha256,
+        signature_scheme_rsa_pkcs1_sha384,
+        signature_scheme_rsa_pkcs1_sha512,
+    }) |scheme| {
+        const signer = Signer{ .rsa_pkcs1 = .{
+            .prepared_key = &prepared,
+            .signature_scheme = scheme,
+        } };
+        try (ServerIdentity{
+            .certificate_chain = &.{&certificate},
+            .signer = signer,
+        }).validate();
+        var signature: [max_certificate_verify_signature_len]u8 = undefined;
+        const signature_len = try signer.sign(message, &signature);
+        try verifyTls12SignedContent(
+            &certificate,
+            .{
+                .scheme = scheme,
+                .signature = signature[0..signature_len],
+            },
+            message,
+        );
+        signature[signature_len - 1] ^= 1;
+        try std.testing.expectError(
+            error.BadCertificateVerify,
+            verifyTls12SignedContent(
+                &certificate,
+                .{
+                    .scheme = scheme,
+                    .signature = signature[0..signature_len],
+                },
+                message,
+            ),
+        );
+    }
+
+    var tls13_message: std.ArrayList(u8) = .empty;
+    defer tls13_message.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.UnsupportedSignatureScheme,
+        writeCertificateVerify(
+            &tls13_message,
+            std.testing.allocator,
+            .{ .rsa_pkcs1 = .{ .prepared_key = &prepared } },
+            &([_]u8{0x41} ** Sha256.digest_length),
+        ),
+    );
 }
 
 test "RFC 7250 elliptic-curve SubjectPublicKeyInfo signs and verifies" {

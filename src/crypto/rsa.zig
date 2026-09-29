@@ -112,6 +112,36 @@ pub const PrivateKey = struct {
         return prepared.signPssSha512(message, salt, output);
     }
 
+    pub fn signPkcs1v15Sha256(
+        self: PrivateKey,
+        message: []const u8,
+        output: []u8,
+    ) Error!usize {
+        var prepared = try PreparedPrivateKey.init(self);
+        defer prepared.deinit();
+        return prepared.signPkcs1v15Sha256(message, output);
+    }
+
+    pub fn signPkcs1v15Sha384(
+        self: PrivateKey,
+        message: []const u8,
+        output: []u8,
+    ) Error!usize {
+        var prepared = try PreparedPrivateKey.init(self);
+        defer prepared.deinit();
+        return prepared.signPkcs1v15Sha384(message, output);
+    }
+
+    pub fn signPkcs1v15Sha512(
+        self: PrivateKey,
+        message: []const u8,
+        output: []u8,
+    ) Error!usize {
+        var prepared = try PreparedPrivateKey.init(self);
+        defer prepared.deinit();
+        return prepared.signPkcs1v15Sha512(message, output);
+    }
+
     pub fn prepare(self: PrivateKey) Error!PreparedPrivateKey {
         return PreparedPrivateKey.init(self);
     }
@@ -210,6 +240,30 @@ pub const PreparedPrivateKey = struct {
         output: []u8,
     ) Error!usize {
         return signPss(self, Sha512, message, salt, output);
+    }
+
+    pub fn signPkcs1v15Sha256(
+        self: *const PreparedPrivateKey,
+        message: []const u8,
+        output: []u8,
+    ) Error!usize {
+        return signPkcs1v15(self, Sha256, message, output);
+    }
+
+    pub fn signPkcs1v15Sha384(
+        self: *const PreparedPrivateKey,
+        message: []const u8,
+        output: []u8,
+    ) Error!usize {
+        return signPkcs1v15(self, Sha384, message, output);
+    }
+
+    pub fn signPkcs1v15Sha512(
+        self: *const PreparedPrivateKey,
+        message: []const u8,
+        output: []u8,
+    ) Error!usize {
+        return signPkcs1v15(self, Sha512, message, output);
     }
 };
 
@@ -387,6 +441,72 @@ fn signPss(
         private_key,
         representative,
     );
+    defer std.crypto.secureZero(RsaFieldElement, (&signature)[0..1]);
+    var recovered = modulus.powWithEncodedPublicExponent(
+        signature,
+        private_key.key.public_exponent,
+        .big,
+    ) catch return error.InvalidPrivateKey;
+    defer std.crypto.secureZero(RsaFieldElement, (&recovered)[0..1]);
+    if (!recovered.eql(representative)) return error.InvalidPrivateKey;
+    signature.toBytes(output[0..modulus_len], .big) catch
+        return error.InvalidPrivateKey;
+    return modulus_len;
+}
+
+fn signPkcs1v15(
+    private_key: *const PreparedPrivateKey,
+    comptime Hash: type,
+    message: []const u8,
+    output: []u8,
+) Error!usize {
+    const modulus_len = private_key.key.modulus.len;
+    if (output.len < modulus_len) return error.SignatureBufferTooSmall;
+    const digest_info_prefix: []const u8 = &switch (Hash) {
+        Sha256 => .{
+            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
+            0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
+            0x00, 0x04, 0x20,
+        },
+        Sha384 => .{
+            0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
+            0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05,
+            0x00, 0x04, 0x30,
+        },
+        Sha512 => .{
+            0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
+            0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05,
+            0x00, 0x04, 0x40,
+        },
+        else => @compileError("unsupported PKCS#1 v1.5 hash"),
+    };
+    const digest_info_len = digest_info_prefix.len + Hash.digest_length;
+    if (modulus_len < digest_info_len + 11) return error.MessageTooLong;
+
+    var encoded_message: [512]u8 = undefined;
+    defer std.crypto.secureZero(u8, &encoded_message);
+    const encoded = encoded_message[0..modulus_len];
+    encoded[0] = 0;
+    encoded[1] = 1;
+    const separator = modulus_len - digest_info_len - 1;
+    @memset(encoded[2..separator], 0xff);
+    encoded[separator] = 0;
+    @memcpy(
+        encoded[separator + 1 ..][0..digest_info_prefix.len],
+        digest_info_prefix,
+    );
+    var digest: [Hash.digest_length]u8 = undefined;
+    defer std.crypto.secureZero(u8, &digest);
+    Hash.hash(message, &digest, .{});
+    @memcpy(encoded[modulus_len - digest.len ..], &digest);
+
+    const modulus = private_key.modulus;
+    const representative = RsaFieldElement.fromBytes(
+        modulus,
+        encoded,
+        .big,
+    ) catch return error.MessageTooLong;
+    var signature = try privateOperation(private_key, representative);
     defer std.crypto.secureZero(RsaFieldElement, (&signature)[0..1]);
     var recovered = modulus.powWithEncodedPublicExponent(
         signature,
@@ -648,6 +768,35 @@ test "PKCS1 and PKCS8 RSA keys produce verifiable PSS signatures" {
             message,
             public_key,
             Hash,
+        );
+    }
+
+    inline for (.{ Sha256, Sha384, Sha512 }) |Hash| {
+        var signature: [512]u8 = undefined;
+        const signature_len = if (Hash == Sha256)
+            try key8.signPkcs1v15Sha256(message, &signature)
+        else if (Hash == Sha384)
+            try key8.signPkcs1v15Sha384(message, &signature)
+        else
+            try key8.signPkcs1v15Sha512(message, &signature);
+        try std.testing.expectEqual(@as(usize, 256), signature_len);
+        try std.crypto.Certificate.rsa.PKCS1v1_5Signature.verify(
+            256,
+            signature[0..256].*,
+            message,
+            public_key,
+            Hash,
+        );
+        signature[signature_len - 1] ^= 1;
+        try std.testing.expectError(
+            error.InvalidSignature,
+            std.crypto.Certificate.rsa.PKCS1v1_5Signature.verify(
+                256,
+                signature[0..256].*,
+                message,
+                public_key,
+                Hash,
+            ),
         );
     }
 

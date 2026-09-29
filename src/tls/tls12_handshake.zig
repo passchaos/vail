@@ -751,6 +751,9 @@ pub fn writeCertificateRequest(
         auth.signature_scheme_rsa_pss_pss_sha256,
         auth.signature_scheme_rsa_pss_pss_sha384,
         auth.signature_scheme_rsa_pss_pss_sha512,
+        auth.signature_scheme_rsa_pkcs1_sha256,
+        auth.signature_scheme_rsa_pkcs1_sha384,
+        auth.signature_scheme_rsa_pkcs1_sha512,
     };
     const body_len = 1 + 2 + 2 + schemes.len * 2 + 2 +
         authorities.items.len;
@@ -882,6 +885,9 @@ fn signerMatchesSuite(signer: auth.Signer, suite: tls12.Suite) bool {
         .ecdhe_rsa_aes_256_gcm_sha384,
         .ecdhe_rsa_chacha20_poly1305_sha256,
         => switch (signer.scheme()) {
+            auth.signature_scheme_rsa_pkcs1_sha256,
+            auth.signature_scheme_rsa_pkcs1_sha384,
+            auth.signature_scheme_rsa_pkcs1_sha512,
             auth.signature_scheme_rsa_pss_rsae_sha256,
             auth.signature_scheme_rsa_pss_rsae_sha384,
             auth.signature_scheme_rsa_pss_rsae_sha512,
@@ -905,7 +911,10 @@ fn signatureMatchesSuite(signature_scheme: u16, suite: tls12.Suite) bool {
         .ecdhe_rsa_aes_128_gcm_sha256,
         .ecdhe_rsa_aes_256_gcm_sha384,
         .ecdhe_rsa_chacha20_poly1305_sha256,
-        => signature_scheme == auth.signature_scheme_rsa_pss_rsae_sha256 or
+        => signature_scheme == auth.signature_scheme_rsa_pkcs1_sha256 or
+            signature_scheme == auth.signature_scheme_rsa_pkcs1_sha384 or
+            signature_scheme == auth.signature_scheme_rsa_pkcs1_sha512 or
+            signature_scheme == auth.signature_scheme_rsa_pss_rsae_sha256 or
             signature_scheme == auth.signature_scheme_rsa_pss_rsae_sha384 or
             signature_scheme == auth.signature_scheme_rsa_pss_rsae_sha512,
         .ecdhe_ecdsa_aes_128_gcm_sha256,

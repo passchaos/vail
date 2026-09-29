@@ -31,6 +31,22 @@ pub const ext_key_share: u16 = 0x0033;
 pub const ext_pre_shared_key: u16 = 0x0029;
 pub const tls13: u16 = 0x0304;
 
+pub const default_signature_schemes = [_]u16{
+    auth.signature_scheme_ecdsa_secp256r1_sha256,
+    auth.signature_scheme_ecdsa_secp384r1_sha384,
+    auth.signature_scheme_ed25519,
+    auth.signature_scheme_rsa_pss_rsae_sha256,
+    auth.signature_scheme_rsa_pss_rsae_sha384,
+    auth.signature_scheme_rsa_pss_rsae_sha512,
+    auth.signature_scheme_rsa_pss_pss_sha256,
+    auth.signature_scheme_rsa_pss_pss_sha384,
+    auth.signature_scheme_rsa_pss_pss_sha512,
+    auth.signature_scheme_rsa_pkcs1_sha256,
+    auth.signature_scheme_rsa_pkcs1_sha384,
+    auth.signature_scheme_rsa_pkcs1_sha512,
+    auth.signature_scheme_sm2sig_sm3,
+};
+
 pub const Error = error{
     InvalidClientHello,
     DuplicateExtension,
@@ -51,6 +67,7 @@ pub const WriteOptions = struct {
     additional_cipher_suites: []const u16 = &.{},
     supported_versions: []const u16 = &.{tls13},
     alpn_protocols: []const []const u8 = &.{},
+    signature_schemes: []const u16 = &default_signature_schemes,
     request_ocsp: bool = false,
     offer_extended_master_secret: bool = false,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
@@ -81,6 +98,7 @@ pub const FlexibleWriteOptions = struct {
     additional_cipher_suites: []const u16 = &.{},
     supported_versions: []const u16 = &.{tls13},
     alpn_protocols: []const []const u8 = &.{},
+    signature_schemes: []const u16 = &default_signature_schemes,
     request_ocsp: bool = false,
     offer_extended_master_secret: bool = false,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
@@ -112,6 +130,7 @@ pub fn write(
         .additional_cipher_suites = options.additional_cipher_suites,
         .supported_versions = options.supported_versions,
         .alpn_protocols = options.alpn_protocols,
+        .signature_schemes = options.signature_schemes,
         .request_ocsp = options.request_ocsp,
         .offer_extended_master_secret = options.offer_extended_master_secret,
         .certificate_compression_algorithms = options.certificate_compression_algorithms,
@@ -264,27 +283,23 @@ pub fn writeWithKeyShare(
         );
     }
 
-    const signature_schemes = [_]u16{
-        auth.signature_scheme_ecdsa_secp256r1_sha256,
-        auth.signature_scheme_ecdsa_secp384r1_sha384,
-        auth.signature_scheme_ed25519,
-        auth.signature_scheme_rsa_pss_rsae_sha256,
-        auth.signature_scheme_rsa_pss_rsae_sha384,
-        auth.signature_scheme_rsa_pss_rsae_sha512,
-        auth.signature_scheme_rsa_pss_pss_sha256,
-        auth.signature_scheme_rsa_pss_pss_sha384,
-        auth.signature_scheme_rsa_pss_pss_sha512,
-        auth.signature_scheme_sm2sig_sm3,
-    };
+    if (options.signature_schemes.len == 0 or
+        options.signature_schemes.len > std.math.maxInt(u16) / 2)
+    {
+        return error.InvalidClientHello;
+    }
     var signatures: std.ArrayList(u8) = .empty;
     defer signatures.deinit(allocator);
     try appendInt(
         &signatures,
         allocator,
         u16,
-        signature_schemes.len * 2,
+        options.signature_schemes.len * 2,
     );
-    for (signature_schemes) |scheme| {
+    for (options.signature_schemes, 0..) |scheme, index| {
+        for (options.signature_schemes[0..index]) |previous| {
+            if (scheme == previous) return error.InvalidClientHello;
+        }
         try appendInt(&signatures, allocator, u16, scheme);
     }
     try appendExtension(

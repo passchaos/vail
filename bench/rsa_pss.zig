@@ -31,6 +31,21 @@ pub fn main(init: std.process.Init) !void {
         "rsa-2048-pss-sha256={d} ns/sign checksum={d}\n",
         .{ elapsed / iterations, checksum },
     );
+
+    checksum = 0;
+    const pkcs1_start = nowNs(init.io);
+    for (0..iterations) |iteration| {
+        const len = try prepared_key.signPkcs1v15Sha256(
+            &message,
+            &signature,
+        );
+        checksum +%= signature[iteration % len];
+    }
+    const pkcs1_elapsed = nowNs(init.io) -| pkcs1_start;
+    std.debug.print(
+        "rsa-2048-pkcs1-sha256={d} ns/sign checksum={d}\n",
+        .{ pkcs1_elapsed / iterations, checksum },
+    );
 }
 
 fn decodeHex(comptime encoded: []const u8) [encoded.len / 2]u8 {

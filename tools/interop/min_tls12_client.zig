@@ -54,13 +54,22 @@ pub fn main(init: std.process.Init) !void {
             .groups = &groups,
             .alpn_protocols = &.{"http/1.1"},
         },
+        .signature_schemes = if (profile.pkcs1)
+            &.{vail.tls.auth.signature_scheme_rsa_pkcs1_sha256}
+        else
+            &vail.tls.client_hello.default_signature_schemes,
         .server_verifier = .{ .verify_trust = acceptTestCertificate },
         .client_identity = if (profile.client_auth) .{
             .certificate_chain = &.{&client_certificate},
-            .signer = .{ .rsa_pss = .{
-                .prepared_key = &prepared_signing_key,
-                .io = init.io,
-            } },
+            .signer = if (profile.pkcs1)
+                .{ .rsa_pkcs1 = .{
+                    .prepared_key = &prepared_signing_key,
+                } }
+            else
+                .{ .rsa_pss = .{
+                    .prepared_key = &prepared_signing_key,
+                    .io = init.io,
+                } },
         } else null,
     }, &output);
     defer client.deinit();
@@ -118,6 +127,7 @@ const Profile = struct {
     suite: vail.tls.tls12.Suite,
     group: u16 = vail.tls.key_exchange.named_group_secp256r1,
     client_auth: bool = false,
+    pkcs1: bool = false,
 };
 
 fn selectedProfile(init: std.process.Init) !Profile {
@@ -153,6 +163,19 @@ fn selectedProfile(init: std.process.Init) !Profile {
         return .{
             .suite = .ecdhe_rsa_aes_128_gcm_sha256,
             .client_auth = true,
+        };
+    }
+    if (std.mem.eql(u8, name, "pkcs1")) {
+        return .{
+            .suite = .ecdhe_rsa_aes_128_gcm_sha256,
+            .pkcs1 = true,
+        };
+    }
+    if (std.mem.eql(u8, name, "mtls-pkcs1")) {
+        return .{
+            .suite = .ecdhe_rsa_aes_128_gcm_sha256,
+            .client_auth = true,
+            .pkcs1 = true,
         };
     }
     return error.InvalidArguments;

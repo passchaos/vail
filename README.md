@@ -22,8 +22,9 @@ The current foundation provides:
   1.2 without reconstructing transcript bytes, and wipe the unused version's
   one-shot key material;
 - Ed25519, ECDSA P-256, ECDSA P-384, and SM2/SM3 verifier
-  implementations, plus RSA-PSS/RSAE SHA-256/384/512 X.509 CertificateVerify
-  and DER RSAPublicKey pin verification. A built-in pure-Zig RSA signer accepts
+  implementations, plus RSA-PSS/RSAE and TLS 1.2 RSA PKCS#1 v1.5
+  SHA-256/384/512 signatures and DER RSAPublicKey pin verification. A built-in
+  pure-Zig RSA signer accepts
   strict PKCS#1 or unencrypted PKCS#8 keys, uses fresh per-signature PSS salt,
   and performs CRT private operations through Zig std's constant-time finite-
   field implementation. TLS P-256 verification uses the curve's public
@@ -118,7 +119,9 @@ The current foundation provides:
   ECDHE-RSA/ECDHE-ECDSA AES-128-GCM, AES-256-GCM, and ChaCha20-Poly1305 suites
   over P-256 or P-384, require Extended Master Secret and RFC 5746 signaling,
   authenticate ephemeral parameters with RSA-PSS or ECDSA using TLS 1.2's
-  hash-only signature-scheme semantics, verify both Finished messages, retain
+  hash-only signature-scheme semantics; RSA PKCS#1 v1.5 remains available for
+  compatible TLS 1.2 peers while being rejected in TLS 1.3. The states verify
+  both Finished messages, retain
   authenticated peer identity/ALPN on the client, and transition to
   bidirectional application records. Handshake-time TLS 1.2 client
   authentication supports required or optional certificates, authenticates
@@ -189,7 +192,7 @@ and cross-signed certificate-path construction plus issuer/delegated OCSP.
 RFC 8879 zlib wire-size ratio, amortized preparation cost, and per-handshake
 decompression cost.
 `zig build -Doptimize=ReleaseFast bench-rsa-pss` measures the built-in
-constant-time RSA-2048-PSS signing path.
+constant-time RSA-2048 PSS and PKCS#1 v1.5 signing paths.
 `zig build -Doptimize=ReleaseFast bench-tls12-record-crypto` measures the
 TLS 1.2 AES-GCM and ChaCha20-Poly1305 record paths.
 `zig build -Doptimize=ReleaseFast bench-tls12-server-handshake` measures the
@@ -241,6 +244,11 @@ AWS-LC provider and remain test-only dependencies; Vail itself links no
 external cryptographic library.
 `zig build interop-openssl-tls12-client-matrix` additionally forces all six
 TLS 1.2 AEAD suites, both RSA and ECDSA authentication, and P-256/P-384 ECDHE.
+`interop-openssl-tls12-rsa-pkcs1-client`,
+`interop-openssl-tls12-rsa-pkcs1-server`,
+`interop-rustls-tls12-rsa-pkcs1-client`, and
+`interop-rustls-tls12-rsa-pkcs1-server` force RSA PKCS#1 v1.5 SHA-256
+handshake signatures in both directions instead of accepting a PSS fallback.
 `zig build interop-openssl-tls12-mtls-client` and
 `zig build interop-openssl-tls12-mtls-server` cover CertificateRequest,
 client Certificate/CertificateVerify possession, mandatory-certificate policy,

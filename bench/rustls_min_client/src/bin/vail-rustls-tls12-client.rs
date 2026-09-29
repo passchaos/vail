@@ -1,15 +1,16 @@
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::{
-    ClientConfig, ClientConnection, DigitallySignedStruct, Error, RootCertStore, SignatureScheme,
-};
+use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, Error, SignatureScheme};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug)]
-struct NoVerifier;
+struct NoVerifier {
+    pkcs1: bool,
+}
 
 impl ServerCertVerifier for NoVerifier {
     fn verify_server_cert(
@@ -52,20 +53,41 @@ impl ServerCertVerifier for NoVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-        ]
+        if self.pkcs1 {
+            vec![SignatureScheme::RSA_PKCS1_SHA256]
+        } else {
+            vec![
+                SignatureScheme::RSA_PSS_SHA256,
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+            ]
+        }
     }
 }
 
 fn main() {
-    let mut config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
-        .with_root_certificates(RootCertStore::empty())
-        .with_no_client_auth();
-    config
+    let mut args = std::env::args();
+    let _exe = args.next();
+    let mode = args.next();
+    let pkcs1 = matches!(mode.as_deref(), Some("pkcs1" | "mtls-pkcs1"));
+    let mtls = mode.as_deref() == Some("mtls-pkcs1");
+    let builder = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
         .dangerous()
-        .set_certificate_verifier(Arc::new(NoVerifier));
+        .with_custom_certificate_verifier(Arc::new(NoVerifier { pkcs1 }));
+    let mut config = if mtls {
+        let cert_path = args.next().expect("client certificate path");
+        let key_path = args.next().expect("client private-key path");
+        let mut cert_reader = BufReader::new(File::open(cert_path).unwrap());
+        let certificates = rustls_pemfile::certs(&mut cert_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut key_reader = BufReader::new(File::open(key_path).unwrap());
+        let key = rustls_pemfile::private_key(&mut key_reader)
+            .unwrap()
+            .expect("private key");
+        builder.with_client_auth_cert(certificates, key).unwrap()
+    } else {
+        builder.with_no_client_auth()
+    };
     config.alpn_protocols.push(b"h2".to_vec());
 
     let name = ServerName::try_from("localhost").unwrap();
