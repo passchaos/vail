@@ -2,8 +2,9 @@
 //!
 //! The standard AES context exposes a portable eight-block API, but its x86
 //! implementation currently issues one 128-bit VAES instruction per block.
-//! On AVX2+VAES targets this helper encrypts two counter blocks per 256-bit
-//! instruction while retaining the standard context as the portable fallback.
+//! On AVX2+VAES targets this helper drives the standard library's `BlockVec(2)`
+//! abstraction to encrypt two counter blocks per 256-bit instruction while
+//! retaining the standard context as the portable fallback.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -14,8 +15,7 @@ pub const has_wide_vaes = builtin.mode != .ReleaseSmall and
     builtin.cpu.has(.x86, .avx2) and
     builtin.cpu.has(.x86, .vaes);
 
-const Vec = @Vector(4, u64);
-const Half = @Vector(2, u64);
+const BlockPair = std.crypto.core.aes.BlockVec(2);
 
 pub fn xor(
     comptime Aes: type,
@@ -128,16 +128,14 @@ fn xorHardware(
 inline fn expandRoundKeys(
     comptime Aes: type,
     aes: std.crypto.core.aes.AesEncryptCtx(Aes),
-) [Aes.rounds + 1]Vec {
-    var round_keys: [Aes.rounds + 1]Vec = undefined;
+) [Aes.rounds + 1]BlockPair {
+    var round_keys: [Aes.rounds + 1]BlockPair = undefined;
     inline for (aes.key_schedule.round_keys, 0..) |round_key, index| {
-        const half: Half = round_key.repr;
-        round_keys[index] = @shuffle(
-            u64,
-            half,
-            half,
-            @Vector(4, i32){ 0, 1, -1, -2 },
-        );
+        const key_bytes = round_key.toBytes();
+        var repeated: [BlockPair.block_length]u8 = undefined;
+        repeated[0..Aes.block.block_length].* = key_bytes;
+        repeated[Aes.block.block_length..].* = key_bytes;
+        round_keys[index] = BlockPair.fromBytes(&repeated);
     }
     return round_keys;
 }
@@ -145,7 +143,7 @@ inline fn expandRoundKeys(
 inline fn xorHardwarePrepared(
     comptime Aes: type,
     aes: std.crypto.core.aes.AesEncryptCtx(Aes),
-    round_keys: *const [Aes.rounds + 1]Vec,
+    round_keys: *const [Aes.rounds + 1]BlockPair,
     destination: []u8,
     source: []const u8,
     initial_counter: [Aes.block.block_length]u8,
@@ -223,63 +221,53 @@ inline fn xorHardwarePrepared(
 
 inline fn xor8(
     comptime Aes: type,
-    round_keys: *const [Aes.rounds + 1]Vec,
+    round_keys: *const [Aes.rounds + 1]BlockPair,
     destination: *[8 * Aes.block.block_length]u8,
     source: *const [8 * Aes.block.block_length]u8,
     counters: *const [8 * Aes.block.block_length]u8,
 ) void {
-    var states: [4]Vec = undefined;
+    var states: [4]BlockPair = undefined;
     inline for (0..states.len) |index| {
-        states[index] = loadPair(counters, index) ^ round_keys[0];
+        states[index] = loadPair(counters, index).xorBlocks(round_keys[0]);
     }
     inline for (1..Aes.rounds) |round| {
         inline for (0..states.len) |index| {
-            states[index] = encrypt(states[index], round_keys[round]);
+            states[index] = states[index].encrypt(round_keys[round]);
         }
     }
     inline for (0..states.len) |index| {
-        states[index] = encryptLast(states[index], round_keys[Aes.rounds]);
-        storePair(destination, index, states[index] ^ loadPair(source, index));
+        states[index] = states[index].encryptLast(round_keys[Aes.rounds]);
+        storePair(
+            destination,
+            index,
+            states[index].xorBlocks(loadPair(source, index)),
+        );
     }
 }
 
 inline fn xor2(
     comptime Aes: type,
-    round_keys: *const [Aes.rounds + 1]Vec,
+    round_keys: *const [Aes.rounds + 1]BlockPair,
     destination: *[2 * Aes.block.block_length]u8,
     source: *const [2 * Aes.block.block_length]u8,
     counters: *const [2 * Aes.block.block_length]u8,
 ) void {
-    var state = loadPair(counters, 0) ^ round_keys[0];
+    var state = loadPair(counters, 0).xorBlocks(round_keys[0]);
     inline for (1..Aes.rounds) |round| {
-        state = encrypt(state, round_keys[round]);
+        state = state.encrypt(round_keys[round]);
     }
-    state = encryptLast(state, round_keys[Aes.rounds]);
-    storePair(destination, 0, state ^ loadPair(source, 0));
+    state = state.encryptLast(round_keys[Aes.rounds]);
+    storePair(destination, 0, state.xorBlocks(loadPair(source, 0)));
 }
 
-inline fn loadPair(bytes: anytype, comptime index: usize) Vec {
-    const offset = index * 32;
-    return @bitCast(bytes[offset..][0..32].*);
-}
-
-inline fn storePair(bytes: anytype, comptime index: usize, value: Vec) void {
-    const offset = index * 32;
-    bytes[offset..][0..32].* = @bitCast(value);
-}
-
-inline fn encrypt(blocks: Vec, round_key: Vec) Vec {
-    return asm ("vaesenc %[key], %[blocks], %[out]"
-        : [out] "=x" (-> Vec),
-        : [blocks] "x" (blocks),
-          [key] "x" (round_key),
+inline fn loadPair(bytes: anytype, comptime index: usize) BlockPair {
+    const offset = index * BlockPair.block_length;
+    return BlockPair.fromBytes(
+        bytes[offset..][0..BlockPair.block_length],
     );
 }
 
-inline fn encryptLast(blocks: Vec, round_key: Vec) Vec {
-    return asm ("vaesenclast %[key], %[blocks], %[out]"
-        : [out] "=x" (-> Vec),
-        : [blocks] "x" (blocks),
-          [key] "x" (round_key),
-    );
+inline fn storePair(bytes: anytype, comptime index: usize, value: BlockPair) void {
+    const offset = index * BlockPair.block_length;
+    bytes[offset..][0..BlockPair.block_length].* = value.toBytes();
 }
