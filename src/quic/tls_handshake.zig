@@ -11,6 +11,7 @@ const std = @import("std");
 
 const auth = @import("../tls/auth.zig");
 const certificate_compression = @import("../tls/certificate_compression.zig");
+const cipher_suite = @import("../tls/cipher_suite.zig");
 const client_auth = @import("../tls/client_auth.zig");
 const client_handshake = @import("../tls/client_handshake.zig");
 const client_hello = @import("../tls/client_hello.zig");
@@ -28,6 +29,9 @@ pub const Error = std.mem.Allocator.Error || server_flight.Error ||
     server_hello.Error || client_handshake.Error || key_schedule.Error ||
     auth.Error || error{
     InvalidFinished,
+    InvalidSecondClientHello,
+    InvalidRetryCookie,
+    EarlyDataAfterRetry,
     MissingAlpn,
     NoApplicationProtocol,
     ServerSelectedUnofferedSuite,
@@ -36,6 +40,7 @@ pub const Error = std.mem.Allocator.Error || server_flight.Error ||
     SessionIdMismatch,
     UnsupportedEch,
     UnsupportedPsk,
+    InvalidRetryState,
 };
 
 pub const Result = struct {
@@ -74,8 +79,70 @@ pub const Options = struct {
     certificate_chain: []const []const u8,
     signer: auth.Signer,
     client_auth: ?ClientAuthOptions = null,
+    retry: ?RetryState = null,
     labels: traffic.Labels = traffic.labels_v1,
 };
+
+pub const RetryState = struct {
+    cipher_suite: cipher_suite.Suite,
+    selected_group: u16,
+    transcript_prefix: transcript.State,
+    second_client_hello_hash: transcript.Digest,
+};
+
+/// Validate both ClientHellos and the intervening HelloRetryRequest, then
+/// return the transcript state consumed by the final client/server flight.
+pub fn prepareRetryState(
+    first_client_hello: []const u8,
+    hello_retry_request: []const u8,
+    second_client_hello: []const u8,
+) Error!RetryState {
+    const first = try client_hello.parse(first_client_hello);
+    if (!first.offersTls13()) return error.InvalidClientHello;
+    if (first.quic_transport_parameters == null) {
+        return error.MissingQuicTransportParameters;
+    }
+    if (first.alpn_protocols.len == 0) return error.MissingAlpn;
+    if (first.pre_shared_key != null or first.early_data) {
+        return error.UnsupportedPsk;
+    }
+    if (first.encrypted_client_hello != null) return error.UnsupportedEch;
+
+    const retry = try server_hello.parseHelloRetryRequest(hello_retry_request);
+    if (retry.ech_confirmation != null) return error.UnsupportedEch;
+    if (!first.hasCipherSuite(retry.cipher_suite.wireValue())) {
+        return error.ServerSelectedUnofferedSuite;
+    }
+    if (!std.mem.eql(u8, first.session_id, retry.session_id_echo)) {
+        return error.SessionIdMismatch;
+    }
+    if (!try first.supportsGroup(retry.selected_group)) {
+        return error.ServerSelectedUnofferedGroup;
+    }
+
+    const second = try client_hello.parse(second_client_hello);
+    try client_hello.validateSecondClientHello(
+        first_client_hello,
+        second,
+        retry.selected_group,
+        retry.cookie,
+    );
+    var prefix = transcript.afterHelloRetryRequest(
+        retry.cipher_suite.hash(),
+        first_client_hello,
+        hello_retry_request,
+    );
+    prefix.update(second_client_hello);
+    return .{
+        .cipher_suite = retry.cipher_suite,
+        .selected_group = retry.selected_group,
+        .transcript_prefix = prefix,
+        .second_client_hello_hash = transcript.hashFor(
+            retry.cipher_suite.hash(),
+            &.{second_client_hello},
+        ),
+    };
+}
 
 pub const ClientAuthOptions = struct {
     policy: client_auth.ServerPolicy,
@@ -118,6 +185,7 @@ pub const ClientOptions = struct {
     max_decompressed_certificate_len: usize = 64 * 1024,
     server_certificate_type: auth.CertificateType = .x509,
     client_identity: ?client_auth.ClientIdentity = null,
+    retry: ?RetryState = null,
     labels: traffic.Labels = traffic.labels_v1,
 };
 
@@ -144,8 +212,8 @@ pub const ClientResult = struct {
 
 /// Authenticate a plaintext QUIC Handshake CRYPTO flight, emit the plaintext
 /// client authentication/Finished flight, and derive Handshake plus 1-RTT
-/// packet keys. PSK/0-RTT, ECH, and HRR are intentionally rejected until a
-/// stateful QUIC handshake driver can preserve their extra transcript state.
+/// packet keys. A validated `RetryState` carries HRR transcript state. PSK,
+/// 0-RTT, and ECH remain reserved for a stateful QUIC connection driver.
 pub fn writeClientCryptoFlight(
     handshake_crypto: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -191,6 +259,14 @@ pub fn writeClientCryptoFlight(
     if (parsed_server.selected_psk_identity != null) {
         return error.UnsupportedPsk;
     }
+    if (options.retry) |retry| {
+        try validateRetryState(
+            retry,
+            parsed_server.cipher_suite,
+            parsed_server.key_share_group,
+            options.client_hello_bytes,
+        );
+    }
 
     const flight = try client_handshake.splitServerFlight(
         options.server_handshake_crypto,
@@ -206,14 +282,18 @@ pub fn writeClientCryptoFlight(
         return error.ServerSelectedUnofferedAlpn;
     }
 
-    const hello_hash = transcript.hashFor(
-        parsed_server.cipher_suite.hash(),
-        &.{ options.client_hello_bytes, options.server_hello_bytes },
-    );
+    var hello_transcript = if (options.retry) |retry|
+        retry.transcript_prefix
+    else blk: {
+        var state = transcript.State.init(parsed_server.cipher_suite.hash());
+        state.update(options.client_hello_bytes);
+        break :blk state;
+    };
+    hello_transcript.update(options.server_hello_bytes);
     var handshake = try key_schedule.deriveHandshakeFor(
         parsed_server.cipher_suite.hash(),
         options.shared_secret,
-        hello_hash,
+        hello_transcript.digest(),
         null,
     );
     defer handshake.early_secret.deinit();
@@ -237,6 +317,10 @@ pub fn writeClientCryptoFlight(
             .handshake_secret = handshake.handshake_secret,
             .client_handshake_traffic_secret = handshake.client_traffic_secret,
             .server_handshake_traffic_secret = handshake.server_traffic_secret,
+            .transcript_prefix = if (options.retry) |retry|
+                retry.transcript_prefix
+            else
+                null,
             .server_verifier = options.server_verifier,
             .server_certificate_type = options.server_certificate_type,
             .server_name = options.server_name,
@@ -296,12 +380,28 @@ pub fn writeServerCryptoFlight(
     {
         return error.MissingAlpn;
     }
+    if (options.parsed_client_hello.pre_shared_key != null or
+        options.parsed_client_hello.early_data)
+    {
+        return error.UnsupportedPsk;
+    }
+    if (options.parsed_client_hello.encrypted_client_hello != null) {
+        return error.UnsupportedEch;
+    }
     const selection = try server_flight.select(
         options.parsed_client_hello,
         options.policy,
     );
     if (selection.alpn_protocol == null) {
         return error.NoApplicationProtocol;
+    }
+    if (options.retry) |retry| {
+        try validateRetryState(
+            retry,
+            selection.suite,
+            selection.key_share_group,
+            options.client_hello_bytes,
+        );
     }
     if (!try options.parsed_client_hello.supportsSignatureScheme(
         options.signer.scheme(),
@@ -325,8 +425,13 @@ pub fn writeServerCryptoFlight(
     // packet-protects those frames with Initial keys derived from the DCID.
     try initial_crypto.appendSlice(allocator, server_hello_msg.items);
 
-    var transcript_state = transcript.State.init(selection.suite.hash());
-    transcript_state.update(options.client_hello_bytes);
+    var transcript_state = if (options.retry) |retry|
+        retry.transcript_prefix
+    else blk: {
+        var state = transcript.State.init(selection.suite.hash());
+        state.update(options.client_hello_bytes);
+        break :blk state;
+    };
     transcript_state.update(server_hello_msg.items);
     var handshake = try key_schedule.deriveHandshakeFor(
         selection.suite.hash(),
@@ -531,6 +636,29 @@ pub fn verifyClientCryptoFlight(
         .client_certificate_compression = null,
         .transcript_after_client_finished = state.digest(),
     };
+}
+
+fn validateRetryState(
+    retry: RetryState,
+    suite: cipher_suite.Suite,
+    selected_group: u16,
+    second_client_hello: []const u8,
+) Error!void {
+    if (retry.cipher_suite != suite or
+        retry.selected_group != selected_group or
+        retry.transcript_prefix.digest().hash != suite.hash())
+    {
+        return error.InvalidRetryState;
+    }
+    const actual_hash = transcript.hashFor(
+        suite.hash(),
+        &.{second_client_hello},
+    );
+    if (!std.mem.eql(
+        u8,
+        retry.second_client_hello_hash.bytes(),
+        actual_hash.bytes(),
+    )) return error.InvalidRetryState;
 }
 
 fn verifyClientFinished(
@@ -952,6 +1080,192 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
         u8,
         &public_key_spki,
         client_result.verified.peer_certificate_chain[0],
+    );
+}
+
+test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
+    const allocator = std.testing.allocator;
+    const signing_key = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0x91} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const public_key_spki = ed25519SubjectPublicKeyInfo(
+        signing_key.public_key.toBytes(),
+    );
+    const p256_share = [_]u8{0x04} ++ ([_]u8{0x92} ** 64);
+    const shared_secret = [_]u8{0x93} ** 32;
+
+    var first_hello: std.ArrayList(u8) = .empty;
+    defer first_hello.deinit(allocator);
+    try client_hello.writeWithKeyShare(&first_hello, allocator, .{
+        .random = [_]u8{0x94} ** 32,
+        .session_id = "quic-hrr",
+        .server_name = "quic.example",
+        .key_share = .{
+            .group = 0x001d,
+            .key_exchange = &([_]u8{0x95} ** 32),
+        },
+        .supported_groups = &.{ 0x001d, 0x0017 },
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .alpn_protocols = &.{"h3"},
+        .quic_transport_parameters = &.{ 1, 2, 3 },
+        .server_certificate_types = &.{.raw_public_key},
+    });
+    var retry_bytes: std.ArrayList(u8) = .empty;
+    defer retry_bytes.deinit(allocator);
+    try server_hello.writeHelloRetryRequest(&retry_bytes, allocator, .{
+        .session_id_echo = "quic-hrr",
+        .cipher_suite = .aes_128_gcm_sha256,
+        .selected_group = 0x0017,
+        .cookie = "quic-cookie",
+    });
+    var second_hello: std.ArrayList(u8) = .empty;
+    defer second_hello.deinit(allocator);
+    try client_hello.writeWithKeyShare(&second_hello, allocator, .{
+        .random = [_]u8{0x94} ** 32,
+        .session_id = "quic-hrr",
+        .server_name = "quic.example",
+        .key_share = .{
+            .group = 0x0017,
+            .key_exchange = &p256_share,
+        },
+        .supported_groups = &.{ 0x001d, 0x0017 },
+        .cookie = "quic-cookie",
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .alpn_protocols = &.{"h3"},
+        .quic_transport_parameters = &.{ 1, 2, 3 },
+        .server_certificate_types = &.{.raw_public_key},
+    });
+    const retry = try prepareRetryState(
+        first_hello.items,
+        retry_bytes.items,
+        second_hello.items,
+    );
+
+    var initial_crypto: std.ArrayList(u8) = .empty;
+    defer initial_crypto.deinit(allocator);
+    var server_crypto: std.ArrayList(u8) = .empty;
+    defer server_crypto.deinit(allocator);
+    var server_result = try writeServerCryptoFlight(
+        &initial_crypto,
+        &server_crypto,
+        allocator,
+        .{
+            .client_hello_bytes = second_hello.items,
+            .parsed_client_hello = try client_hello.parse(second_hello.items),
+            .policy = .{
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .groups = &.{0x0017},
+                .alpn_protocols = &.{"h3"},
+                .quic_transport_parameters = &.{ 4, 5, 6 },
+                .server_certificate_type = .raw_public_key,
+            },
+            .server_random = [_]u8{0x96} ** 32,
+            .server_key_share = &p256_share,
+            .shared_secret = &shared_secret,
+            .certificate_chain = &.{&public_key_spki},
+            .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+            .retry = retry,
+        },
+    );
+    defer server_result.deinit();
+
+    var client_crypto: std.ArrayList(u8) = .empty;
+    defer client_crypto.deinit(allocator);
+    var client_result = try writeClientCryptoFlight(
+        &client_crypto,
+        allocator,
+        .{
+            .client_hello_bytes = second_hello.items,
+            .server_hello_bytes = initial_crypto.items,
+            .server_handshake_crypto = server_crypto.items,
+            .shared_secret = &shared_secret,
+            .server_verifier = .{
+                .pinned_raw_public_key = &public_key_spki,
+            },
+            .server_name = "quic.example",
+            .server_certificate_type = .raw_public_key,
+            .retry = retry,
+        },
+    );
+    defer client_result.deinit();
+    var verified_client = try verifyClientCryptoFlight(
+        allocator,
+        &server_result,
+        client_crypto.items,
+    );
+    defer verified_client.deinit();
+    try std.testing.expectEqual(@as(usize, 0), verified_client.peer_certificate_chain.len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &server_result.application_packet_keys.client.key,
+        &client_result.application_packet_keys.client.key,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        client_result.verified.transcript_after_client_finished.bytes(),
+        verified_client.transcript_after_client_finished.bytes(),
+    );
+
+    var wrong_transcript_output: std.ArrayList(u8) = .empty;
+    defer wrong_transcript_output.deinit(allocator);
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        writeClientCryptoFlight(&wrong_transcript_output, allocator, .{
+            .client_hello_bytes = second_hello.items,
+            .server_hello_bytes = initial_crypto.items,
+            .server_handshake_crypto = server_crypto.items,
+            .shared_secret = &shared_secret,
+            .server_verifier = .{
+                .pinned_raw_public_key = &public_key_spki,
+            },
+            .server_name = "quic.example",
+            .server_certificate_type = .raw_public_key,
+        }),
+    );
+
+    var altered_second_hello: std.ArrayList(u8) = .empty;
+    defer altered_second_hello.deinit(allocator);
+    try client_hello.writeWithKeyShare(&altered_second_hello, allocator, .{
+        .random = [_]u8{0x94} ** 32,
+        .session_id = "quic-hrr",
+        .server_name = "quic.example",
+        .key_share = .{
+            .group = 0x0017,
+            .key_exchange = &p256_share,
+        },
+        .supported_groups = &.{ 0x001d, 0x0017 },
+        .cookie = "quic-cookie",
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .alpn_protocols = &.{"h3"},
+        .quic_transport_parameters = &.{ 9, 9, 9 },
+        .server_certificate_types = &.{.raw_public_key},
+    });
+    try std.testing.expectError(
+        error.InvalidSecondClientHello,
+        prepareRetryState(
+            first_hello.items,
+            retry_bytes.items,
+            altered_second_hello.items,
+        ),
+    );
+
+    var wrong_retry = retry;
+    wrong_retry.selected_group = 0x001d;
+    try std.testing.expectError(
+        error.InvalidRetryState,
+        writeClientCryptoFlight(&wrong_transcript_output, allocator, .{
+            .client_hello_bytes = second_hello.items,
+            .server_hello_bytes = initial_crypto.items,
+            .server_handshake_crypto = server_crypto.items,
+            .shared_secret = &shared_secret,
+            .server_verifier = .{
+                .pinned_raw_public_key = &public_key_spki,
+            },
+            .server_name = "quic.example",
+            .server_certificate_type = .raw_public_key,
+            .retry = wrong_retry,
+        }),
     );
 }
 

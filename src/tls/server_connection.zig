@@ -697,7 +697,7 @@ pub fn ServerConnection(
             output: *std.ArrayList(u8),
         ) Error!ReceiveResult {
             const retry = &(self.retry orelse unreachable);
-            try validateSecondClientHello(
+            try client_hello.validateSecondClientHello(
                 retry.first_client_hello,
                 parsed,
                 retry.selected_group,
@@ -1317,73 +1317,6 @@ pub fn ServerConnection(
     };
 }
 
-fn validateSecondClientHello(
-    first_bytes: []const u8,
-    second: client_hello.Parsed,
-    selected_group: u16,
-    expected_cookie: ?[]const u8,
-) Error!void {
-    const first = try client_hello.parse(first_bytes);
-    if (first.legacy_version != second.legacy_version or
-        !std.mem.eql(u8, first.random, second.random) or
-        !std.mem.eql(u8, first.session_id, second.session_id) or
-        !std.mem.eql(u8, first.cipher_suites, second.cipher_suites) or
-        !std.mem.eql(u8, first.compression_methods, second.compression_methods) or
-        !optionalBytesEql(first.server_name, second.server_name) or
-        first.requests_ocsp != second.requests_ocsp or
-        !std.mem.eql(
-            u8,
-            first.certificate_compression_algorithms,
-            second.certificate_compression_algorithms,
-        ) or
-        !std.mem.eql(
-            u8,
-            first.server_certificate_types,
-            second.server_certificate_types,
-        ) or
-        !std.mem.eql(
-            u8,
-            first.client_certificate_types,
-            second.client_certificate_types,
-        ) or
-        !optionalBytesEql(first.session_ticket, second.session_ticket) or
-        !std.mem.eql(u8, first.supported_groups, second.supported_groups) or
-        !std.mem.eql(u8, first.signature_algorithms, second.signature_algorithms) or
-        !std.mem.eql(u8, first.alpn_protocols, second.alpn_protocols) or
-        !std.mem.eql(u8, first.supported_versions, second.supported_versions) or
-        !std.mem.eql(u8, first.psk_key_exchange_modes, second.psk_key_exchange_modes) or
-        !optionalBytesEql(
-            first.encrypted_client_hello,
-            second.encrypted_client_hello,
-        ) or
-        !optionalBytesEql(
-            first.quic_transport_parameters,
-            second.quic_transport_parameters,
-        ) or
-        ((first.pre_shared_key == null) !=
-            (second.pre_shared_key == null)))
-    {
-        return error.InvalidSecondClientHello;
-    }
-    if (second.early_data) return error.EarlyDataAfterRetry;
-    if (!optionalBytesEql(expected_cookie, second.cookie)) {
-        return error.InvalidRetryCookie;
-    }
-    if (try first.keyShareForGroup(selected_group) != null) {
-        return error.InvalidSecondClientHello;
-    }
-    const share = (try second.keyShareForGroup(selected_group)) orelse
-        return error.InvalidSecondClientHello;
-    if (second.key_shares.len != 2 + 2 + 2 + share.key_exchange.len) {
-        return error.InvalidSecondClientHello;
-    }
-}
-
-fn optionalBytesEql(a: ?[]const u8, b: ?[]const u8) bool {
-    if (a == null or b == null) return a == null and b == null;
-    return std.mem.eql(u8, a.?, b.?);
-}
-
 fn matchesServerNamePattern(pattern: []const u8, server_name: []const u8) bool {
     if (pattern.len == 0 or server_name.len == 0) return false;
     if (std.ascii.eqlIgnoreCase(pattern, server_name)) return true;
@@ -1454,7 +1387,7 @@ test "HelloRetryRequest preserves RFC 7250 certificate type offers" {
     });
     try std.testing.expectError(
         error.InvalidSecondClientHello,
-        validateSecondClientHello(
+        client_hello.validateSecondClientHello(
             first.items,
             try client_hello.parse(second.items),
             key_exchange.named_group_secp256r1,

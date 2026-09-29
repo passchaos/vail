@@ -166,7 +166,9 @@ The current foundation provides:
   emits plaintext CRYPTO-stream flights by encryption level; the client
   authenticates the server flight, returns owned ALPN/transport parameters,
   emits its plaintext Finished flight, and derives matching Handshake/1-RTT
-  packet keys. The server can request and authenticate mTLS and verifies the
+  packet keys. Validated HelloRetryRequest state preserves the synthetic
+  `message_hash` transcript and enforces ClientHello2 consistency on both
+  endpoints. The server can request and authenticate mTLS and verifies the
   client's Finished before returning an owned peer chain. Both sides require
   QUIC transport parameters and a common ALPN, while packetization,
   retransmission, packet-number spaces, and congestion/recovery remain
