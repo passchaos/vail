@@ -15,6 +15,12 @@ pub const Error = key_schedule.Error;
 pub const DirectionalKeys = struct {
     client: traffic.Keys,
     server: traffic.Keys,
+
+    pub fn deinit(self: *DirectionalKeys) void {
+        self.client.deinit();
+        self.server.deinit();
+        self.* = undefined;
+    }
 };
 
 pub fn keysForSecret(
@@ -75,10 +81,11 @@ pub fn clientEarlyKeys(
     client_hello_hash: transcript.Digest,
     labels: traffic.Labels,
 ) Error!traffic.Keys {
-    const early_secret = try key_schedule.deriveClientEarlyTrafficSecretFor(
+    var early_secret = try key_schedule.deriveClientEarlyTrafficSecretFor(
         psk,
         client_hello_hash,
     );
+    defer early_secret.deinit();
     return keysForSecret(suite, early_secret, labels);
 }
 

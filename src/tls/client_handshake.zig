@@ -48,6 +48,8 @@ pub const Options = struct {
     transcript_prefix: ?transcript.State = null,
     psk_resumed: bool = false,
     early_data_offered: bool = false,
+    /// QUIC carries no EndOfEarlyData handshake message (RFC 9001 section 8.3).
+    send_end_of_early_data: bool = true,
     ech_accepted: bool = false,
     ech_offered: bool = false,
     server_verifier: auth.ClientVerifier,
@@ -265,7 +267,9 @@ pub fn verifyServerAndWriteClientFlight(
         application.server_traffic_secret.deinit();
     }
 
-    if (encrypted_extensions.early_data_accepted) {
+    if (encrypted_extensions.early_data_accepted and
+        options.send_end_of_early_data)
+    {
         const end_of_early_data = [_]u8{
             handshake_type_end_of_early_data, 0, 0, 0,
         };

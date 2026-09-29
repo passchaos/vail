@@ -41,6 +41,7 @@ pub const Error = std.mem.Allocator.Error || server_flight.Error ||
     SessionIdMismatch,
     UnsupportedEch,
     UnsupportedEarlyData,
+    InvalidEarlyDataConfiguration,
     MissingPskConfiguration,
     InvalidRetryState,
 };
@@ -55,6 +56,8 @@ pub const Result = struct {
     transcript_state_after_server_finished: transcript.State,
     handshake_packet_keys: tls_secrets.DirectionalKeys,
     application_packet_keys: tls_secrets.DirectionalKeys,
+    client_early_packet_keys: ?traffic.Keys,
+    early_data_limit: ?u32,
     client_auth: ?ClientAuthState,
     resumed: bool,
 
@@ -66,8 +69,9 @@ pub const Result = struct {
         self.handshake_secret.deinit();
         self.client_handshake_traffic_secret.deinit();
         self.server_handshake_traffic_secret.deinit();
-        wipeDirectionalKeys(&self.handshake_packet_keys);
-        wipeDirectionalKeys(&self.application_packet_keys);
+        self.handshake_packet_keys.deinit();
+        self.application_packet_keys.deinit();
+        if (self.client_early_packet_keys) |*keys| keys.deinit();
         self.* = undefined;
     }
 };
@@ -83,6 +87,9 @@ pub const Options = struct {
     signer: auth.Signer,
     client_auth: ?ClientAuthOptions = null,
     resumption: ?ResumptionPsk = null,
+    /// Set only after the transport's anti-replay policy authorizes this
+    /// ClientHello. The ticket limit remains an independent upper bound.
+    accept_early_data: bool = false,
     retry: ?RetryState = null,
     labels: traffic.Labels = traffic.labels_v1,
 };
@@ -98,7 +105,9 @@ pub const RetryState = struct {
 pub const ResumptionPsk = struct {
     identity: []const u8,
     secret: secret.Secret,
+    suite: cipher_suite.Suite,
     age_policy: ?psk.TicketAgePolicy = null,
+    max_early_data_size: ?u32 = null,
 };
 
 /// Validate both ClientHellos and the intervening HelloRetryRequest, then
@@ -231,16 +240,60 @@ pub const ClientResult = struct {
         self.allocator.free(self.selected_alpn);
         self.allocator.free(self.peer_transport_parameters);
         self.verified.deinit();
-        wipeDirectionalKeys(&self.handshake_packet_keys);
-        wipeDirectionalKeys(&self.application_packet_keys);
+        self.handshake_packet_keys.deinit();
+        self.application_packet_keys.deinit();
         self.* = undefined;
     }
 };
 
+/// Derive the client write keys used for QUIC 0-RTT packets. The ClientHello
+/// must contain an authenticated binder and an early_data offer for this PSK.
+pub fn clientEarlyPacketKeys(
+    client_hello_bytes: []const u8,
+    resumption: ResumptionPsk,
+    labels: traffic.Labels,
+) Error!traffic.Keys {
+    const parsed = try client_hello.parse(client_hello_bytes);
+    if (!parsed.offersTls13() or
+        parsed.pre_shared_key == null or
+        !parsed.early_data)
+    {
+        return error.InvalidEarlyDataConfiguration;
+    }
+    if (resumption.max_early_data_size == null or
+        resumption.max_early_data_size.? == 0 or
+        resumption.age_policy == null or
+        resumption.secret.hash != resumption.suite.hash() or
+        !parsed.hasCipherSuite(resumption.suite.wireValue()))
+    {
+        return error.InvalidEarlyDataConfiguration;
+    }
+    const offer = try psk.parseClientOfferForHash(
+        client_hello_bytes,
+        resumption.secret.hash,
+    );
+    try psk.verifyClientOfferForSecret(
+        client_hello_bytes,
+        offer,
+        resumption.identity,
+        resumption.secret,
+        null,
+    );
+    if (resumption.age_policy) |age_policy| {
+        try psk.validateTicketAge(offer, age_policy);
+    }
+    return tls_secrets.clientEarlyKeys(
+        resumption.suite,
+        resumption.secret,
+        transcript.hashFor(resumption.secret.hash, &.{client_hello_bytes}),
+        labels,
+    );
+}
+
 /// Authenticate a plaintext QUIC Handshake CRYPTO flight, emit the plaintext
 /// client authentication/Finished flight, and derive Handshake plus 1-RTT
-/// packet keys. A validated `RetryState` carries HRR transcript state. ECH and
-/// 0-RTT remain reserved for a stateful QUIC connection driver.
+/// packet keys. A validated `RetryState` carries HRR transcript state. ECH
+/// remains reserved for a stateful QUIC connection driver.
 pub fn writeClientCryptoFlight(
     handshake_crypto: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -255,7 +308,6 @@ pub fn writeClientCryptoFlight(
         return error.MissingQuicTransportParameters;
     }
     if (parsed_client.alpn_protocols.len == 0) return error.MissingAlpn;
-    if (parsed_client.early_data) return error.UnsupportedEarlyData;
     if (parsed_client.encrypted_client_hello != null) {
         return error.UnsupportedEch;
     }
@@ -272,8 +324,21 @@ pub fn writeClientCryptoFlight(
             resumption.secret,
             if (options.retry) |retry| retry.binder_prefix else null,
         );
+        if (resumption.age_policy) |age_policy| {
+            try psk.validateTicketAge(offer, age_policy);
+        }
     } else if (parsed_client.pre_shared_key != null) {
         return error.MissingPskConfiguration;
+    }
+    if (parsed_client.early_data) {
+        const resumption = options.resumption orelse
+            return error.MissingPskConfiguration;
+        if (options.retry != null or
+            resumption.max_early_data_size == null or
+            resumption.max_early_data_size.? == 0)
+        {
+            return error.InvalidEarlyDataConfiguration;
+        }
     }
     for (options.certificate_compression_algorithms) |algorithm| {
         if (!parsed_client.supportsCertificateCompression(algorithm)) {
@@ -324,6 +389,12 @@ pub fn writeClientCryptoFlight(
     if (!try parsed_client.supportsAlpnProtocol(selected_alpn)) {
         return error.ServerSelectedUnofferedAlpn;
     }
+    if (extensions.early_data_accepted and
+        (!resumed or options.resumption == null or
+            options.resumption.?.suite != parsed_server.cipher_suite))
+    {
+        return error.InvalidEarlyDataConfiguration;
+    }
 
     var hello_transcript = if (options.retry) |retry|
         retry.transcript_prefix
@@ -349,7 +420,7 @@ pub fn writeClientCryptoFlight(
         handshake,
         options.labels,
     );
-    errdefer wipeDirectionalKeys(&handshake_packet_keys);
+    errdefer handshake_packet_keys.deinit();
     var verified = try client_handshake.verifyServerAndWriteClientFlight(
         handshake_crypto,
         allocator,
@@ -365,6 +436,8 @@ pub fn writeClientCryptoFlight(
             else
                 null,
             .psk_resumed = resumed,
+            .early_data_offered = parsed_client.early_data,
+            .send_end_of_early_data = false,
             .server_verifier = options.server_verifier,
             .server_certificate_type = options.server_certificate_type,
             .server_name = options.server_name,
@@ -425,9 +498,6 @@ pub fn writeServerCryptoFlight(
     {
         return error.MissingAlpn;
     }
-    if (options.parsed_client_hello.early_data) {
-        return error.UnsupportedEarlyData;
-    }
     if (options.parsed_client_hello.encrypted_client_hello != null) {
         return error.UnsupportedEch;
     }
@@ -471,6 +541,18 @@ pub fn writeServerCryptoFlight(
         }
         break :blk resumption.secret;
     } else null;
+    const early_data_accepted = options.accept_early_data;
+    if (early_data_accepted and
+        (options.retry != null or
+            !options.parsed_client_hello.early_data or
+            selected_psk == null or
+            options.resumption.?.max_early_data_size == null or
+            options.resumption.?.max_early_data_size.? == 0 or
+            options.resumption.?.age_policy == null or
+            options.resumption.?.suite != selection.suite))
+    {
+        return error.InvalidEarlyDataConfiguration;
+    }
     if (selected_psk == null) {
         if (!try options.parsed_client_hello.supportsSignatureScheme(
             options.signer.scheme(),
@@ -523,6 +605,7 @@ pub fn writeServerCryptoFlight(
     try server_hello.writeEncryptedExtensions(&encrypted_extensions, allocator, .{
         .alpn_protocol = selection.alpn_protocol,
         .quic_transport_parameters = options.policy.quic_transport_parameters,
+        .accept_early_data = early_data_accepted,
         .server_certificate_type = if (selection.send_server_certificate_type)
             selection.server_certificate_type
         else
@@ -595,6 +678,20 @@ pub fn writeServerCryptoFlight(
     defer application.client_traffic_secret.deinit();
     defer application.server_traffic_secret.deinit();
 
+    var client_early_packet_keys = if (early_data_accepted)
+        try tls_secrets.clientEarlyKeys(
+            selection.suite,
+            selected_psk.?,
+            transcript.hashFor(
+                selection.suite.hash(),
+                &.{options.client_hello_bytes},
+            ),
+            options.labels,
+        )
+    else
+        null;
+    errdefer if (client_early_packet_keys) |*keys| keys.deinit();
+
     const retained_client_auth: ?ClientAuthState = if (options.client_auth) |value| blk: {
         const request_context = try allocator.dupe(u8, value.request_context);
         errdefer allocator.free(request_context);
@@ -632,6 +729,11 @@ pub fn writeServerCryptoFlight(
             application,
             options.labels,
         ),
+        .client_early_packet_keys = client_early_packet_keys,
+        .early_data_limit = if (early_data_accepted)
+            options.resumption.?.max_early_data_size
+        else
+            null,
         .client_auth = retained_client_auth,
         .resumed = selected_psk != null,
     };
@@ -1115,6 +1217,39 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
     try std.testing.expectEqual(@as(usize, 0), rejected_output.items.len);
 
     invalid_server_crypto.clearRetainingCapacity();
+    try server_hello.writeEncryptedExtensions(
+        &invalid_server_crypto,
+        allocator,
+        .{
+            .alpn_protocol = "h3",
+            .quic_transport_parameters = &server_parameters,
+            .accept_early_data = true,
+            .server_certificate_type = .raw_public_key,
+            .client_certificate_type = .raw_public_key,
+        },
+    );
+    try invalid_server_crypto.appendSlice(
+        allocator,
+        server_crypto.items[encrypted_extensions_len..],
+    );
+    try std.testing.expectError(
+        error.InvalidEarlyDataConfiguration,
+        writeClientCryptoFlight(&rejected_output, allocator, .{
+            .client_hello_bytes = client_hello_bytes.items,
+            .server_hello_bytes = initial_crypto.items,
+            .server_handshake_crypto = invalid_server_crypto.items,
+            .shared_secret = &shared_secret,
+            .server_verifier = .{
+                .pinned_raw_public_key = &public_key_spki,
+            },
+            .server_name = "quic.example",
+            .server_certificate_type = .raw_public_key,
+            .client_identity = client_identity,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), rejected_output.items.len);
+
+    invalid_server_crypto.clearRetainingCapacity();
     try invalid_server_crypto.appendSlice(allocator, server_crypto.items);
     invalid_server_crypto.items[invalid_server_crypto.items.len - 1] ^= 1;
     try std.testing.expectError(
@@ -1350,6 +1485,8 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
     const resumption = ResumptionPsk{
         .identity = "quic-hrr-ticket",
         .secret = resumption_secret,
+        .suite = .aes_128_gcm_sha256,
+        .max_early_data_size = 4096,
     };
     var first_psk = try first_hello.clone(allocator);
     defer first_psk.deinit(allocator);
@@ -1359,7 +1496,7 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
         resumption.identity,
         23,
         resumption.secret,
-        false,
+        true,
         null,
     );
     const binder_prefix = transcript.afterHelloRetryRequest(
@@ -1383,6 +1520,48 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
         retry_bytes.items,
         second_psk.items,
     );
+    try std.testing.expectError(
+        error.InvalidEarlyDataConfiguration,
+        clientEarlyPacketKeys(
+            second_psk.items,
+            resumption,
+            traffic.labels_v1,
+        ),
+    );
+
+    var invalid_early_initial: std.ArrayList(u8) = .empty;
+    defer invalid_early_initial.deinit(allocator);
+    var invalid_early_handshake: std.ArrayList(u8) = .empty;
+    defer invalid_early_handshake.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidEarlyDataConfiguration,
+        writeServerCryptoFlight(
+            &invalid_early_initial,
+            &invalid_early_handshake,
+            allocator,
+            .{
+                .client_hello_bytes = second_psk.items,
+                .parsed_client_hello = try client_hello.parse(second_psk.items),
+                .policy = .{
+                    .cipher_suites = &.{.aes_128_gcm_sha256},
+                    .groups = &.{0x0017},
+                    .alpn_protocols = &.{"h3"},
+                    .quic_transport_parameters = &.{ 4, 5, 6 },
+                    .server_certificate_type = .raw_public_key,
+                },
+                .server_random = [_]u8{0x98} ** 32,
+                .server_key_share = &p256_share,
+                .shared_secret = &shared_secret,
+                .certificate_chain = &.{&public_key_spki},
+                .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+                .resumption = resumption,
+                .accept_early_data = true,
+                .retry = psk_retry,
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), invalid_early_initial.items.len);
+    try std.testing.expectEqual(@as(usize, 0), invalid_early_handshake.items.len);
 
     var resumed_initial: std.ArrayList(u8) = .empty;
     defer resumed_initial.deinit(allocator);
@@ -1433,6 +1612,8 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
     );
     defer resumed_client.deinit();
     try std.testing.expect(resumed_client.resumed);
+    try std.testing.expect(!resumed_client.verified.early_data_accepted);
+    try std.testing.expect(resumed_server.client_early_packet_keys == null);
     var resumed_finished = try verifyClientCryptoFlight(
         allocator,
         &resumed_server,
@@ -1448,6 +1629,8 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
     const resumption = ResumptionPsk{
         .identity = "quic-ticket",
         .secret = resumption_secret,
+        .suite = .aes_128_gcm_sha256,
+        .max_early_data_size = 4096,
         .age_policy = .{
             .age_add = 7,
             .issued_at_ms = 1_000,
@@ -1482,7 +1665,7 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
         resumption.identity,
         17,
         resumption.secret,
-        false,
+        true,
         null,
     );
     const parsed = try client_hello.parse(hello.items);
@@ -1510,10 +1693,42 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
             .certificate_chain = &.{&public_key_spki},
             .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
             .resumption = resumption,
+            .accept_early_data = true,
         },
     );
     defer server_result.deinit();
     try std.testing.expect(server_result.resumed);
+    try std.testing.expectEqual(@as(?u32, 4096), server_result.early_data_limit);
+    var client_early_keys = try clientEarlyPacketKeys(
+        hello.items,
+        resumption,
+        traffic.labels_v1,
+    );
+    defer client_early_keys.deinit();
+    try std.testing.expectEqualSlices(
+        u8,
+        &client_early_keys.key,
+        &server_result.client_early_packet_keys.?.key,
+    );
+    const early_plaintext = "quic zero-rtt payload";
+    var early_ciphertext: [early_plaintext.len]u8 = undefined;
+    var early_tag: [traffic.tag_len]u8 = undefined;
+    try client_early_keys.protect(
+        7,
+        "0-rtt-header",
+        early_plaintext,
+        &early_ciphertext,
+        &early_tag,
+    );
+    var opened_early: [early_plaintext.len]u8 = undefined;
+    try server_result.client_early_packet_keys.?.open(
+        7,
+        "0-rtt-header",
+        &early_ciphertext,
+        early_tag,
+        &opened_early,
+    );
+    try std.testing.expectEqualStrings(early_plaintext, &opened_early);
     const resumed_flight = try client_handshake.splitServerFlightForMode(
         server_crypto.items,
         true,
@@ -1539,13 +1754,66 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
     );
     defer client_result.deinit();
     try std.testing.expect(client_result.resumed);
+    try std.testing.expect(client_result.verified.early_data_accepted);
     try std.testing.expectEqual(@as(usize, 0), client_result.verified.peer_certificate_chain.len);
+    try std.testing.expectEqual(@as(usize, 36), client_crypto.items.len);
+    try std.testing.expectEqual(handshake_type_finished, client_crypto.items[0]);
     var verified_client = try verifyClientCryptoFlight(
         allocator,
         &server_result,
         client_crypto.items,
     );
     defer verified_client.deinit();
+
+    var rejecting_initial: std.ArrayList(u8) = .empty;
+    defer rejecting_initial.deinit(allocator);
+    var rejecting_server_crypto: std.ArrayList(u8) = .empty;
+    defer rejecting_server_crypto.deinit(allocator);
+    var rejecting_server = try writeServerCryptoFlight(
+        &rejecting_initial,
+        &rejecting_server_crypto,
+        allocator,
+        .{
+            .client_hello_bytes = hello.items,
+            .parsed_client_hello = parsed,
+            .policy = .{
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .alpn_protocols = &.{"h3"},
+                .quic_transport_parameters = &.{ 4, 5, 6 },
+                .server_certificate_type = .raw_public_key,
+            },
+            .server_random = [_]u8{0xaa} ** 32,
+            .server_key_share = &([_]u8{0xab} ** 32),
+            .shared_secret = &shared_secret,
+            .certificate_chain = &.{&public_key_spki},
+            .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+            .resumption = resumption,
+        },
+    );
+    defer rejecting_server.deinit();
+    try std.testing.expect(rejecting_server.resumed);
+    try std.testing.expect(rejecting_server.client_early_packet_keys == null);
+
+    var rejecting_client_crypto: std.ArrayList(u8) = .empty;
+    defer rejecting_client_crypto.deinit(allocator);
+    var rejecting_client = try writeClientCryptoFlight(
+        &rejecting_client_crypto,
+        allocator,
+        .{
+            .client_hello_bytes = hello.items,
+            .server_hello_bytes = rejecting_initial.items,
+            .server_handshake_crypto = rejecting_server_crypto.items,
+            .shared_secret = &shared_secret,
+            .server_verifier = .{},
+            .server_name = "quic.example",
+            .server_certificate_type = .raw_public_key,
+            .resumption = resumption,
+        },
+    );
+    defer rejecting_client.deinit();
+    try std.testing.expect(rejecting_client.resumed);
+    try std.testing.expect(!rejecting_client.verified.early_data_accepted);
+    try std.testing.expectEqual(@as(usize, 36), rejecting_client_crypto.items.len);
 
     const tampered_hello = try allocator.dupe(u8, hello.items);
     defer allocator.free(tampered_hello);
@@ -1606,6 +1874,8 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
             .resumption = .{
                 .identity = "different-ticket",
                 .secret = resumption.secret,
+                .suite = .aes_128_gcm_sha256,
+                .max_early_data_size = 4096,
             },
         },
     );
@@ -1632,6 +1902,7 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
     );
     defer fallback_client.deinit();
     try std.testing.expect(!fallback_client.resumed);
+    try std.testing.expect(!fallback_client.verified.early_data_accepted);
     try std.testing.expectEqual(@as(usize, 1), fallback_client.verified.peer_certificate_chain.len);
 }
 
@@ -1736,8 +2007,4 @@ fn ed25519SubjectPublicKeyInfo(public_key: [32]u8) [44]u8 {
     } ++ ([_]u8{0} ** 32);
     @memcpy(spki[12..], &public_key);
     return spki;
-}
-
-fn wipeDirectionalKeys(keys: *tls_secrets.DirectionalKeys) void {
-    std.crypto.secureZero(u8, std.mem.asBytes(keys));
 }

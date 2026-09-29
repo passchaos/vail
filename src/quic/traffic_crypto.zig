@@ -63,6 +63,11 @@ pub const Keys = struct {
     iv: [iv_len]u8,
     hp: [max_key_len]u8,
 
+    pub fn deinit(self: *Keys) void {
+        std.crypto.secureZero(u8, std.mem.asBytes(self));
+        self.* = undefined;
+    }
+
     pub fn derive(
         suite: Suite,
         secret: [secret_len]u8,

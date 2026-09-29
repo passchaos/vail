@@ -167,13 +167,17 @@ The current foundation provides:
   authenticates the server flight, returns owned ALPN/transport parameters,
   emits its plaintext Finished flight, and derives matching Handshake/1-RTT
   packet keys. Resumption authenticates the one-identity PSK binder and can
-  fall back to a full certificate handshake. Validated HelloRetryRequest state
+  fall back to a full certificate handshake. QUIC 0-RTT derives matching
+  client early packet keys, requires explicit server acceptance, and returns
+  the ticket byte limit for transport enforcement without emitting TLS's
+  stream-only EndOfEarlyData message. Validated HelloRetryRequest state
   preserves the synthetic `message_hash` transcript, verifies the second
-  binder, and enforces ClientHello2 consistency on both endpoints. The server
-  can request and authenticate mTLS and verifies the client's Finished before
-  returning an owned peer chain. Both sides require QUIC transport parameters
-  and a common ALPN, while packetization, retransmission, packet-number spaces,
-  and congestion/recovery remain transport responsibilities.
+  binder, disables 0-RTT, and
+  enforces ClientHello2 consistency on both endpoints. The server can request
+  and authenticate mTLS and verifies the client's Finished before returning an
+  owned peer chain. Both sides require QUIC transport parameters and a common
+  ALPN, while packetization, retransmission, packet-number spaces, and
+  congestion/recovery remain transport responsibilities.
 - ShangMi coverage: SM2 signs and verifies ZA-bound raw/DER signatures against
   SEC1 public keys and SM2 X.509 SubjectPublicKeyInfo, and is wired into TLS
   CertificateVerify generation/verification for raw and X.509 SM2 keys,
