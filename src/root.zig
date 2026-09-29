@@ -34,6 +34,7 @@ test {
     _ = tls.client_hello;
     _ = tls.connection;
     _ = tls.early_data;
+    _ = tls.ech;
     _ = tls.key_exchange;
     _ = tls.key_schedule;
     _ = tls.key_update;

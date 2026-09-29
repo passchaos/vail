@@ -14,6 +14,11 @@ The current foundation provides:
   receiver contexts retain prepared AEAD state, implement the complete 96-bit
   nonce sequence space, reject weak X25519 inputs and authentication failures,
   expose RFC exporters, and explicitly wipe ephemeral and derived secrets;
+- RFC 9849 ECH wire foundations with strict ECHConfigList selection, public
+  name and mandatory-extension validation, ClientHelloInner padding and
+  linear-time `ech_outer_extensions` reconstruction, authenticated
+  ClientHelloOuter encryption/decryption, retained HPKE state across HRR, and
+  SHA-256/SHA-384/SM3 acceptance-confirmation derivation;
 - TLS 1.3 ClientHello parsing, encrypted server-handshake flight construction,
   ServerHello/EncryptedExtensions, Certificate, CertificateVerify, Finished, and
   AEAD record-protection codecs;

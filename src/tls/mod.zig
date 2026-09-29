@@ -10,6 +10,7 @@ pub const client_handshake = @import("client_handshake.zig");
 pub const client_hello = @import("client_hello.zig");
 pub const connection = @import("connection.zig");
 pub const early_data = @import("early_data.zig");
+pub const ech = @import("ech.zig");
 pub const key_exchange = @import("key_exchange.zig");
 pub const key_schedule = @import("key_schedule.zig");
 pub const key_update = @import("key_update.zig");
@@ -42,6 +43,7 @@ test {
     _ = client_connection;
     _ = connection;
     _ = early_data;
+    _ = ech;
     _ = key_update;
     _ = record;
     _ = stream;

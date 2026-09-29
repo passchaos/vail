@@ -29,6 +29,7 @@ pub const ext_cookie: u16 = 0x002c;
 pub const ext_psk_key_exchange_modes: u16 = 0x002d;
 pub const ext_key_share: u16 = 0x0033;
 pub const ext_pre_shared_key: u16 = 0x0029;
+pub const ext_encrypted_client_hello: u16 = 0xfe0d;
 pub const tls13: u16 = 0x0304;
 
 pub const default_signature_schemes = [_]u16{
@@ -76,6 +77,9 @@ pub const WriteOptions = struct {
     /// Null omits RFC 5077. A non-null empty slice requests a new ticket;
     /// non-empty bytes offer a cached ticket for TLS 1.2 resumption.
     session_ticket: ?[]const u8 = null,
+    /// Exact RFC 9849 ECHClientHello payload. The ECH layer constructs and
+    /// authenticates this value; this writer only frames the TLS extension.
+    encrypted_client_hello: ?[]const u8 = null,
 };
 
 pub const OfferedKeyShare = struct {
@@ -105,6 +109,7 @@ pub const FlexibleWriteOptions = struct {
     server_certificate_types: []const auth.CertificateType = &.{},
     client_certificate_types: []const auth.CertificateType = &.{},
     session_ticket: ?[]const u8 = null,
+    encrypted_client_hello: ?[]const u8 = null,
 };
 
 /// Write a standards-focused TLS 1.3 ClientHello for stream transports.
@@ -137,6 +142,7 @@ pub fn write(
         .server_certificate_types = options.server_certificate_types,
         .client_certificate_types = options.client_certificate_types,
         .session_ticket = options.session_ticket,
+        .encrypted_client_hello = options.encrypted_client_hello,
     });
 }
 
@@ -179,6 +185,16 @@ pub fn writeWithKeyShare(
             allocator,
             ext_server_name,
             sni.items,
+        );
+    }
+
+    if (options.encrypted_client_hello) |payload| {
+        if (payload.len == 0) return error.InvalidClientHello;
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_encrypted_client_hello,
+            payload,
         );
     }
 
@@ -476,6 +492,7 @@ pub const Parsed = struct {
     cookie: ?[]const u8 = null,
     pre_shared_key: ?[]const u8 = null,
     early_data: bool = false,
+    encrypted_client_hello: ?[]const u8 = null,
 
     pub fn offersTls13(self: Parsed) bool {
         return self.supportsVersion(tls13);
@@ -702,6 +719,10 @@ pub fn parse(bytes: []const u8) Error!Parsed {
             ext_psk_key_exchange_modes => parsed.psk_key_exchange_modes = try parseU8List(payload),
             ext_key_share => parsed.key_shares = payload,
             ext_pre_shared_key => parsed.pre_shared_key = payload,
+            ext_encrypted_client_hello => {
+                if (payload.len == 0) return error.InvalidClientHello;
+                parsed.encrypted_client_hello = payload;
+            },
             ext_renegotiation_info => {
                 if (!std.mem.eql(u8, payload, &.{0})) {
                     return error.InvalidClientHello;
