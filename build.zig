@@ -461,14 +461,14 @@ pub fn build(b: *std.Build) void {
             "sleep 0.2; timeout 20s bench/rustls_min_client/target/release/vail-rustls-tls13-resume-client src/crypto/testdata/rsa_signing_cert.pem > /tmp/rustls-vail-tls13-resume-client.log 2>&1; client_status=$?; " ++
             "wait $pid; server_status=$?; " ++
             "test $client_status -eq 0 -a $server_status -eq 0 && " ++
-            "grep -q 'Vail TLS 1.3 ticket resumption verified' /tmp/vail-rustls-tls13-resume-server.log && " ++
-            "grep -q 'rustls/AWS-LC TLS 1.3 ticket resumption verified' /tmp/rustls-vail-tls13-resume-client.log",
+            "grep -q 'Vail TLS 1.3 resumption and 0-RTT verified' /tmp/vail-rustls-tls13-resume-server.log && " ++
+            "grep -q 'rustls/AWS-LC TLS 1.3 resumption and 0-RTT verified' /tmp/rustls-vail-tls13-resume-client.log",
     );
     check_rustls_tls13_resumption.addArg("sh");
     check_rustls_tls13_resumption.addArtifactArg(min_tls13_resume_server);
     const interop_rustls_tls13_resumption_step = b.step(
         "interop-rustls-tls13-resumption-server",
-        "Exercise Vail TLS 1.3 ticket resumption with rustls/AWS-LC",
+        "Exercise Vail TLS 1.3 ticket resumption and 0-RTT with rustls/AWS-LC",
     );
     interop_rustls_tls13_resumption_step.dependOn(
         &check_rustls_tls13_resumption.step,
@@ -578,7 +578,7 @@ pub fn build(b: *std.Build) void {
     check_rustls_tls13_resumption_client.step.dependOn(&build_rustls_server.step);
     check_rustls_tls13_resumption_client.addArg(
         "timeout 25s bench/rustls_min_server/target/release/vail-rustls-tls13-resume-server src/crypto/testdata/rsa_signing_cert.pem src/crypto/testdata/rsa_signing_key.pem > /tmp/rustls-vail-tls13-resume-server.log 2>&1 & pid=$!; " ++
-            "sleep 0.2; timeout 20s $1 > /tmp/vail-rustls-tls13-resume-client.log 2>&1; client_status=$?; " ++
+            "sleep 0.5; timeout 20s $1 > /tmp/vail-rustls-tls13-resume-client.log 2>&1; client_status=$?; " ++
             "wait $pid; server_status=$?; " ++
             "test $client_status -eq 0 -a $server_status -eq 0 && " ++
             "grep -q 'rustls/AWS-LC TLS 1.3 server ticket resumption verified' /tmp/rustls-vail-tls13-resume-server.log && " ++

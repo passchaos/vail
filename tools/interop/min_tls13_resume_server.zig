@@ -7,6 +7,7 @@ const rsa_vectors = vail.crypto.testing.rsa_signing;
 const certificate_der = decodeHex(rsa_vectors.certificate_hex);
 const private_key_der = decodeHex(rsa_vectors.private_key_pkcs8_hex);
 const response = "vail resumed tls13 ok\n";
+const expected_early_data = "rustls zero-rtt";
 
 pub fn main(init: std.process.Init) !void {
     const private_key = try vail.crypto.rsa.PrivateKey.fromDer(
@@ -19,6 +20,7 @@ pub fn main(init: std.process.Init) !void {
         .secret = [_]u8{0xa1} ** vail.tls.ticket_keyring.key_len,
     });
     defer keyring.deinit();
+    var replay_cache = vail.tls.early_data.ReplayCache(4){};
 
     const listener = try sysSocket();
     defer _ = linux.close(listener);
@@ -30,9 +32,25 @@ pub fn main(init: std.process.Init) !void {
     try sysBind(listener, @ptrCast(&address), @sizeOf(linux.sockaddr.in));
     try sysListen(listener, 2);
 
-    try runConnection(init, listener, &prepared_key, &keyring, false, 0xa2);
-    try runConnection(init, listener, &prepared_key, &keyring, true, 0xa3);
-    std.debug.print("Vail TLS 1.3 ticket resumption verified\n", .{});
+    try runConnection(
+        init,
+        listener,
+        &prepared_key,
+        &keyring,
+        replay_cache.guard(),
+        false,
+        0xa2,
+    );
+    try runConnection(
+        init,
+        listener,
+        &prepared_key,
+        &keyring,
+        replay_cache.guard(),
+        true,
+        0xa3,
+    );
+    std.debug.print("Vail TLS 1.3 resumption and 0-RTT verified\n", .{});
 }
 
 fn runConnection(
@@ -40,6 +58,7 @@ fn runConnection(
     listener: i32,
     prepared_key: *const vail.crypto.rsa.PreparedPrivateKey,
     keyring: *const vail.tls.ticket_keyring.Keyring,
+    replay_guard: vail.tls.early_data.Guard,
     expect_resumed: bool,
     random_byte: u8,
 ) !void {
@@ -67,12 +86,18 @@ fn runConnection(
             .server_id = "localhost",
             .now_ms = if (expect_resumed) 11_000 else 10_000,
         } },
+        .early_data = .{
+            .replay_guard = replay_guard,
+            .max_bytes = 1024,
+        },
     });
     defer server.deinit();
 
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(std.heap.smp_allocator);
     var driver = SocketHandshakeDriver{ .fd = client };
+    var received_early_data = false;
+    var saw_end_of_early_data = false;
     var established: Server.Established = handshake: while (true) {
         const event = try driver.next(&server, &output);
         switch (event) {
@@ -85,10 +110,21 @@ fn runConnection(
                 try writeAll(client, output.items[server_hello_len..]);
                 output.clearRetainingCapacity();
             },
-            .compatibility_change_cipher_spec,
-            .early_data,
-            .end_of_early_data,
-            => {},
+            .compatibility_change_cipher_spec => {},
+            .early_data => |data| {
+                if (!expect_resumed or received_early_data or
+                    !std.mem.eql(u8, data, expected_early_data))
+                {
+                    return error.UnexpectedEarlyData;
+                }
+                received_early_data = true;
+            },
+            .end_of_early_data => {
+                if (!expect_resumed or !received_early_data) {
+                    return error.UnexpectedEndOfEarlyData;
+                }
+                saw_end_of_early_data = true;
+            },
             .established => |value| break :handshake value,
             .peer_alert => return error.PeerAbortedHandshake,
             .hello_retry_request => return error.UnexpectedHelloRetryRequest,
@@ -97,6 +133,12 @@ fn runConnection(
     defer established.deinit();
     if (established.resumed != expect_resumed) {
         return error.UnexpectedHandshakeKind;
+    }
+    if (established.early_data_accepted != expect_resumed or
+        received_early_data != expect_resumed or
+        saw_end_of_early_data != expect_resumed)
+    {
+        return error.UnexpectedEarlyDataState;
     }
 
     if (!expect_resumed) {
@@ -113,6 +155,7 @@ fn runConnection(
                 .age_add = 0x1020_3040,
                 .issued_at_ms = 10_000,
                 .lifetime_seconds = 60,
+                .allow_early_data = true,
             },
             &ticket_record,
         );

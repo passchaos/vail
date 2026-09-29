@@ -274,7 +274,8 @@ rustls connected state and Vail-side client Finished verification.
 `zig build interop-rustls-tls13-resumption-server` keeps one rustls/AWS-LC
 client session cache across two connections to Vail, processes Vail's
 encrypted NewSessionTicket, and requires the second connection to complete as
-an authenticated PSK-DHE resumed handshake before exchanging application data.
+an authenticated PSK-DHE resumed handshake. It also sends application data
+before ServerHello and requires Vail's bounded anti-replay path to accept it.
 `interop-rustls-tls13-resumption-client` covers the reverse direction: Vail
 caches a rustls/AWS-LC ticket, emits the second ClientHello and binder, and
 requires both peers to report a resumed handshake.

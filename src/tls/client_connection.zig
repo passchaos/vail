@@ -1012,8 +1012,6 @@ pub fn ClientConnection(
                 resumption.deinit();
             }
             self.resumption = null;
-            if (self.early_write) |*early| early.deinit();
-            self.early_write = null;
             self.stage = .server_flight;
         }
 
@@ -1179,6 +1177,35 @@ pub fn ClientConnection(
             errdefer application.deinit();
 
             var offset: usize = 0;
+            if (verified.early_data_accepted) {
+                if (client_messages.items.len < 4 or
+                    !std.mem.eql(
+                        u8,
+                        client_messages.items[0..4],
+                        &.{ client_handshake.handshake_type_end_of_early_data, 0, 0, 0 },
+                    ))
+                {
+                    return error.UnexpectedApplicationData;
+                }
+                const early = &(self.early_write orelse
+                    return error.UnexpectedApplicationData);
+                var encrypted: [record.max_record_len]u8 = undefined;
+                const encrypted_len = try early.seal(
+                    record.content_type_handshake,
+                    client_messages.items[0..4],
+                    &encrypted,
+                );
+                try output.appendSlice(
+                    self.allocator,
+                    encrypted[0..encrypted_len],
+                );
+                early.deinit();
+                self.early_write = null;
+                offset = 4;
+            } else if (self.early_write) |*early| {
+                early.deinit();
+                self.early_write = null;
+            }
             while (offset < client_messages.items.len) {
                 const chunk_len = @min(
                     record.max_plaintext_len,
@@ -3308,7 +3335,10 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
         .end_of_early_data => {},
         else => return error.ExpectedEndOfEarlyData,
     }
-    const established_result = try server.receive("", &server_output);
+    const established_result = try server.receive(
+        client_wire.items[end_of_early_data.consumed..],
+        &server_output,
+    );
     var established_server = established_result.event.?.established;
     defer established_server.deinit();
     try std.testing.expect(established_server.early_data_accepted);

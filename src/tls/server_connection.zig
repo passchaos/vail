@@ -327,6 +327,7 @@ pub fn ServerConnection(
             early_data_received: usize = 0,
             expect_end_of_early_data: bool = false,
             early_deframer: stream.RecordDeframer = .{},
+            early_messages: stream.HandshakeReassembler(4) = .{},
             early_plaintext: [record.max_inner_plaintext_len]u8 = undefined,
             receiver: stream.ProtectedReceiver(max_handshake_message_len) = .{},
             saw_change_cipher_spec: bool = false,
@@ -1048,6 +1049,9 @@ pub fn ServerConnection(
                 &pending.early_plaintext,
             ) catch |err| switch (err) {
                 error.AuthenticationFailed => {
+                    if (pending.expect_end_of_early_data) {
+                        return error.UnexpectedHandshakeMessage;
+                    }
                     early.deinit();
                     pending.early_records = null;
                     return self.handleClientProtected(
@@ -1060,9 +1064,33 @@ pub fn ServerConnection(
                 },
                 else => return err,
             };
-            if (early_opened.content_type !=
-                record.content_type_application_data)
-            {
+            if (early_opened.content_type == record.content_type_handshake) {
+                if (!pending.expect_end_of_early_data) {
+                    return error.UnexpectedHandshakeMessage;
+                }
+                const message_result = try pending.early_messages.push(
+                    pending.early_plaintext[0..early_opened.len],
+                );
+                if (message_result.consumed != early_opened.len) {
+                    return error.UnexpectedHandshakeMessage;
+                }
+                const message = message_result.message orelse return .{
+                    .consumed = result.consumed,
+                    .event = null,
+                };
+                if (!std.mem.eql(u8, message, &.{ 5, 0, 0, 0 })) {
+                    return error.UnexpectedHandshakeMessage;
+                }
+                pending.expect_end_of_early_data = false;
+                pending.transcript_state.update(message);
+                early.deinit();
+                pending.early_records = null;
+                return .{
+                    .consumed = result.consumed,
+                    .event = .{ .end_of_early_data = {} },
+                };
+            }
+            if (early_opened.content_type != record.content_type_application_data) {
                 return error.UnexpectedApplicationData;
             }
             if (!pending.early_data_accepted) {
