@@ -10,6 +10,7 @@ const cipher_suite = @import("cipher_suite.zig");
 const key_update = @import("key_update.zig");
 const record = @import("record.zig");
 const record_fragment = @import("record_fragment.zig");
+const record_size_limit = @import("record_size_limit.zig");
 const secret = @import("secret.zig");
 const stream = @import("stream.zig");
 const traffic_secrets = @import("traffic_secrets.zig");
@@ -17,7 +18,8 @@ const traffic_secrets = @import("traffic_secrets.zig");
 pub const SealFragmentResult = record_fragment.SealResult;
 pub const ExtractedSecrets = traffic_secrets.Extracted;
 
-pub const Error = stream.ProtectedError || key_update.Error || error{
+pub const Error = stream.ProtectedError || key_update.Error ||
+    record_size_limit.Error || error{
     LocalClosed,
     PeerClosed,
     CloseNotifyResponseRequired,
@@ -25,6 +27,7 @@ pub const Error = stream.ProtectedError || key_update.Error || error{
     NoKeyUpdateResponsePending,
     UnexpectedPostHandshakeMessage,
     ConnectionFailed,
+    PeerRecordSizeLimitExceeded,
 };
 
 pub const Event = union(enum) {
@@ -50,6 +53,8 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
         suite: cipher_suite.Suite,
         traffic: key_update.Duplex,
         receiver: stream.ProtectedReceiver(max_handshake_message_len) = .{},
+        local_record_size_limit: ?u16 = null,
+        peer_record_size_limit: ?u16 = null,
         local_closed: bool = false,
         close_response_pending: bool = false,
         failed: bool = false,
@@ -60,14 +65,34 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
             read_secret: secret.Secret,
             write_secret: secret.Secret,
         ) Error!Self {
-            return .{
+            return initWithRecordSizeLimits(suite, read_secret, write_secret, null, null);
+        }
+
+        pub fn initWithRecordSizeLimits(
+            suite: cipher_suite.Suite,
+            read_secret: secret.Secret,
+            write_secret: secret.Secret,
+            local_limit: ?u16,
+            peer_limit: ?u16,
+        ) Error!Self {
+            if (local_limit) |limit| _ = try record_size_limit.validate(limit);
+            if (peer_limit) |limit| _ = try record_size_limit.validate(limit);
+            var result = Self{
                 .suite = suite,
                 .traffic = try key_update.Duplex.init(
                     suite,
                     read_secret,
                     write_secret,
                 ),
+                .local_record_size_limit = local_limit,
+                .peer_record_size_limit = peer_limit,
             };
+            if (local_limit) |limit| {
+                result.receiver.setMaxCiphertextFragmentLen(
+                    try record_size_limit.maxCiphertextFragment(limit),
+                );
+            }
+            return result;
         }
 
         pub fn deinit(self: *Self) void {
@@ -128,7 +153,7 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
             output: []u8,
         ) Error!usize {
             try self.requireWritable();
-            return self.traffic.seal(
+            return self.sealLimited(
                 record.content_type_application_data,
                 plaintext,
                 output,
@@ -145,10 +170,19 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
             output: []u8,
         ) Error!SealFragmentResult {
             try self.requireWritable();
+            if (max_fragment_plaintext == 0 or
+                max_fragment_plaintext > record.max_plaintext_len)
+            {
+                return error.InvalidPlaintextLength;
+            }
+            const effective_limit = @min(
+                max_fragment_plaintext,
+                try self.maxPeerApplicationData(),
+            );
             return self.traffic.sealFragment(
                 record.content_type_application_data,
                 plaintext,
-                max_fragment_plaintext,
+                effective_limit,
                 output,
             );
         }
@@ -190,7 +224,7 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
             if (self.traffic.responseRequired()) {
                 return error.KeyUpdateResponseRequired;
             }
-            return self.traffic.seal(
+            return self.sealLimited(
                 record.content_type_handshake,
                 message,
                 output,
@@ -277,6 +311,26 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
             if (self.close_response_pending) {
                 return error.CloseNotifyResponseRequired;
             }
+        }
+
+        fn sealLimited(
+            self: *Self,
+            inner_type: u8,
+            plaintext: []const u8,
+            output: []u8,
+        ) Error!usize {
+            const max_plaintext = try self.maxPeerApplicationData();
+            if (plaintext.len > max_plaintext) {
+                return error.PeerRecordSizeLimitExceeded;
+            }
+            return self.traffic.seal(inner_type, plaintext, output);
+        }
+
+        fn maxPeerApplicationData(self: *const Self) Error!usize {
+            return if (self.peer_record_size_limit) |limit|
+                try record_size_limit.maxApplicationData(limit)
+            else
+                record.max_plaintext_len;
         }
 
         fn requireOpenForControl(self: *const Self) Error!void {
@@ -431,6 +485,85 @@ test "application connection seals bounded fragments with explicit progress" {
     try std.testing.expectEqual(
         @as(?u64, record_count),
         server.traffic.read.sequenceNumber(),
+    );
+}
+
+test "application connection enforces negotiated record size limits" {
+    const std = @import("std");
+    const read_secret = secret.Secret.fromSha256([_]u8{0xa4} ** 32);
+    const write_secret = secret.Secret.fromSha256([_]u8{0xb4} ** 32);
+    var limited_sender = try ApplicationConnection(256).initWithRecordSizeLimits(
+        .aes_128_gcm_sha256,
+        read_secret,
+        write_secret,
+        null,
+        64,
+    );
+    defer limited_sender.deinit();
+    var receiver = try ApplicationConnection(256).init(
+        .aes_128_gcm_sha256,
+        write_secret,
+        read_secret,
+    );
+    defer receiver.deinit();
+
+    var wire: [256]u8 = undefined;
+    const too_large = [_]u8{0x41} ** 64;
+    try std.testing.expectError(
+        error.PeerRecordSizeLimitExceeded,
+        limited_sender.sealApplicationData(&too_large, &wire),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        limited_sender.traffic.write.sequenceNumber(),
+    );
+
+    const fragment = try limited_sender.sealApplicationDataFragment(
+        &too_large,
+        too_large.len,
+        &wire,
+    );
+    try std.testing.expectEqual(@as(usize, 63), fragment.plaintext_consumed);
+    const received = try receiver.receive(wire[0..fragment.output_written]);
+    try std.testing.expectEqualSlices(
+        u8,
+        too_large[0..63],
+        received.event.?.application_data,
+    );
+    try std.testing.expectError(
+        error.PeerRecordSizeLimitExceeded,
+        limited_sender.sealPostHandshake(&too_large, &wire),
+    );
+
+    var unbounded_sender = try ApplicationConnection(256).init(
+        .aes_128_gcm_sha256,
+        read_secret,
+        write_secret,
+    );
+    defer unbounded_sender.deinit();
+    var limited_receiver = try ApplicationConnection(256).initWithRecordSizeLimits(
+        .aes_128_gcm_sha256,
+        write_secret,
+        read_secret,
+        64,
+        null,
+    );
+    defer limited_receiver.deinit();
+    const oversized_len = try unbounded_sender.sealApplicationData(
+        &too_large,
+        &wire,
+    );
+    try std.testing.expectError(
+        error.RecordTooLarge,
+        limited_receiver.receive(wire[0..oversized_len]),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        limited_receiver.traffic.read.sequenceNumber(),
+    );
+    try std.testing.expectError(
+        error.ConnectionFailed,
+        limited_receiver.receive(""),
     );
 }
 

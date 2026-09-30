@@ -258,6 +258,7 @@ pub fn ProtectedReceiver(comptime max_handshake_message_len: usize) type {
         records: RecordDeframer = .{},
         handshakes: HandshakeReassembler(max_handshake_message_len) = .{},
         plaintext: [record.max_inner_plaintext_len]u8 = undefined,
+        max_ciphertext_fragment_len: usize = record.max_ciphertext_len,
         pending_start: usize = 0,
         pending_end: usize = 0,
         peer_closed: bool = false,
@@ -270,6 +271,14 @@ pub fn ProtectedReceiver(comptime max_handshake_message_len: usize) type {
         pub fn hasPendingHandshakeData(self: *const Self) bool {
             return self.pending_start < self.pending_end or
                 self.handshakes.pending() != 0;
+        }
+
+        pub fn setMaxCiphertextFragmentLen(
+            self: *Self,
+            limit: usize,
+        ) void {
+            std.debug.assert(limit <= record.max_ciphertext_len);
+            self.max_ciphertext_fragment_len = limit;
         }
 
         pub fn push(
@@ -339,6 +348,9 @@ pub fn ProtectedReceiver(comptime max_handshake_message_len: usize) type {
             }
             if (framed.content_type != record.content_type_application_data) {
                 return error.UnexpectedPlaintextRecord;
+            }
+            if (framed.fragment.len > self.max_ciphertext_fragment_len) {
+                return error.RecordTooLarge;
             }
             if (self.peer_closed) return error.DataAfterCloseNotify;
 
