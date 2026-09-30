@@ -7,6 +7,7 @@
 //! extensions fail closed, and RFC 8954 response nonces can be matched exactly.
 
 const std = @import("std");
+const certificate_compat = @import("certificate.zig");
 const x509_signature = @import("signature.zig");
 
 const Certificate = std.crypto.Certificate;
@@ -95,12 +96,14 @@ pub fn verify(
             return error.InvalidNonce;
         }
     }
-    const certificate = parseCertificate(certificate_der) catch
+    const compatible_certificate = certificate_compat.parse(certificate_der) catch
         return error.InvalidOcspResponse;
-    const issuer = parseCertificate(issuer_der) catch
+    const compatible_issuer = certificate_compat.parse(issuer_der) catch
         return error.InvalidIssuer;
-    certificate.verify(issuer, now_seconds) catch
+    compatible_certificate.verify(compatible_issuer, now_seconds) catch
         return error.InvalidIssuer;
+    const certificate = compatible_certificate.standard;
+    const issuer = compatible_issuer.standard;
     if (now_seconds < issuer.validity.not_before or
         now_seconds > issuer.validity.not_after)
     {
@@ -365,15 +368,21 @@ fn verifyAuthorizedResponderSignature(
             }
             if (element.tag != 0x30) return error.InvalidOcspResponse;
             const certificate_der = encoded[element.start..element.end];
-            const candidate = parseCertificate(certificate_der) catch
+            const compatible_candidate = certificate_compat.parse(
+                certificate_der,
+            ) catch
                 return error.InvalidOcspResponse;
+            const candidate = compatible_candidate.standard;
             if (!try responderMatches(
                 responder_id,
                 certificate_der,
                 candidate,
             )) continue;
             identity_matches += 1;
-            candidate.verify(issuer, now_seconds) catch continue;
+            compatible_candidate.verify(
+                .{ .standard = issuer },
+                now_seconds,
+            ) catch continue;
             validateDelegatedResponderUsage(certificate_der) catch continue;
             authorized_matches += 1;
             verifySignature(
@@ -894,7 +903,7 @@ fn parseCertificate(der: []const u8) !Certificate.Parsed {
     var reader = Reader{ .bytes = der };
     _ = try reader.require(0x30);
     if (!reader.done()) return error.InvalidDer;
-    return Certificate.parse(.{ .buffer = der, .index = 0 });
+    return (try certificate_compat.parse(der)).standard;
 }
 
 fn parseGeneralizedTime(bytes: []const u8, element: Element) !u64 {
@@ -1069,6 +1078,16 @@ test "issuer-signed OCSP verifies OpenSSL RSA SHA-2 responses" {
         verify(responses[0], leaf, issuer, now, .{
             .expected_nonce = &nonce,
         }),
+    );
+}
+
+test "OCSP accepts an RSA-PSS-signed certificate subject" {
+    const issuer = @embedFile("testdata/rsa-pss-crl-ca.der");
+    const leaf = @embedFile("testdata/rsa-pss-leaf.der");
+    const response = @embedFile("testdata/rsa-pss-certificate.ocsp.der");
+    try std.testing.expectEqual(
+        Status.good,
+        try verify(response, leaf, issuer, 1_800_000_000, .{}),
     );
 }
 

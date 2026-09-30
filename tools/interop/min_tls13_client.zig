@@ -21,6 +21,10 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "ticket-request")
     else
         false;
+    const use_pss_certificate = if (mode) |argument|
+        std.mem.eql(u8, argument, "pss-certificate")
+    else
+        false;
     if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
@@ -39,6 +43,19 @@ pub fn main(init: std.process.Init) !void {
     };
     var client_hello_record: std.ArrayList(u8) = .empty;
     defer client_hello_record.deinit(std.heap.smp_allocator);
+    var pss_roots: std.crypto.Certificate.Bundle = .empty;
+    defer pss_roots.deinit(std.heap.smp_allocator);
+    if (use_pss_certificate) {
+        try pss_roots.bytes.appendSlice(
+            std.heap.smp_allocator,
+            vail.x509.testing.rsa_pss_root,
+        );
+        try pss_roots.parseCert(std.heap.smp_allocator, 0, 1_800_000_000);
+    }
+    const pss_verifier = vail.x509.trust.BundleVerifier{
+        .bundle = &pss_roots,
+        .now_seconds = 1_800_000_000,
+    };
     var client = try Client.init(.{
         .allocator = std.heap.smp_allocator,
         .random = [_]u8{0x62} ** 32,
@@ -58,7 +75,10 @@ pub fn main(init: std.process.Init) !void {
             .new_session_count = 3,
             .resumption_count = 1,
         } else null,
-        .server_verifier = .{ .verify_trust = acceptTestCertificate },
+        .server_verifier = if (use_pss_certificate)
+            pss_verifier.clientVerifier()
+        else
+            .{ .verify_trust = acceptTestCertificate },
     }, &client_hello_record);
     defer client.deinit();
     try writeAll(fd, client_hello_record.items);
@@ -103,6 +123,9 @@ pub fn main(init: std.process.Init) !void {
             return error.UnexpectedTicketCount;
         }
         std.debug.print("ticket request count=2\n", .{});
+    }
+    if (use_pss_certificate) {
+        std.debug.print("RSA-PSS certificate path verified\n", .{});
     }
 
     var request_record: [256]u8 = undefined;

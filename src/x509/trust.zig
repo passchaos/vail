@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const auth = @import("../tls/auth.zig");
+const certificate_compat = @import("certificate.zig");
 const ocsp = @import("ocsp.zig");
 
 const Certificate = std.crypto.Certificate;
@@ -218,8 +219,15 @@ fn verifyChain(
         return error.CertificatePathTooManyCertificates;
     }
     var parsed: [hard_max_presented_certificates]Certificate.Parsed = undefined;
+    var custom_algorithms: [hard_max_presented_certificates]certificate_compat.SignatureAlgorithm = undefined;
+    var custom_algorithm_mask: u32 = 0;
     for (chain, 0..) |certificate_der, index| {
-        parsed[index] = try parseCertificate(certificate_der);
+        const compatible = try certificate_compat.parse(certificate_der);
+        parsed[index] = compatible.standard;
+        if (compatible.signature_algorithm) |algorithm| {
+            custom_algorithms[index] = algorithm;
+            custom_algorithm_mask |= @as(u32, 1) << @intCast(index);
+        }
     }
     try validateLeafUsage(chain[0], purpose);
     var search = PathSearch{
@@ -227,6 +235,8 @@ fn verifyChain(
         .now_seconds = now_seconds,
         .chain = chain,
         .parsed = parsed[0..chain.len],
+        .custom_algorithms = custom_algorithms[0..chain.len],
+        .custom_algorithm_mask = custom_algorithm_mask,
         .purpose = purpose,
         .limits = limits,
         .revocation = revocation,
@@ -243,6 +253,8 @@ const PathSearch = struct {
     now_seconds: i64,
     chain: []const []const u8,
     parsed: []const Certificate.Parsed,
+    custom_algorithms: []const certificate_compat.SignatureAlgorithm,
+    custom_algorithm_mask: u32,
     purpose: EndpointPurpose,
     limits: PathLimits,
     revocation: ?RevocationPolicy,
@@ -297,7 +309,11 @@ const PathSearch = struct {
                     remembered_error = err;
                     break :anchor_attempt;
                 };
-                subject.verify(anchor, self.now_seconds) catch |err| {
+                self.verifyCertificateSignature(
+                    subject_index,
+                    subject,
+                    anchor,
+                ) catch |err| {
                     remembered_error = err;
                     break :anchor_attempt;
                 };
@@ -344,7 +360,11 @@ const PathSearch = struct {
                 remembered_error = err;
                 continue;
             };
-            subject.verify(issuer, self.now_seconds) catch |err| {
+            self.verifyCertificateSignature(
+                subject_index,
+                subject,
+                issuer,
+            ) catch |err| {
                 remembered_error = err;
                 continue;
             };
@@ -388,6 +408,24 @@ const PathSearch = struct {
             return error.CertificatePathSearchLimitExceeded;
         }
         self.candidate_checks += 1;
+    }
+
+    fn verifyCertificateSignature(
+        self: *const PathSearch,
+        subject_index: usize,
+        subject: Certificate.Parsed,
+        issuer: Certificate.Parsed,
+    ) !void {
+        const bit = @as(u32, 1) << @intCast(subject_index);
+        if ((self.custom_algorithm_mask & bit) != 0) {
+            return certificate_compat.verifyWithAlgorithm(
+                subject,
+                self.custom_algorithms[subject_index],
+                issuer,
+                self.now_seconds,
+            );
+        }
+        return subject.verify(issuer, self.now_seconds);
     }
 
     fn verifyStapledOcsp(
@@ -508,10 +546,7 @@ fn verifyIpSubjectAltName(
 }
 
 fn parseCertificate(der: []const u8) !Certificate.Parsed {
-    return Certificate.parse(.{
-        .buffer = der,
-        .index = 0,
-    });
+    return (try certificate_compat.parse(der)).standard;
 }
 
 /// Match a server-supplied cross-certificate to a configured trust anchor.
@@ -522,10 +557,13 @@ fn trustedEquivalentAnchor(
     subject: Certificate.Parsed,
 ) ?Certificate.Parsed {
     const anchor_index = bundle.find(subject.subject()) orelse return null;
-    const anchor = Certificate.parse(.{
-        .buffer = bundle.bytes.items,
-        .index = anchor_index,
-    }) catch unreachable;
+    const anchor_element = Certificate.der.Element.parse(
+        bundle.bytes.items,
+        anchor_index,
+    ) catch unreachable;
+    const anchor = parseCertificate(
+        bundle.bytes.items[anchor_index..anchor_element.slice.end],
+    ) catch unreachable;
     if (!std.mem.eql(
         u8,
         subjectPublicKeyInfo(subject),

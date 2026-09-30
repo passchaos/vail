@@ -73,10 +73,13 @@ The current foundation provides:
   zlib first for preparation speed, followed by Brotli and Zstandard;
 - X.509 bounded path construction over unordered intermediates, alternate
   issuers and cross-signs, with hostname, validity, custom-bundle, and
-  system-CA verification; explicit depth/candidate/certificate budgets prevent
-  attacker-controlled path explosion, DNS and IPv4/IPv6 Name Constraints
-  intersect across the chosen server path, and literal IP server identities
-  match only exact iPAddress SAN values rather than falling back to CN/dNSName;
+  system-CA verification. SHA-2 RSASSA-PSS-signed leaves and intermediate CAs
+  use a strict pure-Zig compatibility parser when Zig std does not recognize
+  their signature AlgorithmIdentifier; explicit depth/candidate/certificate
+  budgets prevent attacker-controlled path explosion, DNS and IPv4/IPv6 Name
+  Constraints intersect across the chosen server path, and literal IP server
+  identities match only exact iPAddress SAN values rather than falling back to
+  CN/dNSName;
   plus a client-certificate bundle verifier that omits hostname matching and
   enforces the clientAuth endpoint purpose for mTLS server policy.
   Strict subject identity extraction returns either an owned, unambiguous UTF-8

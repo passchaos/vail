@@ -7,6 +7,7 @@
 //! algorithms fail explicitly.
 
 const std = @import("std");
+const certificate_compat = @import("certificate.zig");
 const x509_signature = @import("signature.zig");
 const trust = @import("trust.zig");
 
@@ -342,7 +343,7 @@ fn parseCertificate(der: []const u8) !Certificate.Parsed {
     var top = Reader{ .bytes = der };
     _ = try top.require(0x30);
     if (!top.done()) return error.InvalidDer;
-    return Certificate.parse(.{ .buffer = der, .index = 0 });
+    return (try certificate_compat.parse(der)).standard;
 }
 
 fn parseTime(bytes: []const u8, time: Element) !u64 {
@@ -620,6 +621,7 @@ test "CRL verifies OpenSSL RSA PKCS1 SHA-384 and SHA-512 fixtures" {
 
 test "CRL verifies OpenSSL RSA-PSS SHA-256 SHA-384 and SHA-512 fixtures" {
     const ca = @embedFile("testdata/rsa-pss-crl-ca.der");
+    const pss_leaf = @embedFile("testdata/rsa-pss-leaf.der");
     const crls = [_][]const u8{
         @embedFile("testdata/rsa-pss-sha256.crl.der"),
         @embedFile("testdata/rsa-pss-sha384.crl.der"),
@@ -628,6 +630,7 @@ test "CRL verifies OpenSSL RSA-PSS SHA-256 SHA-384 and SHA-512 fixtures" {
     for (crls) |crl_bytes| {
         const list = try parseAndVerify(crl_bytes, ca, 1_800_000_000);
         try std.testing.expectEqual(@as(usize, 0), list.revoked_entries.len);
+        try std.testing.expect(!try list.isRevoked(pss_leaf));
         try std.testing.expectEqual(@as(u64, 1_767_225_600), list.this_update);
         try std.testing.expectEqual(@as(u64, 2_082_758_400), list.next_update);
     }

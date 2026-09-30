@@ -7,6 +7,7 @@ pub const ocsp = @import("ocsp.zig");
 
 pub const testing = struct {
     pub const path_vectors = @import("testdata/path_vectors.zig");
+    pub const rsa_pss_root = @embedFile("testdata/rsa-pss-crl-ca.der");
 };
 
 test {

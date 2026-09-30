@@ -12,6 +12,7 @@ const std = @import("std");
 
 const rsa = @import("../crypto/rsa.zig");
 const sm2 = @import("../crypto/sm2.zig");
+const x509_certificate = @import("../x509/certificate.zig");
 const Certificate = std.crypto.Certificate;
 const Ed25519 = std.crypto.sign.Ed25519;
 const MlDsa44 = std.crypto.sign.mldsa.MLDSA44;
@@ -2078,10 +2079,8 @@ fn timingSafeEqlBytes(a: []const u8, b: []const u8) bool {
 }
 
 fn parseX509(certificate: []const u8) Error!Certificate.Parsed {
-    return Certificate.parse(.{
-        .buffer = certificate,
-        .index = 0,
-    }) catch return error.InvalidCertificate;
+    return (x509_certificate.parse(certificate) catch
+        return error.InvalidCertificate).standard;
 }
 
 fn appendInt(

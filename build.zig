@@ -778,6 +778,27 @@ pub fn build(b: *std.Build) void {
     );
     interop_vail_client_step.dependOn(&check_vail_client.step);
 
+    const check_vail_pss_certificate_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_pss_certificate_client.addArg(
+        "work=$(mktemp -d /tmp/vail-openssl-pss-server.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl x509 -inform DER -in src/x509/testdata/rsa-pss-leaf.der -out \"$work/cert.pem\"; " ++
+            "openssl s_server -accept 127.0.0.1:24445 -tls1_3 -groups P-256 -cert \"$work/cert.pem\" -key src/crypto/testdata/rsa_signing_key.pem -alpn h2 -www -naccept 1 >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 4s $1 pss-certificate >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'RSA-PSS certificate path verified' \"$work/client.log\" && " ++
+            "grep -q 'server application data verified' \"$work/client.log\"",
+    );
+    check_vail_pss_certificate_client.addArg("sh");
+    check_vail_pss_certificate_client.addArtifactArg(min_tls13_client);
+    const interop_vail_pss_certificate_client_step = b.step(
+        "interop-openssl-pss-certificate-client",
+        "Verify an OpenSSL RSA-PSS-signed certificate with Vail",
+    );
+    interop_vail_pss_certificate_client_step.dependOn(
+        &check_vail_pss_certificate_client.step,
+    );
+
     const build_rustls_server = b.addSystemCommand(&.{
         "cargo",
         "build",
@@ -808,6 +829,29 @@ pub fn build(b: *std.Build) void {
     );
     interop_vail_rustls_server_step.dependOn(
         &check_vail_rustls_server.step,
+    );
+
+    const check_vail_rustls_pss_certificate = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_rustls_pss_certificate.step.dependOn(&build_rustls_server.step);
+    check_vail_rustls_pss_certificate.addArg(
+        "work=$(mktemp -d /tmp/vail-rustls-pss-certificate.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl x509 -inform DER -in src/x509/testdata/rsa-pss-leaf.der -out \"$work/cert.pem\"; " ++
+            "bench/rustls_min_server/target/release/vail-rustls-min-server \"$work/cert.pem\" src/crypto/testdata/rsa_signing_key.pem >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 4s $1 pss-certificate >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'rustls server completed' \"$work/server.log\" && " ++
+            "grep -q 'RSA-PSS certificate path verified' \"$work/client.log\" && " ++
+            "grep -q 'server application data verified' \"$work/client.log\"",
+    );
+    check_vail_rustls_pss_certificate.addArg("sh");
+    check_vail_rustls_pss_certificate.addArtifactArg(min_tls13_client);
+    const interop_vail_rustls_pss_certificate_step = b.step(
+        "interop-rustls-pss-certificate-client",
+        "Verify a rustls/AWS-LC RSA-PSS-signed certificate with Vail",
+    );
+    interop_vail_rustls_pss_certificate_step.dependOn(
+        &check_vail_rustls_pss_certificate.step,
     );
 
     const check_vail_rustls_ticket_request = b.addSystemCommand(&.{ "sh", "-c" });

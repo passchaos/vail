@@ -240,6 +240,79 @@ test "bundle verifier validates hostname and time" {
     );
 }
 
+test "bundle verifier accepts RSA-PSS signed leaves and intermediates" {
+    const root = @embedFile("testdata/rsa-pss-crl-ca.der");
+    const pss_leaf = @embedFile("testdata/rsa-pss-leaf.der");
+    const pss_intermediate = @embedFile("testdata/rsa-pss-intermediate.der");
+    const intermediate_leaf = @embedFile(
+        "testdata/rsa-pss-intermediate-leaf.der",
+    );
+    const now = 1_800_000_000;
+
+    try std.testing.expectError(
+        error.CertificateHasUnrecognizedObjectId,
+        std.crypto.Certificate.parse(.{ .buffer = pss_leaf, .index = 0 }),
+    );
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(std.testing.allocator);
+    try bundle.bytes.appendSlice(std.testing.allocator, root);
+    try bundle.parseCert(std.testing.allocator, 0, now);
+    const verifier = trust.BundleVerifier{
+        .bundle = &bundle,
+        .now_seconds = now,
+    };
+    try verifier.verify(.{
+        .server_name = "localhost",
+        .chain = &.{pss_leaf},
+    });
+    try verifier.verify(.{
+        .server_name = "localhost",
+        .chain = &.{ intermediate_leaf, pss_intermediate },
+    });
+    try std.testing.expectError(
+        error.CertificateHostMismatch,
+        verifier.verify(.{
+            .server_name = "not-localhost.example",
+            .chain = &.{pss_leaf},
+        }),
+    );
+
+    const tampered = try std.testing.allocator.dupe(u8, pss_leaf);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.CertificateSignatureInvalid,
+        verifier.verify(.{
+            .server_name = "localhost",
+            .chain = &.{tampered},
+        }),
+    );
+
+    const wrong_salt = try std.testing.allocator.dupe(u8, pss_leaf);
+    defer std.testing.allocator.free(wrong_salt);
+    const encoded_salt_length = [_]u8{ 0xa2, 0x03, 0x02, 0x01, 0x30 };
+    var search_from: usize = 0;
+    var replacements: usize = 0;
+    while (std.mem.indexOfPos(
+        u8,
+        wrong_salt,
+        search_from,
+        &encoded_salt_length,
+    )) |offset| {
+        wrong_salt[offset + encoded_salt_length.len - 1] = 47;
+        search_from = offset + encoded_salt_length.len;
+        replacements += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), replacements);
+    try std.testing.expectError(
+        error.UnsupportedSignatureAlgorithm,
+        verifier.verify(.{
+            .server_name = "localhost",
+            .chain = &.{wrong_salt},
+        }),
+    );
+}
+
 test "client certificate bundle verifier validates trust without hostname" {
     const client_der = @embedFile("testdata/server.der");
     const ca_der = @embedFile("testdata/ca.der");
