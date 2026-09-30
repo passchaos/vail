@@ -38,6 +38,7 @@ const oid_mgf1 = [_]u8{
 const oid_sha256 = [_]u8{
     0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
 };
+const oid_sha1 = [_]u8{ 0x2b, 0x0e, 0x03, 0x02, 0x1a };
 const oid_sha384 = [_]u8{
     0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02,
 };
@@ -65,27 +66,74 @@ pub const Algorithm = enum {
     ed25519,
 };
 
-const PssHash = enum {
+pub const PssHash = enum {
+    sha1,
     sha256,
     sha384,
     sha512,
 
     fn digestLength(self: PssHash) usize {
         return switch (self) {
+            .sha1 => std.crypto.hash.Sha1.digest_length,
             .sha256 => Sha256.digest_length,
             .sha384 => Sha384.digest_length,
             .sha512 => Sha512.digest_length,
         };
     }
 
-    fn signatureAlgorithm(self: PssHash) Algorithm {
+    fn signatureAlgorithm(self: PssHash) Error!Algorithm {
         return switch (self) {
+            .sha1 => error.UnsupportedSignatureAlgorithm,
             .sha256 => .rsa_pss_sha256,
             .sha384 => .rsa_pss_sha384,
             .sha512 => .rsa_pss_sha512,
         };
     }
 };
+
+pub const PssProfile = struct {
+    hash: PssHash,
+    mgf_hash: PssHash,
+    salt_length: usize,
+    trailer_field: usize,
+};
+
+pub const PssKeyConstraints = union(enum) {
+    unrestricted,
+    restricted: PssProfile,
+
+    pub fn permits(
+        self: PssKeyConstraints,
+        signature_algorithm: Algorithm,
+    ) bool {
+        const signature_profile = pssProfileForAlgorithm(
+            signature_algorithm,
+        ) orelse return false;
+        return switch (self) {
+            .unrestricted => true,
+            .restricted => |key_profile| key_profile.hash ==
+                signature_profile.hash and
+                key_profile.mgf_hash == signature_profile.mgf_hash and
+                key_profile.trailer_field == signature_profile.trailer_field and
+                signature_profile.salt_length >= key_profile.salt_length,
+        };
+    }
+};
+
+pub fn pssProfileForAlgorithm(algorithm: Algorithm) ?PssProfile {
+    const hash: PssHash = switch (algorithm) {
+        .rsa_pss_sha256 => .sha256,
+        .rsa_pss_sha384 => .sha384,
+        .rsa_pss_sha512 => .sha512,
+        else => return null,
+    };
+    return .{
+        .hash = hash,
+        .mgf_hash = hash,
+        .salt_length = hash.digestLength(),
+        .trailer_field = 1,
+    };
+}
 
 /// Parse the contents of an ASN.1 AlgorithmIdentifier SEQUENCE.
 pub fn parseAlgorithmIdentifier(encoded: []const u8) Error!Algorithm {
@@ -127,7 +175,14 @@ pub fn parseAlgorithmIdentifier(encoded: []const u8) Error!Algorithm {
         if (parameters.tag != 0x30 or !fields.done()) {
             return error.InvalidAlgorithmIdentifier;
         }
-        return parsePssParameters(parameters.value);
+        const profile = try parsePssProfile(parameters.value);
+        if (profile.hash != profile.mgf_hash or
+            profile.salt_length != profile.hash.digestLength() or
+            profile.trailer_field != 1)
+        {
+            return error.UnsupportedSignatureAlgorithm;
+        }
+        return profile.hash.signatureAlgorithm();
     }
     if (std.mem.eql(u8, oid.value, &oid_ed25519)) {
         if (!fields.done()) return error.InvalidAlgorithmIdentifier;
@@ -177,18 +232,21 @@ pub fn verify(
         ),
         .rsa_pss_sha256 => try verifyRsaPss(
             Sha256,
+            .rsa_pss_sha256,
             issuer,
             message,
             signature_bytes,
         ),
         .rsa_pss_sha384 => try verifyRsaPss(
             Sha384,
+            .rsa_pss_sha384,
             issuer,
             message,
             signature_bytes,
         ),
         .rsa_pss_sha512 => try verifyRsaPss(
             Sha512,
+            .rsa_pss_sha512,
             issuer,
             message,
             signature_bytes,
@@ -197,10 +255,32 @@ pub fn verify(
     }
 }
 
-fn parsePssParameters(encoded: []const u8) Error!Algorithm {
+pub fn parsePssPublicKeyAlgorithmIdentifier(
+    encoded: []const u8,
+) Error!PssKeyConstraints {
     var fields = Reader{ .bytes = encoded };
-    var hash: ?PssHash = null;
-    var mask_hash: ?PssHash = null;
+    const oid = fields.require(0x06) catch
+        return error.InvalidAlgorithmIdentifier;
+    if (!std.mem.eql(u8, oid.value, &oid_rsassa_pss)) {
+        return error.UnsupportedSignatureAlgorithm;
+    }
+    const parameters = (fields.next() catch
+        return error.InvalidAlgorithmIdentifier) orelse
+        return .unrestricted;
+    if (parameters.tag != 0x30 or !fields.done()) {
+        return error.InvalidAlgorithmIdentifier;
+    }
+    const profile = try parsePssProfile(parameters.value);
+    if (profile.trailer_field != 1) {
+        return error.UnsupportedSignatureAlgorithm;
+    }
+    return .{ .restricted = profile };
+}
+
+fn parsePssProfile(encoded: []const u8) Error!PssProfile {
+    var fields = Reader{ .bytes = encoded };
+    var hash: PssHash = .sha1;
+    var mask_hash: PssHash = .sha1;
     var salt_length: usize = 20;
     var trailer_field: usize = 1;
     var previous_tag: u8 = 0x9f;
@@ -221,16 +301,12 @@ fn parsePssParameters(encoded: []const u8) Error!Algorithm {
             else => unreachable,
         }
     }
-    const selected_hash = hash orelse
-        return error.UnsupportedSignatureAlgorithm;
-    const selected_mask_hash = mask_hash orelse
-        return error.UnsupportedSignatureAlgorithm;
-    if (selected_mask_hash != selected_hash or
-        salt_length != selected_hash.digestLength() or trailer_field != 1)
-    {
-        return error.UnsupportedSignatureAlgorithm;
-    }
-    return selected_hash.signatureAlgorithm();
+    return .{
+        .hash = hash,
+        .mgf_hash = mask_hash,
+        .salt_length = salt_length,
+        .trailer_field = trailer_field,
+    };
 }
 
 fn parseExplicitHashAlgorithm(field: Element) Error!PssHash {
@@ -262,7 +338,9 @@ fn parseHashAlgorithm(encoded: []const u8) Error!PssHash {
     var fields = Reader{ .bytes = encoded };
     const oid = fields.require(0x06) catch
         return error.InvalidAlgorithmIdentifier;
-    const hash: PssHash = if (std.mem.eql(u8, oid.value, &oid_sha256))
+    const hash: PssHash = if (std.mem.eql(u8, oid.value, &oid_sha1))
+        .sha1
+    else if (std.mem.eql(u8, oid.value, &oid_sha256))
         .sha256
     else if (std.mem.eql(u8, oid.value, &oid_sha384))
         .sha384
@@ -356,16 +434,20 @@ fn verifyRsaPkcs1(
 
 fn verifyRsaPss(
     comptime Hash: type,
+    algorithm: Algorithm,
     issuer: Certificate.Parsed,
     message: []const u8,
     signature_bytes: []const u8,
 ) Error!void {
-    // RSASSA-PSS SubjectPublicKeyInfo can carry independent hash/MGF/salt
-    // restrictions. Until those key parameters are retained by the standard
-    // certificate parser, accept PSS signatures only with unrestricted
-    // rsaEncryption keys rather than silently bypassing key constraints.
-    if (issuer.pub_key_algo != .rsaEncryption) {
-        return error.UnsupportedSignatureAlgorithm;
+    switch (issuer.pub_key_algo) {
+        .rsaEncryption => {},
+        .rsassa_pss => {
+            const constraints = try pssConstraintsForCertificate(issuer);
+            if (!constraints.permits(algorithm)) {
+                return error.UnsupportedSignatureAlgorithm;
+            }
+        },
+        else => return error.UnsupportedSignatureAlgorithm,
     }
     const public_key = try rsaPublicKey(issuer);
     switch (public_key.modulus.len) {
@@ -391,6 +473,33 @@ fn verifyRsaPss(
         },
         else => return error.UnsupportedSignatureAlgorithm,
     }
+}
+
+pub fn pssConstraintsForCertificate(
+    certificate: Certificate.Parsed,
+) Error!PssKeyConstraints {
+    if (certificate.pub_key_algo != .rsassa_pss) {
+        return error.UnsupportedSignatureAlgorithm;
+    }
+    const bytes = certificate.certificate.buffer;
+    const subject_end = certificate.subject_slice.end;
+    const public_key_info = Certificate.der.Element.parse(
+        bytes,
+        subject_end,
+    ) catch return error.InvalidAlgorithmIdentifier;
+    if (public_key_info.identifier.tag != .sequence) {
+        return error.InvalidAlgorithmIdentifier;
+    }
+    const algorithm = Certificate.der.Element.parse(
+        bytes,
+        public_key_info.slice.start,
+    ) catch return error.InvalidAlgorithmIdentifier;
+    if (algorithm.identifier.tag != .sequence) {
+        return error.InvalidAlgorithmIdentifier;
+    }
+    return parsePssPublicKeyAlgorithmIdentifier(
+        bytes[algorithm.slice.start..algorithm.slice.end],
+    );
 }
 
 fn rsaPublicKey(
@@ -495,6 +604,13 @@ test "RSA-PSS AlgorithmIdentifier requires a matching digest-length MGF1 profile
         Algorithm.rsa_pss_sha256,
         try parseAlgorithmIdentifier(&sha256_pss),
     );
+    const restricted = try parsePssPublicKeyAlgorithmIdentifier(&sha256_pss);
+    try std.testing.expect(restricted.permits(.rsa_pss_sha256));
+    try std.testing.expect(!restricted.permits(.rsa_pss_sha384));
+    const pss_oid_only = sha256_pss[0..11];
+    const unrestricted = try parsePssPublicKeyAlgorithmIdentifier(pss_oid_only);
+    try std.testing.expect(unrestricted.permits(.rsa_pss_sha256));
+    try std.testing.expect(unrestricted.permits(.rsa_pss_sha512));
     var wrong_salt = sha256_pss;
     wrong_salt[wrong_salt.len - 1] = 31;
     try std.testing.expectError(
@@ -506,5 +622,11 @@ test "RSA-PSS AlgorithmIdentifier requires a matching digest-length MGF1 profile
     try std.testing.expectError(
         error.UnsupportedSignatureAlgorithm,
         parseAlgorithmIdentifier(&wrong_mgf),
+    );
+    var wrong_trailer = sha256_pss;
+    wrong_trailer[wrong_trailer.len - 5] = 0xa3;
+    try std.testing.expectError(
+        error.UnsupportedSignatureAlgorithm,
+        parsePssPublicKeyAlgorithmIdentifier(&wrong_trailer),
     );
 }

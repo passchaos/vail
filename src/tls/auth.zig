@@ -13,6 +13,7 @@ const std = @import("std");
 const rsa = @import("../crypto/rsa.zig");
 const sm2 = @import("../crypto/sm2.zig");
 const x509_certificate = @import("../x509/certificate.zig");
+const x509_signature = @import("../x509/signature.zig");
 const Certificate = std.crypto.Certificate;
 const Ed25519 = std.crypto.sign.Ed25519;
 const MlDsa44 = std.crypto.sign.mldsa.MLDSA44;
@@ -245,6 +246,10 @@ pub const Signer = union(enum) {
                 const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
                     certificate,
                     expected_key_algorithm,
+                    if (expected_key_algorithm == .rsassa_pss)
+                        try x509PssAlgorithmForScheme(signer.signature_scheme)
+                    else
+                        null,
                 );
                 const public_key = Certificate.rsa.PublicKey.parseDer(
                     public_key_der,
@@ -261,6 +266,7 @@ pub const Signer = union(enum) {
                 const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
                     certificate,
                     .rsaEncryption,
+                    null,
                 );
                 const public_key = Certificate.rsa.PublicKey.parseDer(
                     public_key_der,
@@ -1106,6 +1112,7 @@ pub fn verifySignedContent(
         signature_scheme_rsa_pss_rsae_sha256 => try verifyRsaPssContent(
             Sha256,
             .rsaEncryption,
+            .rsa_pss_sha256,
             certificate,
             parsed.signature,
             content,
@@ -1113,6 +1120,7 @@ pub fn verifySignedContent(
         signature_scheme_rsa_pss_rsae_sha384 => try verifyRsaPssContent(
             Sha384,
             .rsaEncryption,
+            .rsa_pss_sha384,
             certificate,
             parsed.signature,
             content,
@@ -1120,6 +1128,7 @@ pub fn verifySignedContent(
         signature_scheme_rsa_pss_rsae_sha512 => try verifyRsaPssContent(
             Sha512,
             .rsaEncryption,
+            .rsa_pss_sha512,
             certificate,
             parsed.signature,
             content,
@@ -1127,6 +1136,7 @@ pub fn verifySignedContent(
         signature_scheme_rsa_pss_pss_sha256 => try verifyRsaPssContent(
             Sha256,
             .rsassa_pss,
+            .rsa_pss_sha256,
             certificate,
             parsed.signature,
             content,
@@ -1134,6 +1144,7 @@ pub fn verifySignedContent(
         signature_scheme_rsa_pss_pss_sha384 => try verifyRsaPssContent(
             Sha384,
             .rsassa_pss,
+            .rsa_pss_sha384,
             certificate,
             parsed.signature,
             content,
@@ -1141,6 +1152,7 @@ pub fn verifySignedContent(
         signature_scheme_rsa_pss_pss_sha512 => try verifyRsaPssContent(
             Sha512,
             .rsassa_pss,
+            .rsa_pss_sha512,
             certificate,
             parsed.signature,
             content,
@@ -1240,6 +1252,7 @@ fn verifyRsaPkcs1Content(
     const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
         certificate,
         .rsaEncryption,
+        null,
     );
     const components = Certificate.rsa.PublicKey.parseDer(
         public_key_der,
@@ -1501,6 +1514,7 @@ pub fn verifyCertificateVerifyForRole(
         signature_scheme_rsa_pss_rsae_sha256 => try verifyRsaPss(
             Sha256,
             .rsaEncryption,
+            .rsa_pss_sha256,
             certificate,
             parsed.signature,
             transcript_hash,
@@ -1509,6 +1523,7 @@ pub fn verifyCertificateVerifyForRole(
         signature_scheme_rsa_pss_rsae_sha384 => try verifyRsaPss(
             Sha384,
             .rsaEncryption,
+            .rsa_pss_sha384,
             certificate,
             parsed.signature,
             transcript_hash,
@@ -1517,6 +1532,7 @@ pub fn verifyCertificateVerifyForRole(
         signature_scheme_rsa_pss_rsae_sha512 => try verifyRsaPss(
             Sha512,
             .rsaEncryption,
+            .rsa_pss_sha512,
             certificate,
             parsed.signature,
             transcript_hash,
@@ -1525,6 +1541,7 @@ pub fn verifyCertificateVerifyForRole(
         signature_scheme_rsa_pss_pss_sha256 => try verifyRsaPss(
             Sha256,
             .rsassa_pss,
+            .rsa_pss_sha256,
             certificate,
             parsed.signature,
             transcript_hash,
@@ -1533,6 +1550,7 @@ pub fn verifyCertificateVerifyForRole(
         signature_scheme_rsa_pss_pss_sha384 => try verifyRsaPss(
             Sha384,
             .rsassa_pss,
+            .rsa_pss_sha384,
             certificate,
             parsed.signature,
             transcript_hash,
@@ -1541,6 +1559,7 @@ pub fn verifyCertificateVerifyForRole(
         signature_scheme_rsa_pss_pss_sha512 => try verifyRsaPss(
             Sha512,
             .rsassa_pss,
+            .rsa_pss_sha512,
             certificate,
             parsed.signature,
             transcript_hash,
@@ -1594,6 +1613,7 @@ fn verifySm2(
 fn verifyRsaPss(
     comptime Hash: type,
     comptime expected_key_algorithm: Certificate.AlgorithmCategory,
+    comptime pss_algorithm: x509_signature.Algorithm,
     certificate: []const u8,
     signature_bytes: []const u8,
     transcript_hash: []const u8,
@@ -1602,6 +1622,7 @@ fn verifyRsaPss(
     const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
         certificate,
         expected_key_algorithm,
+        pss_algorithm,
     );
     const components = Certificate.rsa.PublicKey.parseDer(
         public_key_der,
@@ -1642,6 +1663,7 @@ fn verifyRsaPss(
 fn verifyRsaPssContent(
     comptime Hash: type,
     comptime expected_key_algorithm: Certificate.AlgorithmCategory,
+    comptime pss_algorithm: x509_signature.Algorithm,
     certificate: []const u8,
     signature_bytes: []const u8,
     content: []const u8,
@@ -1649,6 +1671,7 @@ fn verifyRsaPssContent(
     const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
         certificate,
         expected_key_algorithm,
+        pss_algorithm,
     );
     const components = Certificate.rsa.PublicKey.parseDer(
         public_key_der,
@@ -1968,6 +1991,7 @@ const RawSpkiKind = enum {
 const RawSpki = struct {
     kind: RawSpkiKind,
     public_key: []const u8,
+    pss_constraints: ?x509_signature.PssKeyConstraints = null,
 };
 
 fn parseRawSpki(bytes: []const u8) Error!?RawSpki {
@@ -2009,6 +2033,16 @@ fn parseRawSpki(bytes: []const u8) Error!?RawSpki {
         if (oidEquals(bytes, parameters, &oid_sm2)) break :blk .sm2;
         return error.UnsupportedCertificateKey;
     } else return null;
+    const pss_constraints = if (kind == .rsa_pss)
+        x509_signature.parsePssPublicKeyAlgorithmIdentifier(
+            bytes[algorithm.content_start..algorithm.end],
+        ) catch |err| switch (err) {
+            error.InvalidAlgorithmIdentifier => return error.InvalidCertificate,
+            error.UnsupportedSignatureAlgorithm => return error.UnsupportedCertificateKey,
+            else => return error.InvalidCertificate,
+        }
+    else
+        null;
     while (pos < algorithm.end) {
         const parameter = try DerElement.parse(bytes, pos);
         pos = parameter.end;
@@ -2028,6 +2062,7 @@ fn parseRawSpki(bytes: []const u8) Error!?RawSpki {
     return .{
         .kind = kind,
         .public_key = bytes[key_bits.content_start + 1 .. key_bits.end],
+        .pss_constraints = pss_constraints,
     };
 }
 
@@ -2035,7 +2070,25 @@ fn rsaCertificatePublicKey(certificate: []const u8) Error![]const u8 {
     return rsaCertificatePublicKeyForAlgorithm(
         certificate,
         .rsaEncryption,
+        null,
     );
+}
+
+fn x509PssAlgorithmForScheme(
+    scheme: u16,
+) Error!x509_signature.Algorithm {
+    return switch (scheme) {
+        signature_scheme_rsa_pss_rsae_sha256,
+        signature_scheme_rsa_pss_pss_sha256,
+        => .rsa_pss_sha256,
+        signature_scheme_rsa_pss_rsae_sha384,
+        signature_scheme_rsa_pss_pss_sha384,
+        => .rsa_pss_sha384,
+        signature_scheme_rsa_pss_rsae_sha512,
+        signature_scheme_rsa_pss_pss_sha512,
+        => .rsa_pss_sha512,
+        else => error.UnsupportedSignatureScheme,
+    };
 }
 
 fn sm3DigestLen() usize {
@@ -2045,6 +2098,7 @@ fn sm3DigestLen() usize {
 fn rsaCertificatePublicKeyForAlgorithm(
     certificate: []const u8,
     expected: Certificate.AlgorithmCategory,
+    pss_algorithm: ?x509_signature.Algorithm,
 ) Error![]const u8 {
     if (try parseRawSpki(certificate)) |spki| {
         const matches = switch (expected) {
@@ -2053,6 +2107,13 @@ fn rsaCertificatePublicKeyForAlgorithm(
             else => false,
         };
         if (!matches) return error.UnsupportedCertificateKey;
+        if (expected == .rsassa_pss and
+            !spki.pss_constraints.?.permits(
+                pss_algorithm orelse return error.UnsupportedCertificateKey,
+            ))
+        {
+            return error.UnsupportedCertificateKey;
+        }
         _ = Certificate.rsa.PublicKey.parseDer(spki.public_key) catch
             return error.InvalidCertificate;
         return spki.public_key;
@@ -2060,6 +2121,17 @@ fn rsaCertificatePublicKeyForAlgorithm(
     const parsed = try parseX509(certificate);
     if (std.meta.activeTag(parsed.pub_key_algo) != expected) {
         return error.UnsupportedCertificateKey;
+    }
+    if (expected == .rsassa_pss) {
+        const constraints = x509_signature.pssConstraintsForCertificate(
+            parsed,
+        ) catch |err| switch (err) {
+            error.InvalidAlgorithmIdentifier => return error.InvalidCertificate,
+            else => return error.UnsupportedCertificateKey,
+        };
+        if (!constraints.permits(
+            pss_algorithm orelse return error.UnsupportedCertificateKey,
+        )) return error.UnsupportedCertificateKey;
     }
     const public_key = parsed.pubKey();
     // Parse now so malformed or non-canonical DER cannot be accepted merely
@@ -2386,6 +2458,94 @@ test "RFC 7250 RSA SubjectPublicKeyInfo signs and verifies" {
             .verifyRawPublicKey("localhost", &.{&wrong}),
     );
     _ = allocator;
+}
+
+test "RFC 4055 constrained RSA-PSS SubjectPublicKeyInfo enforces its profile" {
+    const allocator = std.testing.allocator;
+    const spki = @embedFile(
+        "../x509/testdata/rsa-pss-constrained.spki.der",
+    );
+    const signature_bytes = @embedFile(
+        "../x509/testdata/rsa-pss-constrained-sha384.sig",
+    );
+    const message = "vail constrained RSA-PSS verification vector";
+    try verifySignedContent(
+        spki,
+        .{
+            .scheme = signature_scheme_rsa_pss_pss_sha384,
+            .signature = signature_bytes,
+        },
+        message,
+    );
+    try std.testing.expectError(
+        error.UnsupportedCertificateKey,
+        verifySignedContent(
+            spki,
+            .{
+                .scheme = signature_scheme_rsa_pss_pss_sha256,
+                .signature = signature_bytes,
+            },
+            message,
+        ),
+    );
+    try std.testing.expectError(
+        error.UnsupportedCertificateKey,
+        verifySignedContent(
+            spki,
+            .{
+                .scheme = signature_scheme_rsa_pss_rsae_sha384,
+                .signature = signature_bytes,
+            },
+            message,
+        ),
+    );
+
+    const excessive_salt = try allocator.dupe(u8, spki);
+    defer allocator.free(excessive_salt);
+    const encoded_salt = [_]u8{ 0xa2, 0x03, 0x02, 0x01, 0x20 };
+    const salt_at = std.mem.indexOf(u8, excessive_salt, &encoded_salt) orelse
+        return error.TestUnexpectedResult;
+    excessive_salt[salt_at + encoded_salt.len - 1] = 64;
+    try std.testing.expectError(
+        error.UnsupportedCertificateKey,
+        verifySignedContent(
+            excessive_salt,
+            .{
+                .scheme = signature_scheme_rsa_pss_pss_sha384,
+                .signature = signature_bytes,
+            },
+            message,
+        ),
+    );
+
+    const certificate = @embedFile(
+        "../x509/testdata/rsa-pss-constrained-leaf.der",
+    );
+    const private_key_der = @embedFile(
+        "../crypto/testdata/rsa-pss-constrained-private.pkcs8.der",
+    );
+    const private_key = try rsa.PrivateKey.fromDer(private_key_der);
+    var prepared_key = try private_key.prepare();
+    defer prepared_key.deinit();
+    try (ServerIdentity{
+        .certificate_chain = &.{certificate},
+        .signer = .{ .rsa_pss = .{
+            .prepared_key = &prepared_key,
+            .signature_scheme = signature_scheme_rsa_pss_pss_sha384,
+            .io = std.testing.io,
+        } },
+    }).validate();
+    try std.testing.expectError(
+        error.UnsupportedCertificateKey,
+        (ServerIdentity{
+            .certificate_chain = &.{certificate},
+            .signer = .{ .rsa_pss = .{
+                .prepared_key = &prepared_key,
+                .signature_scheme = signature_scheme_rsa_pss_pss_sha256,
+                .io = std.testing.io,
+            } },
+        }).validate(),
+    );
 }
 
 test "TLS 1.2 RSA PKCS1 v1.5 signer supports SHA-256 SHA-384 and SHA-512" {

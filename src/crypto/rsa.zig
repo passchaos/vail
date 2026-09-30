@@ -1,11 +1,13 @@
 //! Allocation-free RSA private-key operations for TLS signatures.
 //!
-//! PKCS#1 and unencrypted PKCS#8 DER keys are parsed as borrowed slices. RSA
+//! PKCS#1 and unencrypted PKCS#8 DER keys are parsed as borrowed slices,
+//! including RFC 4055 constrained id-RSASSA-PSS keys. RSA
 //! exponentiation uses `std.crypto.ff`'s constant-time secret-exponent path and
 //! PKCS#1 CRT parameters. Prepared keys cache Montgomery moduli so handshake
 //! signing performs no heap allocation.
 
 const std = @import("std");
+const rsa_pss = @import("../x509/signature.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Sha384 = std.crypto.hash.sha2.Sha384;
@@ -18,6 +20,9 @@ const PrimeFieldElement = PrimeModulus.Fe;
 const oid_rsa_encryption = [_]u8{
     0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
 };
+const oid_rsassa_pss = [_]u8{
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a,
+};
 
 pub const Error = error{
     InvalidPrivateKey,
@@ -25,6 +30,7 @@ pub const Error = error{
     InvalidSaltLength,
     SignatureBufferTooSmall,
     MessageTooLong,
+    KeyAlgorithmMismatch,
 };
 
 pub const PrivateKey = struct {
@@ -37,6 +43,9 @@ pub const PrivateKey = struct {
     exponent1: []const u8,
     exponent2: []const u8,
     coefficient: []const u8,
+    /// Non-null for PKCS#8 id-RSASSA-PSS keys. This also marks the key as
+    /// PSS-only even when the AlgorithmIdentifier omits optional constraints.
+    pss_constraints: ?rsa_pss.PssKeyConstraints = null,
 
     pub fn fromDer(der: []const u8) Error!PrivateKey {
         var outer = Reader{ .bytes = der };
@@ -311,20 +320,37 @@ fn parsePkcs8Fields(
     var algorithm_fields = Reader{ .bytes = algorithm.value };
     const oid = algorithm_fields.require(0x06) catch
         return error.InvalidPrivateKey;
-    if (!std.mem.eql(u8, oid.value, &oid_rsa_encryption)) {
+    const is_rsa_encryption = std.mem.eql(
+        u8,
+        oid.value,
+        &oid_rsa_encryption,
+    );
+    const is_rsa_pss = std.mem.eql(u8, oid.value, &oid_rsassa_pss);
+    if (!is_rsa_encryption and !is_rsa_pss) {
         return error.InvalidPrivateKey;
     }
-    if (algorithm_fields.next() catch return error.InvalidPrivateKey) |params| {
-        if (params.tag != 0x05 or params.value.len != 0 or
-            !algorithm_fields.done())
+    const pss_constraints: ?rsa_pss.PssKeyConstraints = if (is_rsa_pss)
+        rsa_pss.parsePssPublicKeyAlgorithmIdentifier(
+            algorithm.value,
+        ) catch return error.InvalidPrivateKey
+    else blk: {
+        if (algorithm_fields.next() catch
+            return error.InvalidPrivateKey) |params|
         {
-            return error.InvalidPrivateKey;
+            if (params.tag != 0x05 or params.value.len != 0 or
+                !algorithm_fields.done())
+            {
+                return error.InvalidPrivateKey;
+            }
         }
-    }
+        break :blk null;
+    };
     const private_key = fields.require(0x04) catch
         return error.InvalidPrivateKey;
     if (!fields.done()) return error.InvalidPrivateKey;
-    return PrivateKey.fromDer(private_key.value);
+    var parsed = try PrivateKey.fromDer(private_key.value);
+    parsed.pss_constraints = pss_constraints;
+    return parsed;
 }
 
 fn validateComponents(
@@ -386,6 +412,20 @@ fn signPss(
     output: []u8,
 ) Error!usize {
     if (salt.len != Hash.digest_length) return error.InvalidSaltLength;
+    if (private_key.key.pss_constraints) |constraints| {
+        @branchHint(.unlikely);
+        const algorithm: rsa_pss.Algorithm = if (Hash == Sha256)
+            .rsa_pss_sha256
+        else if (Hash == Sha384)
+            .rsa_pss_sha384
+        else if (Hash == Sha512)
+            .rsa_pss_sha512
+        else
+            return error.KeyAlgorithmMismatch;
+        if (!constraints.permits(algorithm)) {
+            return error.KeyAlgorithmMismatch;
+        }
+    }
     const modulus_len = private_key.key.modulus.len;
     if (output.len < modulus_len) return error.SignatureBufferTooSmall;
     const modulus = private_key.modulus;
@@ -460,6 +500,10 @@ fn signPkcs1v15(
     message: []const u8,
     output: []u8,
 ) Error!usize {
+    if (private_key.key.pss_constraints != null) {
+        @branchHint(.unlikely);
+        return error.KeyAlgorithmMismatch;
+    }
     const modulus_len = private_key.key.modulus.len;
     if (output.len < modulus_len) return error.SignatureBufferTooSmall;
     const digest_info_prefix: []const u8 = &switch (Hash) {
@@ -817,6 +861,48 @@ test "PKCS1 and PKCS8 RSA keys produce verifiable PSS signatures" {
     try std.testing.expectError(
         error.InvalidSaltLength,
         key1.signPssSha256(message, &.{}, &unused_signature),
+    );
+}
+
+test "constrained RSA-PSS PKCS8 keys preserve signing restrictions" {
+    const encoded = @embedFile(
+        "testdata/rsa-pss-constrained-private.pkcs8.der",
+    );
+    const key = try PrivateKey.fromDer(encoded);
+    try std.testing.expect(key.pss_constraints != null);
+    var prepared = try key.prepare();
+    defer prepared.deinit();
+    const message = "constrained RSA-PSS private key";
+    var signature: [512]u8 = undefined;
+    const salt = [_]u8{0x84} ** Sha384.digest_length;
+    const signature_len = try prepared.signPssSha384(
+        message,
+        &salt,
+        &signature,
+    );
+    const public_key = try std.crypto.Certificate.rsa.PublicKey.fromBytes(
+        key.public_exponent,
+        key.modulus,
+    );
+    try std.crypto.Certificate.rsa.PSSSignature.verify(
+        256,
+        signature[0..256].*,
+        message,
+        public_key,
+        Sha384,
+    );
+    try std.testing.expectEqual(@as(usize, 256), signature_len);
+    try std.testing.expectError(
+        error.KeyAlgorithmMismatch,
+        prepared.signPssSha256(
+            message,
+            &([_]u8{0x25} ** Sha256.digest_length),
+            &signature,
+        ),
+    );
+    try std.testing.expectError(
+        error.KeyAlgorithmMismatch,
+        prepared.signPkcs1v15Sha384(message, &signature),
     );
 }
 

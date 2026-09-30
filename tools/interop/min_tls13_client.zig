@@ -21,7 +21,11 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "ticket-request")
     else
         false;
-    const use_pss_certificate = if (mode) |argument|
+    const use_constrained_pss = if (mode) |argument|
+        std.mem.eql(u8, argument, "constrained-pss")
+    else
+        false;
+    const use_pss_certificate = use_constrained_pss or if (mode) |argument|
         std.mem.eql(u8, argument, "pss-certificate")
     else
         false;
@@ -126,6 +130,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (use_pss_certificate) {
         std.debug.print("RSA-PSS certificate path verified\n", .{});
+    }
+    if (use_constrained_pss) {
+        std.debug.print("constrained RSA-PSS key verified\n", .{});
     }
 
     var request_record: [256]u8 = undefined;

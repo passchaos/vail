@@ -47,10 +47,11 @@ The current foundation provides:
   implementations, plus opt-in FIPS 204 ML-DSA-44/65/87 for TLS 1.3 Raw
   Public Keys, RSA-PSS/RSAE, TLS 1.2 RSA PKCS#1 v1.5 SHA-256/384/512
   signatures, and DER RSAPublicKey pin verification. A built-in pure-Zig RSA
-  signer accepts
-  strict PKCS#1 or unencrypted PKCS#8 keys, uses fresh per-signature PSS salt,
-  and performs CRT private operations through Zig std's constant-time finite-
-  field implementation. TLS P-256 verification uses the curve's public
+  signer accepts strict PKCS#1 or unencrypted PKCS#8 keys, including RFC 4055
+  constrained `id-RSASSA-PSS` keys, retains their hash/MGF/minimum-salt
+  restrictions, prohibits PKCS#1 v1.5 use of PSS-only keys, uses fresh
+  per-signature PSS salt, and performs CRT private operations through Zig
+  std's constant-time finite-field implementation. TLS P-256 verification uses the curve's public
   double-scalar primitive for the ECDSA verification equation, with
   deterministic equivalence and malformed-scalar tests against Zig's generic
   verifier;
@@ -75,7 +76,9 @@ The current foundation provides:
   issuers and cross-signs, with hostname, validity, custom-bundle, and
   system-CA verification. SHA-2 RSASSA-PSS-signed leaves and intermediate CAs
   use a strict pure-Zig compatibility parser when Zig std does not recognize
-  their signature AlgorithmIdentifier; explicit depth/candidate/certificate
+  their signature AlgorithmIdentifier. RFC 4055 PSS SubjectPublicKeyInfo
+  restrictions are enforced for certificate, CRL, OCSP, and TLS
+  CertificateVerify signatures; explicit depth/candidate/certificate
   budgets prevent attacker-controlled path explosion, DNS and IPv4/IPv6 Name
   Constraints intersect across the chosen server path, and literal IP server
   identities match only exact iPAddress SAN values rather than falling back to

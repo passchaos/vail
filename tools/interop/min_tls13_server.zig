@@ -67,6 +67,10 @@ pub fn main(init: std.process.Init) !void {
             std.mem.eql(u8, argument, "alps-new")
     else
         false;
+    const use_constrained_pss = if (mode) |argument|
+        std.mem.eql(u8, argument, "constrained-pss")
+    else
+        false;
     if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
@@ -88,14 +92,26 @@ pub fn main(init: std.process.Init) !void {
             .secp256r1 = [_]u8{0} **
                 (vail.tls.key_exchange.p256.secret_len - 1) ++ .{1},
         };
+    const selected_certificate: []const u8 = if (use_constrained_pss)
+        vail.x509.testing.rsa_pss_constrained_leaf
+    else
+        &rsa_cert_der;
+    const selected_private_key: []const u8 = if (use_constrained_pss)
+        vail.x509.testing.rsa_pss_constrained_private_key
+    else
+        &rsa_private_key_der;
     const private_key = try vail.crypto.rsa.PrivateKey.fromDer(
-        &rsa_private_key_der,
+        selected_private_key,
     );
     var prepared_private_key = try private_key.prepare();
     defer prepared_private_key.deinit();
     const signer = vail.tls.auth.Signer{
         .rsa_pss = .{
             .prepared_key = &prepared_private_key,
+            .signature_scheme = if (use_constrained_pss)
+                vail.tls.auth.signature_scheme_rsa_pss_pss_sha384
+            else
+                vail.tls.auth.signature_scheme_rsa_pss_rsae_sha256,
             .io = init.io,
         },
     };
@@ -104,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
     try vail.tls.auth.writeCertificate(
         &certificate_message,
         std.heap.smp_allocator,
-        &.{&rsa_cert_der},
+        &.{selected_certificate},
     );
     var prepared_zlib_certificate =
         try vail.tls.certificate_compression.Prepared.initZlib(
@@ -171,7 +187,7 @@ pub fn main(init: std.process.Init) !void {
         .entries = &.{.{
             .server_name_pattern = "localhost",
             .identity = .{
-                .certificate_chain = &.{&rsa_cert_der},
+                .certificate_chain = &.{selected_certificate},
                 .signer = signer,
                 .certificate_authorities = &.{&localhost_ca_name},
                 .compressed_certificates = &zlib_certificates,
@@ -206,7 +222,7 @@ pub fn main(init: std.process.Init) !void {
         },
         .server_random = [_]u8{0x73} ** 32,
         .key_material = &key_material,
-        .certificate_chain = &.{&rsa_cert_der},
+        .certificate_chain = &.{selected_certificate},
         .signer = signer,
         .identity_resolver = if (use_ca_hints)
             ca_identity_set.resolver()
@@ -263,6 +279,9 @@ pub fn main(init: std.process.Init) !void {
     };
     defer established.deinit();
     std.debug.print("client finished verified\n", .{});
+    if (use_constrained_pss) {
+        std.debug.print("constrained RSA-PSS server verified\n", .{});
+    }
     if (use_ticket_request) {
         std.debug.print(
             "ticket request count={d}\n",

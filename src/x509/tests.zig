@@ -313,6 +313,51 @@ test "bundle verifier accepts RSA-PSS signed leaves and intermediates" {
     );
 }
 
+test "bundle verifier enforces constrained RSA-PSS issuer parameters" {
+    const root = @embedFile("testdata/rsa-pss-crl-ca.der");
+    const constrained_leaf = @embedFile(
+        "testdata/rsa-pss-constrained-leaf.der",
+    );
+    const constrained_intermediate = @embedFile(
+        "testdata/rsa-pss-constrained-intermediate.der",
+    );
+    const child = @embedFile("testdata/rsa-pss-constrained-child.der");
+    const now = 1_800_000_000;
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(std.testing.allocator);
+    try bundle.bytes.appendSlice(std.testing.allocator, root);
+    try bundle.parseCert(std.testing.allocator, 0, now);
+    const verifier = trust.BundleVerifier{
+        .bundle = &bundle,
+        .now_seconds = now,
+    };
+    try verifier.verify(.{
+        .server_name = "localhost",
+        .chain = &.{constrained_leaf},
+    });
+    try verifier.verify(.{
+        .server_name = "localhost",
+        .chain = &.{ child, constrained_intermediate },
+    });
+
+    const excessive_salt = try std.testing.allocator.dupe(
+        u8,
+        constrained_intermediate,
+    );
+    defer std.testing.allocator.free(excessive_salt);
+    const encoded_salt = [_]u8{ 0xa2, 0x03, 0x02, 0x01, 0x20 };
+    const salt_at = std.mem.indexOf(u8, excessive_salt, &encoded_salt) orelse
+        return error.TestUnexpectedResult;
+    excessive_salt[salt_at + encoded_salt.len - 1] = 64;
+    try std.testing.expectError(
+        error.CertificateSignatureAlgorithmUnsupported,
+        verifier.verify(.{
+            .server_name = "localhost",
+            .chain = &.{ child, excessive_salt },
+        }),
+    );
+}
+
 test "client certificate bundle verifier validates trust without hostname" {
     const client_der = @embedFile("testdata/server.der");
     const ca_der = @embedFile("testdata/ca.der");

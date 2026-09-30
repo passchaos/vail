@@ -381,6 +381,28 @@ pub fn build(b: *std.Build) void {
     );
     interop_min_server_step.dependOn(&check_min_server.step);
 
+    const check_constrained_pss_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_constrained_pss_server.addArg(
+        "work=$(mktemp -d /tmp/vail-constrained-pss-server.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl x509 -inform DER -in src/x509/testdata/rsa-pss-crl-ca.der -out \"$work/root.pem\"; " ++
+            "$1 constrained-pss >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 4s openssl s_client -connect 127.0.0.1:24444 -tls1_3 -servername localhost -alpn h2 -sigalgs rsa_pss_pss_sha384 -CAfile \"$work/root.pem\" -ign_eof < /dev/null >\"$work/client.log\" 2>&1 || true; " ++
+            "wait $pid; " ++
+            "grep -q 'Verification: OK' \"$work/client.log\" && " ++
+            "grep -q 'Peer signature type: rsa_pss_pss_sha384' \"$work/client.log\" && " ++
+            "grep -q 'constrained RSA-PSS server verified' \"$work/server.log\"",
+    );
+    check_constrained_pss_server.addArg("sh");
+    check_constrained_pss_server.addArtifactArg(min_tls13_server);
+    const interop_constrained_pss_server_step = b.step(
+        "interop-openssl-constrained-pss-server",
+        "Exercise Vail's constrained RSA-PSS server with OpenSSL",
+    );
+    interop_constrained_pss_server_step.dependOn(
+        &check_constrained_pss_server.step,
+    );
+
     const build_rustls_min = b.addSystemCommand(&.{
         "cargo",
         "build",
@@ -797,6 +819,30 @@ pub fn build(b: *std.Build) void {
     );
     interop_vail_pss_certificate_client_step.dependOn(
         &check_vail_pss_certificate_client.step,
+    );
+
+    const check_vail_constrained_pss_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_constrained_pss_client.addArg(
+        "work=$(mktemp -d /tmp/vail-openssl-constrained-pss.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl x509 -inform DER -in src/x509/testdata/rsa-pss-crl-ca.der -out \"$work/root.pem\"; " ++
+            "openssl genpkey -algorithm RSA-PSS -pkeyopt rsa_keygen_bits:2048 -pkeyopt rsa_pss_keygen_md:sha384 -pkeyopt rsa_pss_keygen_mgf1_md:sha384 -pkeyopt rsa_pss_keygen_saltlen:32 -out \"$work/key.pem\" >/dev/null 2>&1; " ++
+            "openssl req -new -key \"$work/key.pem\" -subj /CN=localhost -addext subjectAltName=DNS:localhost -addext basicConstraints=critical,CA:false -addext keyUsage=critical,digitalSignature -addext extendedKeyUsage=serverAuth -out \"$work/request.pem\"; " ++
+            "openssl x509 -req -in \"$work/request.pem\" -CA \"$work/root.pem\" -CAkey src/crypto/testdata/rsa_signing_key.pem -set_serial 20481 -not_before 20260101000000Z -not_after 20360101000000Z -copy_extensions copy -sha256 -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl s_server -accept 127.0.0.1:24445 -tls1_3 -groups P-256 -cert \"$work/cert.pem\" -key \"$work/key.pem\" -alpn h2 -www -naccept 1 >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 4s $1 constrained-pss >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'constrained RSA-PSS key verified' \"$work/client.log\" && " ++
+            "grep -q 'server application data verified' \"$work/client.log\"",
+    );
+    check_vail_constrained_pss_client.addArg("sh");
+    check_vail_constrained_pss_client.addArtifactArg(min_tls13_client);
+    const interop_vail_constrained_pss_client_step = b.step(
+        "interop-openssl-constrained-pss-client",
+        "Verify an RFC 4055 constrained OpenSSL RSA-PSS key with Vail",
+    );
+    interop_vail_constrained_pss_client_step.dependOn(
+        &check_vail_constrained_pss_client.step,
     );
 
     const build_rustls_server = b.addSystemCommand(&.{
