@@ -16,6 +16,7 @@ pub const key_schedule = @import("key_schedule.zig");
 pub const key_update = @import("key_update.zig");
 pub const psk = @import("psk.zig");
 pub const record = @import("record.zig");
+pub const record_fragment = @import("record_fragment.zig");
 pub const secret = @import("secret.zig");
 pub const stream = @import("stream.zig");
 pub const traffic = @import("traffic.zig");
@@ -46,6 +47,7 @@ test {
     _ = ech;
     _ = key_update;
     _ = record;
+    _ = record_fragment;
     _ = stream;
     _ = traffic;
     _ = versioned_server_connection;

@@ -186,6 +186,25 @@ pub const Established = struct {
         return self.write.seal(23, plaintext, output);
     }
 
+    /// Seal one non-empty application-data record with an explicit
+    /// plaintext limit and return the consumed/written progress.
+    pub fn sealApplicationDataFragment(
+        self: *Established,
+        plaintext: []const u8,
+        max_fragment_plaintext: usize,
+        output: []u8,
+    ) Error!tls12.SealFragmentResult {
+        if (self.failed or self.local_closed or self.peer_closed) {
+            return error.ConnectionFailed;
+        }
+        return self.write.sealFragment(
+            23,
+            plaintext,
+            max_fragment_plaintext,
+            output,
+        );
+    }
+
     pub fn sealCloseNotify(
         self: *Established,
         output: []u8,

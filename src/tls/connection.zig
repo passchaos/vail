@@ -9,8 +9,11 @@ const alert = @import("alert.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const key_update = @import("key_update.zig");
 const record = @import("record.zig");
+const record_fragment = @import("record_fragment.zig");
 const secret = @import("secret.zig");
 const stream = @import("stream.zig");
+
+pub const SealFragmentResult = record_fragment.SealResult;
 
 pub const Error = stream.ProtectedError || key_update.Error || error{
     LocalClosed,
@@ -106,6 +109,24 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
             return self.traffic.seal(
                 record.content_type_application_data,
                 plaintext,
+                output,
+            );
+        }
+
+        /// Seal one non-empty application-data record with an explicit
+        /// plaintext limit. Repeated calls with the unconsumed suffix provide
+        /// allocation-free fragmentation without hidden buffered state.
+        pub fn sealApplicationDataFragment(
+            self: *Self,
+            plaintext: []const u8,
+            max_fragment_plaintext: usize,
+            output: []u8,
+        ) Error!SealFragmentResult {
+            try self.requireWritable();
+            return self.traffic.sealFragment(
+                record.content_type_application_data,
+                plaintext,
+                max_fragment_plaintext,
                 output,
             );
         }
@@ -284,6 +305,10 @@ test "application connection handles fragmented data and bidirectional close" {
         error.PeerClosed,
         server.sealApplicationData("late", &wire),
     );
+    try std.testing.expectError(
+        error.PeerClosed,
+        server.sealApplicationDataFragment("late", 2, &wire),
+    );
 
     const response_len = try server.sealCloseNotify(&wire);
     const response = try client.receive(wire[0..response_len]);
@@ -293,6 +318,88 @@ test "application connection handles fragmented data and bidirectional close" {
     try std.testing.expectError(
         error.LocalClosed,
         client.sealApplicationData("closed", &wire),
+    );
+    try std.testing.expectError(
+        error.LocalClosed,
+        client.sealApplicationDataFragment("closed", 2, &wire),
+    );
+}
+
+test "application connection seals bounded fragments with explicit progress" {
+    const std = @import("std");
+    const client_secret = secret.Secret.fromSha256([_]u8{0x81} ** 32);
+    const server_secret = secret.Secret.fromSha256([_]u8{0x91} ** 32);
+    var client = try ApplicationConnection(256).init(
+        .aes_128_gcm_sha256,
+        server_secret,
+        client_secret,
+    );
+    defer client.deinit();
+    var server = try ApplicationConnection(256).init(
+        .aes_128_gcm_sha256,
+        client_secret,
+        server_secret,
+    );
+    defer server.deinit();
+
+    var wire: [record.max_record_len]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPlaintextLength,
+        client.sealApplicationDataFragment("", 7, &wire),
+    );
+    try std.testing.expectError(
+        error.InvalidPlaintextLength,
+        client.sealApplicationDataFragment("payload", 0, &wire),
+    );
+    try std.testing.expectError(
+        error.InvalidPlaintextLength,
+        client.sealApplicationDataFragment(
+            "payload",
+            record.max_plaintext_len + 1,
+            &wire,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        client.traffic.write.sequenceNumber(),
+    );
+    try std.testing.expectError(
+        error.InvalidCiphertextLength,
+        client.sealApplicationDataFragment("payload", 7, wire[0..1]),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        client.traffic.write.sequenceNumber(),
+    );
+
+    const payload = "fragmented application data crosses several records";
+    var offset: usize = 0;
+    var record_count: u64 = 0;
+    while (offset < payload.len) {
+        const fragment = try client.sealApplicationDataFragment(
+            payload[offset..],
+            7,
+            &wire,
+        );
+        try std.testing.expect(fragment.plaintext_consumed > 0);
+        try std.testing.expect(fragment.plaintext_consumed <= 7);
+        const received = try server.receive(wire[0..fragment.output_written]);
+        try std.testing.expectEqual(fragment.output_written, received.consumed);
+        try std.testing.expectEqualStrings(
+            payload[offset..][0..fragment.plaintext_consumed],
+            received.event.?.application_data,
+        );
+        offset += fragment.plaintext_consumed;
+        record_count += 1;
+    }
+    try std.testing.expectEqual(payload.len, offset);
+    try std.testing.expectEqual(
+        @as(?u64, record_count),
+        client.traffic.write.sequenceNumber(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, record_count),
+        server.traffic.read.sequenceNumber(),
     );
 }
 
@@ -324,6 +431,10 @@ test "application connection processes requested KeyUpdate before data" {
     try std.testing.expectError(
         error.KeyUpdateResponseRequired,
         server.sealApplicationData("blocked", &wire),
+    );
+    try std.testing.expectError(
+        error.KeyUpdateResponseRequired,
+        server.sealApplicationDataFragment("blocked", 3, &wire),
     );
     try std.testing.expectError(
         error.KeyUpdateResponseRequired,

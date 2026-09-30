@@ -201,6 +201,25 @@ pub const Established = struct {
         return self.write.seal(23, plaintext, output);
     }
 
+    /// Seal one non-empty application-data record with an explicit
+    /// plaintext limit and return the consumed/written progress.
+    pub fn sealApplicationDataFragment(
+        self: *Established,
+        plaintext: []const u8,
+        max_fragment_plaintext: usize,
+        output: []u8,
+    ) Error!tls12.SealFragmentResult {
+        if (self.failed or self.local_closed or self.peer_closed) {
+            return error.ConnectionFailed;
+        }
+        return self.write.sealFragment(
+            23,
+            plaintext,
+            max_fragment_plaintext,
+            output,
+        );
+    }
+
     pub fn sealCloseNotify(
         self: *Established,
         output: []u8,
@@ -1638,6 +1657,28 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
     try std.testing.expectEqualStrings(
         "server payload",
         client_application.event.?.application_data,
+    );
+
+    const client_fragment = try established_client.?
+        .sealApplicationDataFragment("client fragmented", 6, &application_record);
+    try std.testing.expectEqual(@as(usize, 6), client_fragment.plaintext_consumed);
+    const server_fragment = try established_server.?.receive(
+        application_record[0..client_fragment.output_written],
+    );
+    try std.testing.expectEqualStrings(
+        "client",
+        server_fragment.event.?.application_data,
+    );
+
+    const response_fragment = try established_server.?
+        .sealApplicationDataFragment("server fragmented", 6, &application_record);
+    try std.testing.expectEqual(@as(usize, 6), response_fragment.plaintext_consumed);
+    const client_fragment_received = try established_client.?.receive(
+        application_record[0..response_fragment.output_written],
+    );
+    try std.testing.expectEqualStrings(
+        "server",
+        client_fragment_received.event.?.application_data,
     );
 
     var client_session = try established_client.?.createSession(

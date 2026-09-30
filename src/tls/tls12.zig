@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
+const record_fragment = @import("record_fragment.zig");
 const tls_secret = @import("secret.zig");
 
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
@@ -25,6 +26,7 @@ pub const master_secret_len: usize = 48;
 pub const finished_verify_data_len: usize = 12;
 pub const max_record_len: usize =
     header_len + explicit_nonce_len + max_plaintext_len + tag_len;
+pub const SealFragmentResult = record_fragment.SealResult;
 
 pub const Error = error{
     InvalidSecretLength,
@@ -677,6 +679,27 @@ pub const TrafficState = struct {
         return len;
     }
 
+    /// Seal exactly one non-empty record containing at most
+    /// `max_fragment_plaintext` bytes and report explicit caller progress.
+    pub fn sealFragment(
+        self: *TrafficState,
+        content_type: u8,
+        plaintext: []const u8,
+        max_fragment_plaintext: usize,
+        output: []u8,
+    ) Error!SealFragmentResult {
+        const fragment = try record_fragment.selectPlaintext(
+            plaintext,
+            max_fragment_plaintext,
+            max_plaintext_len,
+        );
+        const written = try self.seal(content_type, fragment, output);
+        return .{
+            .plaintext_consumed = fragment.len,
+            .output_written = written,
+        };
+    }
+
     pub fn open(
         self: *TrafficState,
         encoded: []const u8,
@@ -918,6 +941,71 @@ test "TLS 1.2 key blocks and AEAD records round trip" {
         );
         try std.testing.expectEqual(@as(?u64, 1), receiver.sequenceNumber());
     }
+}
+
+test "TLS 1.2 traffic state seals bounded fragments without losing sequence" {
+    const suite = Suite.ecdhe_rsa_aes_128_gcm_sha256;
+    var sender = TrafficState.init(try Keys.init(
+        suite,
+        &([_]u8{0xa1} ** 16),
+        &([_]u8{0xa2} ** 4),
+    ));
+    defer sender.deinit();
+    var receiver = TrafficState.init(try Keys.init(
+        suite,
+        &([_]u8{0xa1} ** 16),
+        &([_]u8{0xa2} ** 4),
+    ));
+    defer receiver.deinit();
+
+    var encoded: [max_record_len]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPlaintextLength,
+        sender.sealFragment(23, "", 5, &encoded),
+    );
+    try std.testing.expectError(
+        error.InvalidPlaintextLength,
+        sender.sealFragment(23, "payload", 0, &encoded),
+    );
+    try std.testing.expectError(
+        error.InvalidPlaintextLength,
+        sender.sealFragment(23, "payload", max_plaintext_len + 1, &encoded),
+    );
+    try std.testing.expectEqual(@as(?u64, 0), sender.sequenceNumber());
+    try std.testing.expectError(
+        error.InvalidCiphertextLength,
+        sender.sealFragment(23, "payload", 5, encoded[0..1]),
+    );
+    try std.testing.expectEqual(@as(?u64, 0), sender.sequenceNumber());
+
+    const payload = "TLS 1.2 fragmented application data";
+    var plaintext: [max_plaintext_len]u8 = undefined;
+    var offset: usize = 0;
+    var record_count: u64 = 0;
+    while (offset < payload.len) {
+        const fragment = try sender.sealFragment(
+            23,
+            payload[offset..],
+            5,
+            &encoded,
+        );
+        try std.testing.expect(fragment.plaintext_consumed > 0);
+        try std.testing.expect(fragment.plaintext_consumed <= 5);
+        const opened = try receiver.open(
+            encoded[0..fragment.output_written],
+            &plaintext,
+        );
+        try std.testing.expectEqual(@as(u8, 23), opened.content_type);
+        try std.testing.expectEqualStrings(
+            payload[offset..][0..fragment.plaintext_consumed],
+            plaintext[0..opened.len],
+        );
+        offset += fragment.plaintext_consumed;
+        record_count += 1;
+    }
+    try std.testing.expectEqual(payload.len, offset);
+    try std.testing.expectEqual(@as(?u64, record_count), sender.sequenceNumber());
+    try std.testing.expectEqual(@as(?u64, record_count), receiver.sequenceNumber());
 }
 
 test "TLS 1.2 master secret EMS Finished and key block match OpenSSL" {

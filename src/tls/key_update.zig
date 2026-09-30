@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const record = @import("record.zig");
+const record_fragment = @import("record_fragment.zig");
 const traffic = @import("traffic.zig");
 
 pub const handshake_type: u8 = 24;
@@ -111,6 +112,26 @@ pub const Duplex = struct {
             return error.KeyUpdateResponseRequired;
         }
         return self.write.seal(inner_type, plaintext, output);
+    }
+
+    pub fn sealFragment(
+        self: *Duplex,
+        inner_type: u8,
+        plaintext: []const u8,
+        max_fragment_plaintext: usize,
+        output: []u8,
+    ) Error!record_fragment.SealResult {
+        if (self.response_pending and
+            inner_type == record.content_type_application_data)
+        {
+            return error.KeyUpdateResponseRequired;
+        }
+        return self.write.sealFragment(
+            inner_type,
+            plaintext,
+            max_fragment_plaintext,
+            output,
+        );
     }
 
     pub fn sendKeyUpdate(

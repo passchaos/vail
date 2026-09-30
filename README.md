@@ -137,6 +137,10 @@ The current foundation provides:
   Retry integrity, traffic-secret, and key-update crypto helpers, including
   version-specific QUIC v1/v2 labels, nonce derivation, header protection, and
   suite confidentiality/integrity limits.
+- Established TLS 1.3 and TLS 1.2 connections expose allocation-free,
+  configurable application-record fragmentation with explicit plaintext
+  consumed/output written progress. Each call seals exactly one record, so
+  output failures remain retryable without hidden buffering or nonce reuse.
 - TLS 1.2 cryptographic foundations for ECDHE-ECDSA/ECDHE-RSA AES-GCM and
   ChaCha20-Poly1305 suites: SHA-256/SHA-384 PRFs, ordinary and RFC 7627
   extended master secrets, Finished values, key-block separation, explicit

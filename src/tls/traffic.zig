@@ -9,6 +9,7 @@ const std = @import("std");
 const cipher_suite = @import("cipher_suite.zig");
 const key_schedule = @import("key_schedule.zig");
 const record = @import("record.zig");
+const record_fragment = @import("record_fragment.zig");
 const secret = @import("secret.zig");
 
 pub const Error = record.Error || key_schedule.Error || error{
@@ -58,6 +59,27 @@ pub const State = struct {
         output: []u8,
     ) Error!usize {
         return self.sealPadded(inner_type, plaintext, 0, output);
+    }
+
+    /// Seal exactly one non-empty record containing at most
+    /// `max_fragment_plaintext` bytes and report explicit caller progress.
+    pub fn sealFragment(
+        self: *State,
+        inner_type: u8,
+        plaintext: []const u8,
+        max_fragment_plaintext: usize,
+        output: []u8,
+    ) Error!record_fragment.SealResult {
+        const fragment = try record_fragment.selectPlaintext(
+            plaintext,
+            max_fragment_plaintext,
+            record.max_plaintext_len,
+        );
+        const written = try self.seal(inner_type, fragment, output);
+        return .{
+            .plaintext_consumed = fragment.len,
+            .output_written = written,
+        };
     }
 
     pub inline fn sealPadded(
