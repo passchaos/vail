@@ -23,6 +23,7 @@ pub const ext_session_ticket: u16 = 0x0023;
 pub const ext_compress_certificate: u16 =
     certificate_compression.extension_type_compress_certificate;
 pub const ext_early_data: u16 = 0x002a;
+pub const ext_certificate_authorities: u16 = 0x002f;
 pub const ext_record_size_limit: u16 = record_size_limit.extension_type;
 pub const ext_quic_transport_parameters: u16 = 0x0039;
 pub const ext_renegotiation_info: u16 = 0xff01;
@@ -81,6 +82,7 @@ pub const WriteOptions = struct {
     request_ocsp: bool = false,
     offer_extended_master_secret: bool = false,
     record_size_limit: ?u16 = null,
+    certificate_authorities: []const []const u8 = &.{},
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_certificate_types: []const auth.CertificateType = &.{},
     client_certificate_types: []const auth.CertificateType = &.{},
@@ -117,6 +119,7 @@ pub const FlexibleWriteOptions = struct {
     request_ocsp: bool = false,
     offer_extended_master_secret: bool = false,
     record_size_limit: ?u16 = null,
+    certificate_authorities: []const []const u8 = &.{},
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_certificate_types: []const auth.CertificateType = &.{},
     client_certificate_types: []const auth.CertificateType = &.{},
@@ -150,6 +153,7 @@ pub fn write(
         .request_ocsp = options.request_ocsp,
         .offer_extended_master_secret = options.offer_extended_master_secret,
         .record_size_limit = options.record_size_limit,
+        .certificate_authorities = options.certificate_authorities,
         .certificate_compression_algorithms = options.certificate_compression_algorithms,
         .server_certificate_types = options.server_certificate_types,
         .client_certificate_types = options.client_certificate_types,
@@ -262,6 +266,34 @@ pub fn writeWithKeyShare(
             allocator,
             ext_record_size_limit,
             &payload,
+        );
+    }
+
+    if (options.certificate_authorities.len != 0) {
+        var authorities: std.ArrayList(u8) = .empty;
+        defer authorities.deinit(allocator);
+        try authorities.appendSlice(allocator, &.{ 0, 0 });
+        for (options.certificate_authorities) |name| {
+            if (name.len == 0 or name.len > std.math.maxInt(u16) or
+                authorities.items.len >
+                    std.math.maxInt(u16) - name.len - 2)
+            {
+                return error.InvalidClientHello;
+            }
+            try appendInt(&authorities, allocator, u16, name.len);
+            try authorities.appendSlice(allocator, name);
+        }
+        std.mem.writeInt(
+            u16,
+            authorities.items[0..2],
+            @intCast(authorities.items.len - 2),
+            .big,
+        );
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_certificate_authorities,
+            authorities.items,
         );
     }
 
@@ -500,6 +532,25 @@ pub fn writeWithKeyShare(
     try out.appendSlice(allocator, extensions.items);
 }
 
+pub const CertificateAuthorityIterator = struct {
+    bytes: []const u8,
+    pos: usize = 0,
+
+    pub fn next(self: *CertificateAuthorityIterator) ?[]const u8 {
+        if (self.pos == self.bytes.len) return null;
+        std.debug.assert(self.pos + 2 <= self.bytes.len);
+        const len = std.mem.readInt(
+            u16,
+            self.bytes[self.pos..][0..2],
+            .big,
+        );
+        self.pos += 2;
+        std.debug.assert(len != 0 and len <= self.bytes.len - self.pos);
+        defer self.pos += len;
+        return self.bytes[self.pos..][0..len];
+    }
+};
+
 pub const Parsed = struct {
     legacy_version: u16,
     random: *const [32]u8,
@@ -511,6 +562,7 @@ pub const Parsed = struct {
     offers_extended_master_secret: bool = false,
     offers_secure_renegotiation: bool = false,
     record_size_limit: ?u16 = null,
+    certificate_authorities: ?[]const u8 = null,
     certificate_compression_algorithms: []const u8 = &.{},
     server_certificate_types: []const u8 = &.{},
     client_certificate_types: []const u8 = &.{},
@@ -656,6 +708,23 @@ pub const Parsed = struct {
         );
     }
 
+    pub fn certificateAuthorityIterator(
+        self: Parsed,
+    ) CertificateAuthorityIterator {
+        return .{ .bytes = self.certificate_authorities orelse &.{} };
+    }
+
+    pub fn supportsCertificateAuthority(
+        self: Parsed,
+        target: []const u8,
+    ) bool {
+        var iterator = self.certificateAuthorityIterator();
+        while (iterator.next()) |name| {
+            if (std.mem.eql(u8, name, target)) return true;
+        }
+        return false;
+    }
+
     pub fn firstKeyShare(self: Parsed) Error!?KeyShare {
         var pos: usize = 0;
         if (self.key_shares.len == 0) return null;
@@ -732,6 +801,10 @@ pub fn parse(bytes: []const u8) Error!Parsed {
             ext_record_size_limit => {
                 parsed.record_size_limit = record_size_limit.parse(payload) catch
                     return error.InvalidClientHello;
+            },
+            ext_certificate_authorities => {
+                parsed.certificate_authorities =
+                    try parseCertificateAuthorities(payload);
             },
             ext_server_certificate_type => {
                 parsed.server_certificate_types =
@@ -832,6 +905,20 @@ fn parseCertificateCompressionAlgorithms(
         }
     }
     return algorithms;
+}
+
+fn parseCertificateAuthorities(payload: []const u8) Error![]const u8 {
+    var pos: usize = 0;
+    const authorities = try readU16Vector(payload, &pos);
+    if (pos != payload.len or authorities.len < 3) {
+        return error.InvalidClientHello;
+    }
+    var authority_pos: usize = 0;
+    while (authority_pos < authorities.len) {
+        const name = try readU16Vector(authorities, &authority_pos);
+        if (name.len == 0) return error.InvalidClientHello;
+    }
+    return authorities;
 }
 
 fn parseSupportedVersions(payload: []const u8) Error![]const u8 {
@@ -966,6 +1053,10 @@ pub fn validateSecondClientHello(
         first.offers_extended_master_secret !=
             second.offers_extended_master_secret or
         first.record_size_limit != second.record_size_limit or
+        !optionalBytesEql(
+            first.certificate_authorities,
+            second.certificate_authorities,
+        ) or
         first.offers_secure_renegotiation !=
             second.offers_secure_renegotiation or
         !std.mem.eql(
@@ -1107,6 +1198,21 @@ test "RFC 5077 session ticket request and offer round-trip" {
     try std.testing.expectEqualStrings("opaque-ticket", offer.session_ticket.?);
 }
 
+test "certificate authorities reject empty and truncated names" {
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        parseCertificateAuthorities(&.{ 0, 0 }),
+    );
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        parseCertificateAuthorities(&.{ 0, 2, 0, 0 }),
+    );
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        parseCertificateAuthorities(&.{ 0, 3, 0, 2, 0xaa }),
+    );
+}
+
 test "TLS 1.2 ClientHello omits the TLS 1.3 key_share extension" {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(std.testing.allocator);
@@ -1183,12 +1289,31 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
         },
         .request_ocsp = true,
         .record_size_limit = 4096,
+        .certificate_authorities = &.{
+            &.{ 0x30, 0x03, 0x31, 0x01, 0x41 },
+            &.{ 0x30, 0x03, 0x31, 0x01, 0x42 },
+        },
         .certificate_compression_algorithms = &.{.zlib},
     });
     const parsed = try parse(encoded.items);
     try std.testing.expect(parsed.offersTls13());
     try std.testing.expect(parsed.requests_ocsp);
     try std.testing.expectEqual(@as(?u16, 4096), parsed.record_size_limit);
+    var authorities = parsed.certificateAuthorityIterator();
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x30, 0x03, 0x31, 0x01, 0x41 },
+        authorities.next().?,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x30, 0x03, 0x31, 0x01, 0x42 },
+        authorities.next().?,
+    );
+    try std.testing.expect(authorities.next() == null);
+    try std.testing.expect(parsed.supportsCertificateAuthority(
+        &.{ 0x30, 0x03, 0x31, 0x01, 0x42 },
+    ));
     try std.testing.expect(parsed.supportsCertificateCompression(.zlib));
     try std.testing.expect(!parsed.supportsCertificateCompression(.brotli));
     try std.testing.expectEqualStrings(
@@ -1211,6 +1336,16 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
             .random = [_]u8{0x55} ** 32,
             .x25519_public_key = public_key,
             .record_size_limit = record_size_limit.min - 1,
+        }),
+    );
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        write(&encoded, allocator, .{
+            .random = [_]u8{0x56} ** 32,
+            .x25519_public_key = public_key,
+            .certificate_authorities = &.{&.{}},
         }),
     );
 }
