@@ -36,7 +36,9 @@ fn main() {
     let _exe = args.next();
     let cert_path = args.next().expect("certificate path");
     let key_path = args.next().expect("private-key path");
-    let zstd_enabled = args.next().as_deref() == Some("zstd");
+    let mode = args.next();
+    let zstd_enabled = mode.as_deref() == Some("zstd");
+    let ticket_request_enabled = mode.as_deref() == Some("ticket-request");
 
     let mut cert_reader = BufReader::new(File::open(cert_path).unwrap());
     let certificates = rustls_pemfile::certs(&mut cert_reader)
@@ -54,6 +56,9 @@ fn main() {
     config.alpn_protocols.push(b"h2".to_vec());
     if zstd_enabled {
         config.cert_compressors = vec![&ZSTD_COMPRESSOR];
+    }
+    if ticket_request_enabled {
+        config.max_tls13_tickets = 2;
     }
 
     let listener = TcpListener::bind("127.0.0.1:24445").unwrap();

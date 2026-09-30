@@ -48,6 +48,7 @@ pub const Error = std.mem.Allocator.Error || client_hello.Error ||
     InvalidClientAuthConfiguration,
     IdentityResolutionFailed,
     UnrecognizedName,
+    NoRequestedTicketsPending,
 };
 
 pub const Stage = enum {
@@ -72,6 +73,8 @@ pub const Config = struct {
     client_auth_policy: ?client_auth.ServerPolicy = null,
     /// RFC 8449 limit advertised when the client offers the extension.
     record_size_limit: ?u16 = null,
+    /// Maximum RFC 9149 ticket request count honored per connection.
+    max_requested_tickets: u8 = 0,
     retry_cookie: ?[]const u8 = null,
     resumption: ?ServerResumption = null,
     early_data: ?EarlyDataPolicy = null,
@@ -242,6 +245,7 @@ pub fn ServerConnection(
             client_certificate_type: auth.CertificateType,
             local_record_size_limit: ?u16,
             peer_record_size_limit: ?u16,
+            remaining_requested_tickets: u8,
             peer_certificate_chain: ?[][]u8 = null,
             ech_accepted: bool,
 
@@ -320,6 +324,30 @@ pub fn ServerConnection(
                     output,
                 );
             }
+
+            pub fn requestedTicketsRemaining(
+                self: *const Established,
+            ) u8 {
+                return self.remaining_requested_tickets;
+            }
+
+            pub fn sealRequestedNewSessionTicket(
+                self: *Established,
+                allocator: std.mem.Allocator,
+                options: TicketOptions,
+                output: []u8,
+            ) (Error || ticket.Error || ticket_keyring.Error)!usize {
+                if (self.remaining_requested_tickets == 0) {
+                    return error.NoRequestedTicketsPending;
+                }
+                const len = try self.sealNewSessionTicket(
+                    allocator,
+                    options,
+                    output,
+                );
+                self.remaining_requested_tickets -= 1;
+                return len;
+            }
         };
 
         pub const Event = union(enum) {
@@ -367,6 +395,7 @@ pub fn ServerConnection(
             client_certificate_compression: ?certificate_compression.Algorithm = null,
             local_record_size_limit: ?u16,
             peer_record_size_limit: ?u16,
+            requested_ticket_count: u8,
             transcript_after_client_finished: ?transcript.Digest = null,
 
             fn deinit(self: *PendingHandshake) void {
@@ -871,6 +900,7 @@ pub fn ServerConnection(
                     .transcript_prefix = transcript_prefix,
                     .client_auth = self.config.client_auth,
                     .record_size_limit = self.config.record_size_limit,
+                    .max_requested_tickets = self.config.max_requested_tickets,
                 },
             );
             errdefer {
@@ -910,6 +940,7 @@ pub fn ServerConnection(
                 .client_certificate_type = result.selection.client_certificate_type,
                 .local_record_size_limit = result.local_record_size_limit,
                 .peer_record_size_limit = result.peer_record_size_limit,
+                .requested_ticket_count = result.requested_ticket_count,
                 .client_records = client_records,
                 .early_records = early_records,
                 .early_data_accepted = early_limit != null,
@@ -1401,6 +1432,7 @@ pub fn ServerConnection(
                 .client_certificate_type = pending.client_certificate_type,
                 .local_record_size_limit = pending.local_record_size_limit,
                 .peer_record_size_limit = pending.peer_record_size_limit,
+                .remaining_requested_tickets = pending.requested_ticket_count,
                 .peer_certificate_chain = pending.authenticated_client_chain,
                 .ech_accepted = self.ech_accepted,
             };

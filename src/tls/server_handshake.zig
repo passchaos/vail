@@ -13,6 +13,7 @@ const client_hello = @import("client_hello.zig");
 const ech = @import("ech.zig");
 const key_exchange = @import("key_exchange.zig");
 const key_schedule = @import("key_schedule.zig");
+const psk_module = @import("psk.zig");
 const record = @import("record.zig");
 const record_size_limit = @import("record_size_limit.zig");
 const secret = @import("secret.zig");
@@ -49,6 +50,7 @@ pub const Result = struct {
     certificate_compression: ?certificate_compression.Algorithm,
     local_record_size_limit: ?u16,
     peer_record_size_limit: ?u16,
+    requested_ticket_count: u8,
 };
 
 pub const Options = struct {
@@ -72,6 +74,7 @@ pub const Options = struct {
     /// Emit CertificateRequest immediately after EncryptedExtensions.
     client_auth: ?ClientAuthOptions = null,
     record_size_limit: ?u16 = null,
+    max_requested_tickets: u8 = 0,
 };
 
 pub const ClientAuthOptions = struct {
@@ -104,6 +107,7 @@ pub const ManagedOptions = struct {
     transcript_prefix: ?transcript.State = null,
     client_auth: ?ClientAuthOptions = null,
     record_size_limit: ?u16 = null,
+    max_requested_tickets: u8 = 0,
 };
 
 /// Select the offered share, complete key exchange, and construct the server
@@ -156,6 +160,7 @@ pub fn writeServerHandshakeFlightManaged(
         .transcript_prefix = options.transcript_prefix,
         .client_auth = options.client_auth,
         .record_size_limit = options.record_size_limit,
+        .max_requested_tickets = options.max_requested_tickets,
     }, selection);
 }
 
@@ -260,6 +265,23 @@ fn writeServerHandshakeFlightSelected(
     defer encrypted_extensions.deinit(allocator);
     const local_record_size_limit = if (options.parsed_client_hello.record_size_limit != null) options.record_size_limit else null;
     const peer_fragment_limit = if (options.parsed_client_hello.record_size_limit) |limit| try record_size_limit.maxApplicationData(limit) else record.max_plaintext_len;
+    const can_resume = std.mem.indexOfScalar(
+        u8,
+        options.parsed_client_hello.psk_key_exchange_modes,
+        psk_module.psk_dhe_ke,
+    ) != null;
+    const requested_ticket_count: u8 = if (can_resume) if (options.parsed_client_hello.ticket_request) |request|
+        @min(
+            if (options.psk == null)
+                request.new_session_count
+            else
+                request.resumption_count,
+            options.max_requested_tickets,
+        )
+    else
+        0 else 0;
+    const ticket_request_hint: ?u8 = if (options.parsed_client_hello.ticket_request != null and
+        options.max_requested_tickets != 0) requested_ticket_count else null;
     try server_hello.writeEncryptedExtensions(&encrypted_extensions, allocator, .{
         .alpn_protocol = selection.alpn_protocol,
         .quic_transport_parameters = options.policy.quic_transport_parameters,
@@ -274,6 +296,7 @@ fn writeServerHandshakeFlightSelected(
             null,
         .ech_retry_configs = options.ech_retry_configs,
         .record_size_limit = local_record_size_limit,
+        .ticket_request_hint = ticket_request_hint,
     });
     try appendEncryptedHandshake(
         out,
@@ -395,6 +418,7 @@ fn writeServerHandshakeFlightSelected(
         .certificate_compression = selected_certificate_compression,
         .local_record_size_limit = local_record_size_limit,
         .peer_record_size_limit = options.parsed_client_hello.record_size_limit,
+        .requested_ticket_count = requested_ticket_count,
     };
 }
 

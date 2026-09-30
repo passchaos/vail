@@ -193,6 +193,16 @@ pub fn writeWithKeyShare(
             return error.InvalidClientHello;
         }
     }
+    var offers_tls13 = false;
+    for (options.supported_versions) |version| {
+        if (version == tls13) offers_tls13 = true;
+    }
+    if (!offers_tls13 and
+        (options.certificate_authorities.len != 0 or
+            options.ticket_request != null))
+    {
+        return error.InvalidClientHello;
+    }
     var extensions: std.ArrayList(u8) = .empty;
     defer extensions.deinit(allocator);
 

@@ -85,6 +85,8 @@ pub const Result = struct {
     local_record_size_limit: ?u16,
     /// Limit the server advertised for records sent by this client.
     peer_record_size_limit: ?u16,
+    /// RFC 9149 count the server expects to issue on this connection.
+    expected_ticket_count: ?u8,
     ech_retry_configs: ?[]const u8,
 
     pub fn deinit(self: *Result) void {
@@ -128,6 +130,11 @@ pub fn verifyServerAndWriteClientFlight(
     );
     if (encrypted_extensions.record_size_limit != null and
         parsed_client_hello.record_size_limit == null)
+    {
+        return error.InvalidServerFlight;
+    }
+    if (encrypted_extensions.ticket_request_hint != null and
+        parsed_client_hello.ticket_request == null)
     {
         return error.InvalidServerFlight;
     }
@@ -368,6 +375,7 @@ pub fn verifyServerAndWriteClientFlight(
         .client_certificate_type = negotiated_client_certificate_type,
         .local_record_size_limit = parsed_client_hello.record_size_limit,
         .peer_record_size_limit = encrypted_extensions.record_size_limit,
+        .expected_ticket_count = encrypted_extensions.ticket_request_hint,
         .ech_retry_configs = encrypted_extensions.ech_retry_configs,
     };
 }
@@ -551,6 +559,10 @@ test "authenticated client handshake verifies server and writes identity" {
     try client_hello.write(&client_hello_message, allocator, .{
         .random = [_]u8{0x70} ** 32,
         .x25519_public_key = [_]u8{0x76} ** 32,
+        .ticket_request = .{
+            .new_session_count = 4,
+            .resumption_count = 2,
+        },
     });
     const client_hello_bytes = client_hello_message.items;
     const suite = @import("cipher_suite.zig").Suite
@@ -587,7 +599,7 @@ test "authenticated client handshake verifies server and writes identity" {
     try server_hello.writeEncryptedExtensions(
         &encrypted_extensions,
         allocator,
-        .{},
+        .{ .ticket_request_hint = 3 },
     );
     var request: std.ArrayList(u8) = .empty;
     defer request.deinit(allocator);
@@ -675,6 +687,7 @@ test "authenticated client handshake verifies server and writes identity" {
     defer result.deinit();
     try std.testing.expectEqual(suite, result.cipher_suite);
     try std.testing.expectEqual(suite.hash(), result.cipher_suite.hash());
+    try std.testing.expectEqual(@as(?u8, 3), result.expected_ticket_count);
     try std.testing.expectEqual(
         @as(usize, 1),
         result.peer_certificate_chain.len,

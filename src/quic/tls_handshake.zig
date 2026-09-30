@@ -73,6 +73,7 @@ pub const Result = struct {
     resumed: bool,
     ech_accepted: bool,
     ech_rejected: bool,
+    requested_ticket_count: u8,
 
     pub fn deinit(self: *Result) void {
         if (self.client_auth) |state| {
@@ -110,6 +111,7 @@ pub const Options = struct {
     /// supplied ClientHello is an outer ECH offer that could not be decrypted.
     ech_retry_configs: ?[]const u8 = null,
     retry: ?RetryState = null,
+    max_requested_tickets: u8 = 0,
     labels: traffic.Labels = traffic.labels_v1,
 };
 
@@ -866,6 +868,18 @@ pub fn writeServerCryptoFlight(
 
     var encrypted_extensions: std.ArrayList(u8) = .empty;
     defer encrypted_extensions.deinit(allocator);
+    const can_resume = std.mem.indexOfScalar(
+        u8,
+        options.parsed_client_hello.psk_key_exchange_modes,
+        psk.psk_dhe_ke,
+    ) != null;
+    const requested_ticket_count: u8 = if (can_resume) if (options.parsed_client_hello.ticket_request) |request| @min(
+        if (selected_psk == null)
+            request.new_session_count
+        else
+            request.resumption_count,
+        options.max_requested_tickets,
+    ) else 0 else 0;
     try server_hello.writeEncryptedExtensions(&encrypted_extensions, allocator, .{
         .alpn_protocol = selection.alpn_protocol,
         .quic_transport_parameters = options.policy.quic_transport_parameters,
@@ -882,6 +896,8 @@ pub fn writeServerCryptoFlight(
             selection.client_certificate_type
         else
             null,
+        .ticket_request_hint = if (options.parsed_client_hello.ticket_request != null and
+            options.max_requested_tickets != 0) requested_ticket_count else null,
     });
     try handshake_crypto.appendSlice(allocator, encrypted_extensions.items);
     transcript_state.update(encrypted_extensions.items);
@@ -1006,6 +1022,7 @@ pub fn writeServerCryptoFlight(
         .resumed = selected_psk != null,
         .ech_accepted = ech_accepted,
         .ech_rejected = ech_rejected,
+        .requested_ticket_count = requested_ticket_count,
     };
 }
 
@@ -1231,7 +1248,12 @@ test "QUIC TLS server flight emits CRYPTO bytes by encryption level" {
         .alpn_protocols = &.{"h3"},
         .quic_transport_parameters = &.{ 1, 2, 3 },
         .server_certificate_types = &.{.raw_public_key},
+        .ticket_request = .{
+            .new_session_count = 3,
+            .resumption_count = 1,
+        },
     });
+    try psk.appendPskDheMode(&hello, allocator);
     const parsed = try client_hello.parse(hello.items);
     var initial_crypto: std.ArrayList(u8) = .empty;
     defer initial_crypto.deinit(allocator);
@@ -1255,6 +1277,7 @@ test "QUIC TLS server flight emits CRYPTO bytes by encryption level" {
             .shared_secret = &([_]u8{0x33} ** 32),
             .certificate_chain = &.{&cert},
             .signer = .{ .ed25519 = .{ .key_pair = key_pair } },
+            .max_requested_tickets = 2,
         },
     );
     defer result.deinit();
@@ -1272,6 +1295,12 @@ test "QUIC TLS server flight emits CRYPTO bytes by encryption level" {
         handshake_crypto.items,
         &.{ 0x00, 0x39, 0x00, 0x03, 4, 5, 6 },
     ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        handshake_crypto.items,
+        &.{ 0x00, 0x3a, 0x00, 0x01, 2 },
+    ) != null);
+    try std.testing.expectEqual(@as(u8, 2), result.requested_ticket_count);
     try std.testing.expectEqual(
         secret.Hash.sha256,
         result.client_handshake_traffic_secret.hash,

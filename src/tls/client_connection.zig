@@ -105,6 +105,7 @@ pub const Config = struct {
     /// Advertise PSK-DHE support on a full handshake so the server may issue
     /// a TLS 1.3 NewSessionTicket for a later connection.
     request_resumption: bool = false,
+    ticket_request: ?client_hello.TicketRequest = null,
     resumption: ?ClientPsk = null,
     ech: ?EchClientConfig = null,
     /// Opt-in NSS-compatible traffic-secret logging for diagnostics.
@@ -157,6 +158,7 @@ pub fn ClientConnection(
             client_certificate_type: auth.CertificateType,
             local_record_size_limit: ?u16,
             peer_record_size_limit: ?u16,
+            expected_ticket_count: ?u8,
             ech_accepted: bool,
 
             pub fn cacheNewSessionTicket(
@@ -286,6 +288,7 @@ pub fn ClientConnection(
         server_name: ?[]const u8,
         client_identity: ?client_auth.ClientIdentity,
         request_resumption: bool,
+        ticket_request: ?client_hello.TicketRequest,
         random: [32]u8,
         cipher_suites: []const cipher_suite.Suite,
         additional_cipher_suites: []const u16,
@@ -375,6 +378,7 @@ pub fn ClientConnection(
                 .offer_extended_master_secret = config.offer_extended_master_secret,
                 .record_size_limit = config.record_size_limit,
                 .certificate_authorities = config.certificate_authorities,
+                .ticket_request = config.ticket_request,
                 .certificate_compression_algorithms = config.certificate_compression_algorithms,
                 .session_ticket = config.tls12_session_ticket,
                 .server_certificate_types = if (config.server_certificate_type == .raw_public_key)
@@ -413,7 +417,7 @@ pub fn ClientConnection(
                     value.max_early_data_size != null,
                     null,
                 );
-            } else if (config.request_resumption)
+            } else if (config.request_resumption or config.ticket_request != null)
                 try psk.appendPskDheMode(&hello, config.allocator);
             var inner_hello: std.ArrayList(u8) = .empty;
             defer inner_hello.deinit(config.allocator);
@@ -449,7 +453,8 @@ pub fn ClientConnection(
                         ech_config.io,
                         hello.items,
                     );
-                } else if (config.request_resumption)
+                } else if (config.request_resumption or
+                    config.ticket_request != null)
                     try psk.appendPskDheMode(
                         &outer_template,
                         config.allocator,
@@ -532,6 +537,7 @@ pub fn ClientConnection(
                 .server_name = config.server_name,
                 .client_identity = config.client_identity,
                 .request_resumption = config.request_resumption,
+                .ticket_request = config.ticket_request,
                 .random = config.random,
                 .cipher_suites = config.cipher_suites,
                 .additional_cipher_suites = config.additional_cipher_suites,
@@ -767,6 +773,7 @@ pub fn ClientConnection(
                     .offer_extended_master_secret = self.offer_extended_master_secret,
                     .record_size_limit = self.record_size_limit,
                     .certificate_authorities = self.certificate_authorities,
+                    .ticket_request = self.ticket_request,
                     .certificate_compression_algorithms = self.certificate_compression_algorithms,
                     .session_ticket = parsed_client.session_ticket,
                     .server_certificate_types = if (self.server_certificate_type == .raw_public_key)
@@ -809,7 +816,7 @@ pub fn ClientConnection(
                     self.allocator,
                     first_hello,
                 );
-            } else if (self.request_resumption)
+            } else if (self.request_resumption or self.ticket_request != null)
                 try psk.appendPskDheMode(&second_hello, self.allocator);
             var ech_inner: std.ArrayList(u8) = .empty;
             defer ech_inner.deinit(self.allocator);
@@ -845,7 +852,7 @@ pub fn ClientConnection(
                         context.io,
                         second_hello.items,
                     );
-                } else if (self.request_resumption)
+                } else if (self.request_resumption or self.ticket_request != null)
                     try psk.appendPskDheMode(
                         &outer_template,
                         self.allocator,
@@ -1324,6 +1331,7 @@ pub fn ClientConnection(
                 .client_certificate_type = verified.client_certificate_type,
                 .local_record_size_limit = verified.local_record_size_limit,
                 .peer_record_size_limit = verified.peer_record_size_limit,
+                .expected_ticket_count = verified.expected_ticket_count,
                 .ech_accepted = self.ech_accepted,
             };
             verified_owned = false;
@@ -1620,6 +1628,10 @@ test "client and server states establish over one-byte transport reads" {
         .request_ocsp = true,
         .record_size_limit = 256,
         .certificate_authorities = &.{"test-ca"},
+        .ticket_request = .{
+            .new_session_count = 3,
+            .resumption_count = 1,
+        },
         .certificate_compression_algorithms = &.{.zstd},
         .key_log = client_key_log.logger(),
         .server_verifier = .{ .verify_trust = struct {
@@ -1673,6 +1685,7 @@ test "client and server states establish over one-byte transport reads" {
         },
         .identity_resolver = identity_set.resolver(),
         .record_size_limit = 192,
+        .max_requested_tickets = 2,
         .key_log = server_key_log.logger(),
         .client_auth = .{
             .request_context = "mtls",
@@ -1764,6 +1777,10 @@ test "client and server states establish over one-byte transport reads" {
         @as(?u16, 192),
         established_client.peer_record_size_limit,
     );
+    try std.testing.expectEqual(
+        @as(?u8, 2),
+        established_client.expected_ticket_count,
+    );
 
     const server_established_result = try server.receive(
         client_finished.items,
@@ -1791,6 +1808,10 @@ test "client and server states establish over one-byte transport reads" {
     try std.testing.expectEqual(
         @as(?u16, 256),
         established_server.peer_record_size_limit,
+    );
+    try std.testing.expectEqual(
+        @as(u8, 2),
+        established_server.requestedTicketsRemaining(),
     );
     try client_key_log.expectMatches(
         &server_key_log,
@@ -1822,7 +1843,7 @@ test "client and server states establish over one-byte transport reads" {
     });
     defer keyring.deinit();
     var ticket_record: [512]u8 = undefined;
-    const ticket_record_len = try established_server.sealNewSessionTicket(
+    const ticket_record_len = try established_server.sealRequestedNewSessionTicket(
         allocator,
         .{
             .keyring = &keyring,
@@ -1835,6 +1856,10 @@ test "client and server states establish over one-byte transport reads" {
             .lifetime_seconds = 60,
         },
         &ticket_record,
+    );
+    try std.testing.expectEqual(
+        @as(u8, 1),
+        established_server.requestedTicketsRemaining(),
     );
     const received_ticket = try established_client.application.receive(
         ticket_record[0..ticket_record_len],
@@ -1856,12 +1881,56 @@ test "client and server states establish over one-byte transport reads" {
     defer opened_ticket.secret.deinit();
     try std.testing.expect(cached.psk.eql(&opened_ticket.secret));
 
+    const second_ticket_len = try established_server
+        .sealRequestedNewSessionTicket(
+        allocator,
+        .{
+            .keyring = &keyring,
+            .sealing_nonce = [_]u8{0xc8} ** ticket_module.nonce_len,
+            .server_id = "example.com",
+            .alpn = "h2",
+            .ticket_nonce = &.{ 4, 5, 6 },
+            .age_add = 20,
+            .issued_at_ms = 10_001,
+            .lifetime_seconds = 60,
+        },
+        &ticket_record,
+    );
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        established_server.requestedTicketsRemaining(),
+    );
+    const second_ticket = try established_client.application.receive(
+        ticket_record[0..second_ticket_len],
+    );
+    try std.testing.expectEqual(
+        ticket.handshake_type_new_session_ticket,
+        second_ticket.event.?.post_handshake[0],
+    );
+    try std.testing.expectError(
+        error.NoRequestedTicketsPending,
+        established_server.sealRequestedNewSessionTicket(
+            allocator,
+            .{
+                .keyring = &keyring,
+                .sealing_nonce = [_]u8{0xc9} ** ticket_module.nonce_len,
+                .server_id = "example.com",
+                .alpn = "h2",
+                .ticket_nonce = &.{7},
+                .age_add = 21,
+                .issued_at_ms = 10_002,
+                .lifetime_seconds = 60,
+            },
+            &ticket_record,
+        ),
+    );
+
     var client_traffic_keys = try established_client.dangerousExtractSecrets();
     defer client_traffic_keys.deinit();
     var server_traffic_keys = try established_server.dangerousExtractSecrets();
     defer server_traffic_keys.deinit();
     try std.testing.expectEqual(@as(u64, 1), client_traffic_keys.tx.sequence_number);
-    try std.testing.expectEqual(@as(u64, 1), client_traffic_keys.rx.sequence_number);
+    try std.testing.expectEqual(@as(u64, 2), client_traffic_keys.rx.sequence_number);
     try std.testing.expectEqualSlices(
         u8,
         client_traffic_keys.tx.key(),
@@ -2100,6 +2169,10 @@ test "client and server establish with an accepted RFC 9849 ECH offer" {
         .alpn_protocols = &.{"h2"},
         .request_resumption = true,
         .certificate_authorities = &.{"private-ca"},
+        .ticket_request = .{
+            .new_session_count = 4,
+            .resumption_count = 2,
+        },
         .server_verifier = .{ .pinned_raw_public_key = &server_spki },
         .server_certificate_type = .raw_public_key,
         .ech = .{
@@ -2119,8 +2192,16 @@ test "client and server establish with an accepted RFC 9849 ECH offer" {
         .raw_public_key,
     ));
     try std.testing.expect(outer.certificate_authorities == null);
+    try std.testing.expect(outer.ticket_request == null);
     const inner = try client_hello.parse(client.client_hello_bytes.?);
     try std.testing.expect(inner.supportsCertificateAuthority("private-ca"));
+    try std.testing.expectEqual(
+        client_hello.TicketRequest{
+            .new_session_count = 4,
+            .resumption_count = 2,
+        },
+        inner.ticket_request.?,
+    );
 
     var server_material = key_exchange.ServerKeyMaterial{
         .x25519 = [_]u8{0xdf} ** key_exchange.secret_len,
@@ -3197,6 +3278,10 @@ test "client and server states complete PSK-DHE resumption" {
         .alpn_protocols = &.{"h2"},
         .server_verifier = .{},
         .resumption = client_psk,
+        .ticket_request = .{
+            .new_session_count = 3,
+            .resumption_count = 1,
+        },
     }, &client_wire);
     client_psk.secret.deinit();
     defer client.deinit();
@@ -3225,6 +3310,7 @@ test "client and server states complete PSK-DHE resumption" {
             .server_id = "example.com",
             .now_ms = 10_000 + actual_age,
         } },
+        .max_requested_tickets = 2,
         .client_auth = .{ .request_context = "optional-client" },
         .client_auth_policy = .{
             .verifier = .{},
@@ -3295,6 +3381,10 @@ test "client and server states complete PSK-DHE resumption" {
         @as(usize, 0),
         established_client.peer_certificate_chain.len,
     );
+    try std.testing.expectEqual(
+        @as(?u8, 1),
+        established_client.expected_ticket_count,
+    );
 
     const server_established_result = try server.receive(
         client_wire.items,
@@ -3303,6 +3393,10 @@ test "client and server states complete PSK-DHE resumption" {
     var established_server = server_established_result.event.?.established;
     defer established_server.deinit();
     try std.testing.expect(established_server.resumed);
+    try std.testing.expectEqual(
+        @as(u8, 1),
+        established_server.requestedTicketsRemaining(),
+    );
     try std.testing.expect(established_server.peer_certificate_chain == null);
 }
 

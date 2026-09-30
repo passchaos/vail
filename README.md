@@ -132,7 +132,9 @@ The current foundation provides:
   ServerHello identity selection, ticket-age validation, and stateless tickets
   bound to their issuing suite, server identity, and ALPN. Authenticated
   NewSessionTicket messages can be converted directly into owned client cache
-  entries. Stream 0-RTT installs separate early traffic keys, enforces the
+  entries. RFC 9149 ticket requests distinguish new and resumed handshakes,
+  advertise the server's bounded expected count, and expose a decrementing
+  issuance budget. Stream 0-RTT installs separate early traffic keys, enforces the
   authenticated ticket byte limit, fails closed without an anti-replay guard,
   handles accepted/rejected early records, emits EndOfEarlyData, and disables
   early data after HelloRetryRequest.
@@ -332,6 +334,9 @@ before ServerHello and requires Vail's bounded anti-replay path to accept it.
 `interop-rustls-tls13-resumption-client` covers the reverse direction: Vail
 caches a rustls/AWS-LC ticket, emits the second ClientHello and binder, and
 requires both peers to report a resumed handshake.
+`interop-rustls-ticket-request-server` and
+`interop-rustls-ticket-request-client` exercise RFC 9149 request and response
+hints in both directions against rustls.
 `zig build interop-openssl-min-client` exercises the reverse direction: Vail's
 incremental client state authenticates an OpenSSL server and its Finished,
 sends its encrypted Finished, and verifies encrypted application data. The

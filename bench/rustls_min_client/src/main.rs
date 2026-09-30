@@ -1,5 +1,5 @@
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::EchConfig;
+use rustls::client::{EchConfig, TicketRequest};
 use rustls::compress::{CertDecompressor, DecompressionFailed};
 use rustls::{
     CertificateCompressionAlgorithm, ClientConfig, ClientConnection, ConnectionTrafficSecrets,
@@ -111,6 +111,7 @@ fn main() {
     let key_log_enabled = mode.as_deref() == Some("keylog");
     let extract_secrets = mode.as_deref() == Some("extract-secrets");
     let ca_hints_enabled = mode.as_deref() == Some("ca-hints");
+    let ticket_request_enabled = mode.as_deref() == Some("ticket-request");
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let builder = ClientConfig::builder_with_provider(provider);
     let builder = if ech_enabled {
@@ -146,6 +147,12 @@ fn main() {
         config.key_log = Arc::new(StdoutKeyLog);
     }
     config.enable_secret_extraction = extract_secrets;
+    if ticket_request_enabled {
+        config.send_ticket_request = Some(TicketRequest {
+            new_session_count: 3,
+            resumption_count: 1,
+        });
+    }
 
     let name = ServerName::try_from("localhost").unwrap();
     let mut conn = ClientConnection::new(Arc::new(config), name).unwrap();

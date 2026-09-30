@@ -58,6 +58,10 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "ca-hints")
     else
         false;
+    const use_ticket_request = if (mode) |argument|
+        std.mem.eql(u8, argument, "ticket-request")
+    else
+        false;
     if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
@@ -196,6 +200,7 @@ pub fn main(init: std.process.Init) !void {
             ca_identity_set.resolver()
         else
             null,
+        .max_requested_tickets = if (use_ticket_request) 2 else 0,
         .key_log = if (use_key_log) .{
             .log_fn = writeKeyLog,
         } else null,
@@ -246,6 +251,12 @@ pub fn main(init: std.process.Init) !void {
     };
     defer established.deinit();
     std.debug.print("client finished verified\n", .{});
+    if (use_ticket_request) {
+        std.debug.print(
+            "ticket request count={d}\n",
+            .{established.requestedTicketsRemaining()},
+        );
+    }
     if (established.ech_accepted) {
         std.debug.print("ech accepted\n", .{});
     }

@@ -17,6 +17,10 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "chacha")
     else
         false;
+    const use_ticket_request = if (mode) |argument|
+        std.mem.eql(u8, argument, "ticket-request")
+    else
+        false;
     if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
@@ -50,6 +54,10 @@ pub fn main(init: std.process.Init) !void {
             &.{.zstd}
         else
             &.{.brotli},
+        .ticket_request = if (use_ticket_request) .{
+            .new_session_count = 3,
+            .resumption_count = 1,
+        } else null,
         .server_verifier = .{ .verify_trust = acceptTestCertificate },
     }, &client_hello_record);
     defer client.deinit();
@@ -89,6 +97,12 @@ pub fn main(init: std.process.Init) !void {
             "certificate compression={s}\n",
             .{@tagName(algorithm)},
         );
+    }
+    if (use_ticket_request) {
+        if (established.expected_ticket_count != 2) {
+            return error.UnexpectedTicketCount;
+        }
+        std.debug.print("ticket request count=2\n", .{});
     }
 
     var request_record: [256]u8 = undefined;
