@@ -6,13 +6,11 @@
 //! Response and SingleResponse extensions remain fail-closed.
 
 const std = @import("std");
+const x509_signature = @import("signature.zig");
 
 const Certificate = std.crypto.Certificate;
 const Sha1 = std.crypto.hash.Sha1;
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const Ed25519 = std.crypto.sign.Ed25519;
-const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
-const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 
 const oid_basic_response = [_]u8{
     0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01, 0x01,
@@ -21,16 +19,6 @@ const oid_sha1 = [_]u8{ 0x2b, 0x0e, 0x03, 0x02, 0x1a };
 const oid_sha256 = [_]u8{
     0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
 };
-const oid_ecdsa_sha256 = [_]u8{
-    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02,
-};
-const oid_ecdsa_sha384 = [_]u8{
-    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03,
-};
-const oid_rsa_sha256 = [_]u8{
-    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b,
-};
-const oid_ed25519 = [_]u8{ 0x2b, 0x65, 0x70 };
 const oid_basic_constraints = [_]u8{ 0x55, 0x1d, 0x13 };
 const oid_key_usage = [_]u8{ 0x55, 0x1d, 0x0f };
 const oid_extended_key_usage = [_]u8{ 0x55, 0x1d, 0x25 };
@@ -276,15 +264,25 @@ fn responderMatches(
             }
             break :blk true;
         },
-        0x82 => blk: {
-            if (responder.value.len != Sha1.digest_length) {
+        // RFC 6960's module uses EXPLICIT TAGS, so byKey wraps the KeyHash
+        // OCTET STRING. Retain the implicit form for deployed encoders that
+        // followed the older ASN.1 text literally.
+        0xa2, 0x82 => blk: {
+            const key_hash = if (responder.tag == 0xa2) explicit: {
+                var wrapper = Reader{ .bytes = responder.value };
+                const octets = wrapper.require(0x04) catch
+                    return error.InvalidResponder;
+                if (!wrapper.done()) return error.InvalidResponder;
+                break :explicit octets.value;
+            } else responder.value;
+            if (key_hash.len != Sha1.digest_length) {
                 return error.InvalidResponder;
             }
             var expected: [Sha1.digest_length]u8 = undefined;
             Sha1.hash(certificate.pubKey(), &expected, .{});
             break :blk std.crypto.timing_safe.eql(
                 [Sha1.digest_length]u8,
-                responder.value[0..Sha1.digest_length].*,
+                key_hash[0..Sha1.digest_length].*,
                 expected,
             );
         },
@@ -299,7 +297,7 @@ fn verifyAuthorizedResponderSignature(
     embedded_certificates: ?[]const u8,
     now_seconds: i64,
     policy: Policy,
-    signature_algorithm: SignatureAlgorithm,
+    signature_algorithm: x509_signature.Algorithm,
     message: []const u8,
     signature: []const u8,
 ) Error!void {
@@ -728,40 +726,13 @@ fn parseCertIdHash(algorithm: Element) Error!CertIdHash {
     return result;
 }
 
-const SignatureAlgorithm = enum {
-    ecdsa_p256_sha256,
-    ecdsa_p384_sha384,
-    rsa_pkcs1_sha256,
-    ed25519,
-};
+const SignatureAlgorithm = x509_signature.Algorithm;
 
 fn parseSignatureAlgorithm(algorithm: Element) Error!SignatureAlgorithm {
-    var fields = Reader{ .bytes = algorithm.value };
-    const oid = fields.require(0x06) catch return error.InvalidOcspResponse;
-    if (std.mem.eql(u8, oid.value, &oid_ecdsa_sha256)) {
-        if (!fields.done()) return error.InvalidOcspResponse;
-        return .ecdsa_p256_sha256;
-    }
-    if (std.mem.eql(u8, oid.value, &oid_ecdsa_sha384)) {
-        if (!fields.done()) return error.InvalidOcspResponse;
-        return .ecdsa_p384_sha384;
-    }
-    if (std.mem.eql(u8, oid.value, &oid_rsa_sha256)) {
-        const parameters = (fields.next() catch
-            return error.InvalidOcspResponse) orelse
-            return error.InvalidOcspResponse;
-        if (parameters.tag != 0x05 or parameters.value.len != 0 or
-            !fields.done())
-        {
-            return error.InvalidOcspResponse;
-        }
-        return .rsa_pkcs1_sha256;
-    }
-    if (std.mem.eql(u8, oid.value, &oid_ed25519)) {
-        if (!fields.done()) return error.InvalidOcspResponse;
-        return .ed25519;
-    }
-    return error.UnsupportedSignatureAlgorithm;
+    return x509_signature.parseAlgorithmIdentifier(algorithm.value) catch |err| switch (err) {
+        error.UnsupportedSignatureAlgorithm => error.UnsupportedSignatureAlgorithm,
+        else => error.InvalidOcspResponse,
+    };
 }
 
 fn verifySignature(
@@ -770,81 +741,11 @@ fn verifySignature(
     message: []const u8,
     signature_bytes: []const u8,
 ) Error!void {
-    switch (algorithm) {
-        .ecdsa_p256_sha256 => {
-            const public_key = switch (issuer.pub_key_algo) {
-                .X9_62_id_ecPublicKey => |curve| if (curve == .X9_62_prime256v1)
-                    EcdsaP256Sha256.PublicKey.fromSec1(issuer.pubKey()) catch
-                        return error.InvalidIssuer
-                else
-                    return error.UnsupportedSignatureAlgorithm,
-                else => return error.UnsupportedSignatureAlgorithm,
-            };
-            const signature = EcdsaP256Sha256.Signature.fromDer(
-                signature_bytes,
-            ) catch return error.InvalidOcspSignature;
-            signature.verify(message, public_key) catch
-                return error.InvalidOcspSignature;
-        },
-        .ecdsa_p384_sha384 => {
-            const public_key = switch (issuer.pub_key_algo) {
-                .X9_62_id_ecPublicKey => |curve| if (curve == .secp384r1)
-                    EcdsaP384Sha384.PublicKey.fromSec1(issuer.pubKey()) catch
-                        return error.InvalidIssuer
-                else
-                    return error.UnsupportedSignatureAlgorithm,
-                else => return error.UnsupportedSignatureAlgorithm,
-            };
-            const signature = EcdsaP384Sha384.Signature.fromDer(
-                signature_bytes,
-            ) catch return error.InvalidOcspSignature;
-            signature.verify(message, public_key) catch
-                return error.InvalidOcspSignature;
-        },
-        .rsa_pkcs1_sha256 => {
-            if (issuer.pub_key_algo != .rsaEncryption) {
-                return error.UnsupportedSignatureAlgorithm;
-            }
-            const parts = Certificate.rsa.PublicKey.parseDer(
-                issuer.pubKey(),
-            ) catch return error.InvalidIssuer;
-            switch (parts.modulus.len) {
-                inline 128, 256, 384, 512 => |modulus_len| {
-                    if (signature_bytes.len != modulus_len) {
-                        return error.InvalidOcspSignature;
-                    }
-                    const public_key = Certificate.rsa.PublicKey.fromBytes(
-                        parts.exponent,
-                        parts.modulus,
-                    ) catch return error.InvalidIssuer;
-                    Certificate.rsa.PKCS1v1_5Signature.verify(
-                        modulus_len,
-                        signature_bytes[0..modulus_len].*,
-                        message,
-                        public_key,
-                        Sha256,
-                    ) catch return error.InvalidOcspSignature;
-                },
-                else => return error.UnsupportedSignatureAlgorithm,
-            }
-        },
-        .ed25519 => {
-            if (issuer.pub_key_algo != .curveEd25519 or
-                issuer.pubKey().len != Ed25519.PublicKey.encoded_length or
-                signature_bytes.len != Ed25519.Signature.encoded_length)
-            {
-                return error.UnsupportedSignatureAlgorithm;
-            }
-            const public_key = Ed25519.PublicKey.fromBytes(
-                issuer.pubKey()[0..Ed25519.PublicKey.encoded_length].*,
-            ) catch return error.InvalidIssuer;
-            const signature = Ed25519.Signature.fromBytes(
-                signature_bytes[0..Ed25519.Signature.encoded_length].*,
-            );
-            signature.verify(message, public_key) catch
-                return error.InvalidOcspSignature;
-        },
-    }
+    x509_signature.verify(algorithm, issuer, message, signature_bytes) catch |err| switch (err) {
+        error.InvalidIssuer => return error.InvalidIssuer,
+        error.UnsupportedSignatureAlgorithm => return error.UnsupportedSignatureAlgorithm,
+        else => return error.InvalidOcspSignature,
+    };
 }
 
 fn certificateSubjectDer(certificate_der: []const u8) ![]const u8 {
@@ -1005,6 +906,33 @@ test "issuer-signed OCSP responses bind status, CertID, time, and signature" {
     try std.testing.expectError(
         error.InvalidOcspSignature,
         verify(&tampered, &leaf, &issuer, now, .{}),
+    );
+}
+
+test "issuer-signed OCSP verifies OpenSSL RSA SHA-2 responses" {
+    const issuer = @embedFile("testdata/rsa-pss-crl-ca.der");
+    const leaf = @embedFile("testdata/rsa-pss-ocsp-leaf.der");
+    const responses = [_][]const u8{
+        @embedFile("testdata/rsa-pkcs1-sha384.ocsp.der"),
+        @embedFile("testdata/rsa-pkcs1-sha512.ocsp.der"),
+        @embedFile("testdata/rsa-pss-sha256.ocsp.der"),
+        @embedFile("testdata/rsa-pss-sha384.ocsp.der"),
+        @embedFile("testdata/rsa-pss-sha512.ocsp.der"),
+    };
+    const now = 1_790_751_000;
+    for (responses) |response| {
+        try std.testing.expectEqual(
+            Status.good,
+            try verify(response, leaf, issuer, now, .{}),
+        );
+    }
+
+    const tampered = try std.testing.allocator.dupe(u8, responses[1]);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.InvalidOcspSignature,
+        verify(tampered, leaf, issuer, now, .{}),
     );
 }
 

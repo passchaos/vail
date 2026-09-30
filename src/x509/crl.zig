@@ -7,15 +7,10 @@
 //! algorithms fail explicitly.
 
 const std = @import("std");
+const x509_signature = @import("signature.zig");
 const trust = @import("trust.zig");
 
 const Certificate = std.crypto.Certificate;
-const Ed25519 = std.crypto.sign.Ed25519;
-const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
-const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
-const Sha256 = std.crypto.hash.sha2.Sha256;
-const Sha384 = std.crypto.hash.sha2.Sha384;
-const Sha512 = std.crypto.hash.sha2.Sha512;
 
 pub const Error = error{
     InvalidCrl,
@@ -29,37 +24,6 @@ pub const Error = error{
     CertificateSerialInvalid,
 };
 
-const oid_ecdsa_sha256 = [_]u8{
-    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02,
-};
-const oid_ecdsa_sha384 = [_]u8{
-    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03,
-};
-const oid_rsa_sha256 = [_]u8{
-    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b,
-};
-const oid_rsa_sha384 = [_]u8{
-    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c,
-};
-const oid_rsa_sha512 = [_]u8{
-    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0d,
-};
-const oid_rsassa_pss = [_]u8{
-    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a,
-};
-const oid_mgf1 = [_]u8{
-    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x08,
-};
-const oid_sha256 = [_]u8{
-    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
-};
-const oid_sha384 = [_]u8{
-    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02,
-};
-const oid_sha512 = [_]u8{
-    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
-};
-const oid_ed25519 = [_]u8{ 0x2b, 0x65, 0x70 };
 const oid_delta_crl_indicator = [_]u8{ 0x55, 0x1d, 0x1b };
 const oid_issuing_distribution_point = [_]u8{ 0x55, 0x1d, 0x1c };
 const oid_certificate_issuer = [_]u8{ 0x55, 0x1d, 0x1d };
@@ -247,182 +211,13 @@ pub fn parseAndVerify(
     };
 }
 
-const SignatureAlgorithm = enum {
-    ecdsa_p256_sha256,
-    ecdsa_p384_sha384,
-    rsa_pkcs1_sha256,
-    rsa_pkcs1_sha384,
-    rsa_pkcs1_sha512,
-    rsa_pss_sha256,
-    rsa_pss_sha384,
-    rsa_pss_sha512,
-    ed25519,
-};
-
-const PssHash = enum {
-    sha256,
-    sha384,
-    sha512,
-
-    fn digestLength(self: PssHash) usize {
-        return switch (self) {
-            .sha256 => Sha256.digest_length,
-            .sha384 => Sha384.digest_length,
-            .sha512 => Sha512.digest_length,
-        };
-    }
-
-    fn signatureAlgorithm(self: PssHash) SignatureAlgorithm {
-        return switch (self) {
-            .sha256 => .rsa_pss_sha256,
-            .sha384 => .rsa_pss_sha384,
-            .sha512 => .rsa_pss_sha512,
-        };
-    }
-};
+const SignatureAlgorithm = x509_signature.Algorithm;
 
 fn parseSignatureAlgorithm(algorithm: Element) Error!SignatureAlgorithm {
-    var fields = Reader{ .bytes = algorithm.value };
-    const oid = fields.require(0x06) catch return error.InvalidCrl;
-    if (std.mem.eql(u8, oid.value, &oid_ecdsa_sha256)) {
-        if (!fields.done()) return error.InvalidCrl;
-        return .ecdsa_p256_sha256;
-    }
-    if (std.mem.eql(u8, oid.value, &oid_ecdsa_sha384)) {
-        if (!fields.done()) return error.InvalidCrl;
-        return .ecdsa_p384_sha384;
-    }
-    if (std.mem.eql(u8, oid.value, &oid_rsa_sha256) or
-        std.mem.eql(u8, oid.value, &oid_rsa_sha384) or
-        std.mem.eql(u8, oid.value, &oid_rsa_sha512))
-    {
-        const parameters = (fields.next() catch return error.InvalidCrl) orelse
-            return error.InvalidCrl;
-        if (parameters.tag != 0x05 or parameters.value.len != 0 or
-            !fields.done())
-        {
-            return error.InvalidCrl;
-        }
-        if (std.mem.eql(u8, oid.value, &oid_rsa_sha256)) {
-            return .rsa_pkcs1_sha256;
-        }
-        if (std.mem.eql(u8, oid.value, &oid_rsa_sha384)) {
-            return .rsa_pkcs1_sha384;
-        }
-        return .rsa_pkcs1_sha512;
-    }
-    if (std.mem.eql(u8, oid.value, &oid_rsassa_pss)) {
-        const parameters = (fields.next() catch return error.InvalidCrl) orelse
-            return error.InvalidCrl;
-        if (parameters.tag != 0x30 or !fields.done()) {
-            return error.InvalidCrl;
-        }
-        return parsePssParameters(parameters.value);
-    }
-    if (std.mem.eql(u8, oid.value, &oid_ed25519)) {
-        // RFC 8410 section 3 requires parameters to be absent, including the
-        // otherwise common ASN.1 NULL value.
-        if (!fields.done()) return error.InvalidCrl;
-        return .ed25519;
-    }
-    return error.UnsupportedSignatureAlgorithm;
-}
-
-fn parsePssParameters(encoded: []const u8) Error!SignatureAlgorithm {
-    var fields = Reader{ .bytes = encoded };
-    var hash: ?PssHash = null;
-    var mask_hash: ?PssHash = null;
-    var salt_length: usize = 20;
-    var trailer_field: usize = 1;
-    var previous_tag: u8 = 0x9f;
-    while (fields.next() catch return error.InvalidCrl) |field| {
-        if (field.tag < 0xa0 or field.tag > 0xa3 or
-            (previous_tag != 0x9f and field.tag <= previous_tag))
-        {
-            return error.InvalidCrl;
-        }
-        previous_tag = field.tag;
-        switch (field.tag) {
-            0xa0 => hash = try parseExplicitHashAlgorithm(field),
-            0xa1 => mask_hash = try parseExplicitMaskAlgorithm(field),
-            0xa2 => salt_length = try parseExplicitSmallInteger(field),
-            0xa3 => trailer_field = try parseExplicitSmallInteger(field),
-            else => unreachable,
-        }
-    }
-    const selected_hash = hash orelse
-        return error.UnsupportedSignatureAlgorithm;
-    const selected_mask_hash = mask_hash orelse
-        return error.UnsupportedSignatureAlgorithm;
-    if (selected_mask_hash != selected_hash or
-        salt_length != selected_hash.digestLength() or trailer_field != 1)
-    {
-        return error.UnsupportedSignatureAlgorithm;
-    }
-    return selected_hash.signatureAlgorithm();
-}
-
-fn parseExplicitHashAlgorithm(field: Element) Error!PssHash {
-    var explicit = Reader{ .bytes = field.value };
-    const algorithm = explicit.require(0x30) catch return error.InvalidCrl;
-    if (!explicit.done()) return error.InvalidCrl;
-    return parseHashAlgorithm(algorithm.value);
-}
-
-fn parseExplicitMaskAlgorithm(field: Element) Error!PssHash {
-    var explicit = Reader{ .bytes = field.value };
-    const algorithm = explicit.require(0x30) catch return error.InvalidCrl;
-    if (!explicit.done()) return error.InvalidCrl;
-    var fields = Reader{ .bytes = algorithm.value };
-    const oid = fields.require(0x06) catch return error.InvalidCrl;
-    if (!std.mem.eql(u8, oid.value, &oid_mgf1)) {
-        return error.UnsupportedSignatureAlgorithm;
-    }
-    const parameters = fields.require(0x30) catch return error.InvalidCrl;
-    if (!fields.done()) return error.InvalidCrl;
-    return parseHashAlgorithm(parameters.value);
-}
-
-fn parseHashAlgorithm(encoded: []const u8) Error!PssHash {
-    var fields = Reader{ .bytes = encoded };
-    const oid = fields.require(0x06) catch return error.InvalidCrl;
-    const hash: PssHash = if (std.mem.eql(u8, oid.value, &oid_sha256))
-        .sha256
-    else if (std.mem.eql(u8, oid.value, &oid_sha384))
-        .sha384
-    else if (std.mem.eql(u8, oid.value, &oid_sha512))
-        .sha512
-    else
-        return error.UnsupportedSignatureAlgorithm;
-    if (fields.next() catch return error.InvalidCrl) |parameters| {
-        if (parameters.tag != 0x05 or parameters.value.len != 0 or
-            !fields.done())
-        {
-            return error.InvalidCrl;
-        }
-    }
-    return hash;
-}
-
-fn parseExplicitSmallInteger(field: Element) Error!usize {
-    var explicit = Reader{ .bytes = field.value };
-    const integer = explicit.require(0x02) catch return error.InvalidCrl;
-    if (!explicit.done() or integer.value.len == 0 or
-        (integer.value[0] & 0x80) != 0 or
-        (integer.value.len > 1 and integer.value[0] == 0 and
-            (integer.value[1] & 0x80) == 0) or
-        integer.value.len > @sizeOf(usize))
-    {
-        return error.InvalidCrl;
-    }
-    var result: usize = 0;
-    for (integer.value) |byte| {
-        result = std.math.mul(usize, result, 256) catch
-            return error.InvalidCrl;
-        result = std.math.add(usize, result, byte) catch
-            return error.InvalidCrl;
-    }
-    return result;
+    return x509_signature.parseAlgorithmIdentifier(algorithm.value) catch |err| switch (err) {
+        error.UnsupportedSignatureAlgorithm => error.UnsupportedSignatureAlgorithm,
+        else => error.InvalidCrl,
+    };
 }
 
 fn verifySignature(
@@ -431,165 +226,11 @@ fn verifySignature(
     message: []const u8,
     signature_bytes: []const u8,
 ) Error!void {
-    switch (algorithm) {
-        .ecdsa_p256_sha256 => {
-            const public_key = switch (issuer.pub_key_algo) {
-                .X9_62_id_ecPublicKey => |curve| if (curve == .X9_62_prime256v1)
-                    EcdsaP256Sha256.PublicKey.fromSec1(
-                        issuer.pubKey(),
-                    ) catch return error.InvalidIssuer
-                else
-                    return error.UnsupportedSignatureAlgorithm,
-                else => return error.UnsupportedSignatureAlgorithm,
-            };
-            const signature = EcdsaP256Sha256.Signature.fromDer(
-                signature_bytes,
-            ) catch return error.InvalidCrlSignature;
-            signature.verify(message, public_key) catch
-                return error.InvalidCrlSignature;
-        },
-        .ecdsa_p384_sha384 => {
-            const public_key = switch (issuer.pub_key_algo) {
-                .X9_62_id_ecPublicKey => |curve| if (curve == .secp384r1)
-                    EcdsaP384Sha384.PublicKey.fromSec1(
-                        issuer.pubKey(),
-                    ) catch return error.InvalidIssuer
-                else
-                    return error.UnsupportedSignatureAlgorithm,
-                else => return error.UnsupportedSignatureAlgorithm,
-            };
-            const signature = EcdsaP384Sha384.Signature.fromDer(
-                signature_bytes,
-            ) catch return error.InvalidCrlSignature;
-            signature.verify(message, public_key) catch
-                return error.InvalidCrlSignature;
-        },
-        .rsa_pkcs1_sha256 => try verifyRsaPkcs1(
-            Sha256,
-            issuer,
-            message,
-            signature_bytes,
-        ),
-        .rsa_pkcs1_sha384 => try verifyRsaPkcs1(
-            Sha384,
-            issuer,
-            message,
-            signature_bytes,
-        ),
-        .rsa_pkcs1_sha512 => try verifyRsaPkcs1(
-            Sha512,
-            issuer,
-            message,
-            signature_bytes,
-        ),
-        .rsa_pss_sha256 => try verifyRsaPss(
-            Sha256,
-            issuer,
-            message,
-            signature_bytes,
-        ),
-        .rsa_pss_sha384 => try verifyRsaPss(
-            Sha384,
-            issuer,
-            message,
-            signature_bytes,
-        ),
-        .rsa_pss_sha512 => try verifyRsaPss(
-            Sha512,
-            issuer,
-            message,
-            signature_bytes,
-        ),
-        .ed25519 => {
-            if (issuer.pub_key_algo != .curveEd25519 or
-                issuer.pubKey().len != Ed25519.PublicKey.encoded_length)
-            {
-                return error.UnsupportedSignatureAlgorithm;
-            }
-            if (signature_bytes.len != Ed25519.Signature.encoded_length) {
-                return error.InvalidCrlSignature;
-            }
-            const public_key = Ed25519.PublicKey.fromBytes(
-                issuer.pubKey()[0..Ed25519.PublicKey.encoded_length].*,
-            ) catch return error.InvalidIssuer;
-            const signature = Ed25519.Signature.fromBytes(
-                signature_bytes[0..Ed25519.Signature.encoded_length].*,
-            );
-            signature.verify(message, public_key) catch
-                return error.InvalidCrlSignature;
-        },
-    }
-}
-
-fn verifyRsaPkcs1(
-    comptime Hash: type,
-    issuer: Certificate.Parsed,
-    message: []const u8,
-    signature_bytes: []const u8,
-) Error!void {
-    if (issuer.pub_key_algo != .rsaEncryption) {
-        return error.UnsupportedSignatureAlgorithm;
-    }
-    const parts = Certificate.rsa.PublicKey.parseDer(
-        issuer.pubKey(),
-    ) catch return error.InvalidIssuer;
-    switch (parts.modulus.len) {
-        inline 128, 256, 384, 512 => |modulus_len| {
-            if (signature_bytes.len != modulus_len) {
-                return error.InvalidCrlSignature;
-            }
-            const public_key = Certificate.rsa.PublicKey.fromBytes(
-                parts.exponent,
-                parts.modulus,
-            ) catch return error.InvalidIssuer;
-            Certificate.rsa.PKCS1v1_5Signature.verify(
-                modulus_len,
-                signature_bytes[0..modulus_len].*,
-                message,
-                public_key,
-                Hash,
-            ) catch return error.InvalidCrlSignature;
-        },
-        else => return error.UnsupportedSignatureAlgorithm,
-    }
-}
-
-fn verifyRsaPss(
-    comptime Hash: type,
-    issuer: Certificate.Parsed,
-    message: []const u8,
-    signature_bytes: []const u8,
-) Error!void {
-    switch (issuer.pub_key_algo) {
-        .rsaEncryption, .rsassa_pss => {},
-        else => return error.UnsupportedSignatureAlgorithm,
-    }
-    const parts = Certificate.rsa.PublicKey.parseDer(
-        issuer.pubKey(),
-    ) catch return error.InvalidIssuer;
-    switch (parts.modulus.len) {
-        inline 128, 256, 384, 512 => |modulus_len| {
-            if (signature_bytes.len != modulus_len) {
-                return error.InvalidCrlSignature;
-            }
-            const public_key = Certificate.rsa.PublicKey.fromBytes(
-                parts.exponent,
-                parts.modulus,
-            ) catch return error.InvalidIssuer;
-            const signature = Certificate.rsa.PSSSignature.fromBytes(
-                modulus_len,
-                signature_bytes,
-            );
-            Certificate.rsa.PSSSignature.verify(
-                modulus_len,
-                signature,
-                message,
-                public_key,
-                Hash,
-            ) catch return error.InvalidCrlSignature;
-        },
-        else => return error.UnsupportedSignatureAlgorithm,
-    }
+    x509_signature.verify(algorithm, issuer, message, signature_bytes) catch |err| switch (err) {
+        error.InvalidIssuer => return error.InvalidIssuer,
+        error.UnsupportedSignatureAlgorithm => return error.UnsupportedSignatureAlgorithm,
+        else => return error.InvalidCrlSignature,
+    };
 }
 
 const RevokedEntry = struct {

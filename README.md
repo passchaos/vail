@@ -94,7 +94,8 @@ The current foundation provides:
 - strict RFC 6960 BasicOCSPResponse verification for issuer-signed responses
   and directly issued delegated responders with mandatory OCSPSigning EKU,
   including CertID binding, responder identity, responder certificate
-  validity/KeyUsage, SHA-1/SHA-256 issuer hashes, ECDSA/RSA/Ed25519 signatures,
+  validity/KeyUsage, SHA-1/SHA-256 issuer hashes, ECDSA/Ed25519 signatures,
+  and RSA PKCS#1 v1.5 or RSA-PSS signatures with SHA-256/384/512,
   bounded embedded certificates, response time windows, and
   good/revoked/unknown handling. TLS 1.2 and TLS 1.3 clients can request
   stapling, servers attach the configured response only when requested, and
