@@ -78,6 +78,22 @@ pub fn main(init: std.process.Init) !void {
     const prepared_ns = nowNs(init.io) -| start;
 
     var opened: [plaintext.len]u8 = undefined;
+    var invalid_tag = tag;
+    invalid_tag[0] ^= 1;
+    start = nowNs(init.io);
+    for (0..iterations) |_| {
+        context.decrypt(
+            &opened,
+            &ciphertext,
+            invalid_tag,
+            aad,
+            nonce,
+        ) catch |err| switch (err) {
+            error.AuthenticationFailed => checksum +%= 1,
+        };
+    }
+    const prepared_authenticate_ns = nowNs(init.io) -| start;
+
     start = nowNs(init.io);
     for (0..iterations) |_| {
         context.encrypt(
@@ -100,13 +116,15 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         "poly-key={d} ns stream={d} ns poly1305={d} ns aead={d} ns " ++
-            "prepared={d} ns prepared-open+seal={d} ns checksum={d}\n",
+            "prepared={d} ns prepared-auth-fail={d} ns " ++
+            "prepared-open+seal={d} ns checksum={d}\n",
         .{
             key_ns / iterations,
             stream_ns / iterations,
             poly_ns / iterations,
             aead_ns / iterations,
             prepared_ns / iterations,
+            prepared_authenticate_ns / iterations,
             prepared_round_trip_ns / iterations,
             checksum,
         },
