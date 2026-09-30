@@ -8,6 +8,7 @@ const std = @import("std");
 const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
+const record_size_limit = @import("record_size_limit.zig");
 
 pub const handshake_type_client_hello: u8 = 0x01;
 pub const ext_server_name: u16 = 0x0000;
@@ -22,6 +23,7 @@ pub const ext_session_ticket: u16 = 0x0023;
 pub const ext_compress_certificate: u16 =
     certificate_compression.extension_type_compress_certificate;
 pub const ext_early_data: u16 = 0x002a;
+pub const ext_record_size_limit: u16 = record_size_limit.extension_type;
 pub const ext_quic_transport_parameters: u16 = 0x0039;
 pub const ext_renegotiation_info: u16 = 0xff01;
 pub const ext_supported_versions: u16 = 0x002b;
@@ -78,6 +80,7 @@ pub const WriteOptions = struct {
     signature_schemes: []const u16 = &default_signature_schemes,
     request_ocsp: bool = false,
     offer_extended_master_secret: bool = false,
+    record_size_limit: ?u16 = null,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_certificate_types: []const auth.CertificateType = &.{},
     client_certificate_types: []const auth.CertificateType = &.{},
@@ -113,6 +116,7 @@ pub const FlexibleWriteOptions = struct {
     signature_schemes: []const u16 = &default_signature_schemes,
     request_ocsp: bool = false,
     offer_extended_master_secret: bool = false,
+    record_size_limit: ?u16 = null,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_certificate_types: []const auth.CertificateType = &.{},
     client_certificate_types: []const auth.CertificateType = &.{},
@@ -145,6 +149,7 @@ pub fn write(
         .signature_schemes = options.signature_schemes,
         .request_ocsp = options.request_ocsp,
         .offer_extended_master_secret = options.offer_extended_master_secret,
+        .record_size_limit = options.record_size_limit,
         .certificate_compression_algorithms = options.certificate_compression_algorithms,
         .server_certificate_types = options.server_certificate_types,
         .client_certificate_types = options.client_certificate_types,
@@ -246,6 +251,17 @@ pub fn writeWithKeyShare(
             allocator,
             ext_extended_master_secret,
             &.{},
+        );
+    }
+
+    if (options.record_size_limit) |limit| {
+        const payload = record_size_limit.encode(limit) catch
+            return error.InvalidClientHello;
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_record_size_limit,
+            &payload,
         );
     }
 
@@ -494,6 +510,7 @@ pub const Parsed = struct {
     requests_ocsp: bool = false,
     offers_extended_master_secret: bool = false,
     offers_secure_renegotiation: bool = false,
+    record_size_limit: ?u16 = null,
     certificate_compression_algorithms: []const u8 = &.{},
     server_certificate_types: []const u8 = &.{},
     client_certificate_types: []const u8 = &.{},
@@ -711,6 +728,10 @@ pub fn parse(bytes: []const u8) Error!Parsed {
             ext_extended_master_secret => {
                 if (payload.len != 0) return error.InvalidClientHello;
                 parsed.offers_extended_master_secret = true;
+            },
+            ext_record_size_limit => {
+                parsed.record_size_limit = record_size_limit.parse(payload) catch
+                    return error.InvalidClientHello;
             },
             ext_server_certificate_type => {
                 parsed.server_certificate_types =
@@ -1160,11 +1181,13 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
             .aes_128_gcm_sha256,
         },
         .request_ocsp = true,
+        .record_size_limit = 4096,
         .certificate_compression_algorithms = &.{.zlib},
     });
     const parsed = try parse(encoded.items);
     try std.testing.expect(parsed.offersTls13());
     try std.testing.expect(parsed.requests_ocsp);
+    try std.testing.expectEqual(@as(?u16, 4096), parsed.record_size_limit);
     try std.testing.expect(parsed.supportsCertificateCompression(.zlib));
     try std.testing.expect(!parsed.supportsCertificateCompression(.brotli));
     try std.testing.expectEqualStrings(
@@ -1179,6 +1202,16 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
         share.key_exchange,
     );
     try std.testing.expect(parsed.quic_transport_parameters == null);
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        write(&encoded, allocator, .{
+            .random = [_]u8{0x55} ** 32,
+            .x25519_public_key = public_key,
+            .record_size_limit = record_size_limit.min - 1,
+        }),
+    );
 }
 
 test "ClientHello parser extracts a minimal TLS 1.3 offer" {

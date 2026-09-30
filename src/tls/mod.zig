@@ -17,6 +17,7 @@ pub const key_schedule = @import("key_schedule.zig");
 pub const key_update = @import("key_update.zig");
 pub const psk = @import("psk.zig");
 pub const record = @import("record.zig");
+pub const record_size_limit = @import("record_size_limit.zig");
 pub const record_fragment = @import("record_fragment.zig");
 pub const secret = @import("secret.zig");
 pub const stream = @import("stream.zig");
@@ -50,6 +51,7 @@ test {
     _ = key_log;
     _ = key_update;
     _ = record;
+    _ = record_size_limit;
     _ = record_fragment;
     _ = stream;
     _ = traffic;

@@ -8,6 +8,7 @@ const std = @import("std");
 const auth = @import("auth.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const ech = @import("ech.zig");
+const record_size_limit = @import("record_size_limit.zig");
 
 pub const handshake_type_server_hello: u8 = 0x02;
 pub const handshake_type_encrypted_extensions: u8 = 0x08;
@@ -21,6 +22,7 @@ pub const ext_application_layer_protocol_negotiation: u16 = 0x0010;
 pub const ext_client_certificate_type: u16 = 0x0013;
 pub const ext_server_certificate_type: u16 = 0x0014;
 pub const ext_early_data: u16 = 0x002a;
+pub const ext_record_size_limit: u16 = record_size_limit.extension_type;
 pub const ext_pre_shared_key: u16 = 0x0029;
 pub const ext_quic_transport_parameters: u16 = 0x0039;
 pub const tls13: u16 = 0x0304;
@@ -355,6 +357,7 @@ pub const EncryptedExtensions = struct {
     accept_early_data: bool = false,
     client_certificate_type: ?auth.CertificateType = null,
     server_certificate_type: ?auth.CertificateType = null,
+    record_size_limit: ?u16 = null,
     /// Exact RFC 9849 ECHConfigList returned after rejecting an ECH offer.
     ech_retry_configs: ?[]const u8 = null,
 };
@@ -366,6 +369,7 @@ pub const ParsedEncryptedExtensions = struct {
     early_data_accepted: bool = false,
     client_certificate_type: ?auth.CertificateType = null,
     server_certificate_type: ?auth.CertificateType = null,
+    record_size_limit: ?u16 = null,
     ech_retry_configs: ?[]const u8 = null,
 };
 
@@ -442,6 +446,9 @@ pub fn parseEncryptedExtensions(
         } else if (typ == ext_server_certificate_type) {
             if (payload.len != 1) return error.InvalidEncryptedExtensions;
             result.server_certificate_type = parseCertificateType(payload[0]) catch
+                return error.InvalidEncryptedExtensions;
+        } else if (typ == ext_record_size_limit) {
+            result.record_size_limit = record_size_limit.parse(payload) catch
                 return error.InvalidEncryptedExtensions;
         } else if (typ == ech.extension_type) {
             ech.validateConfigList(payload) catch
@@ -522,6 +529,17 @@ pub fn writeEncryptedExtensions(
             allocator,
             @intFromEnum(certificate_type),
         );
+    }
+    if (extensions.record_size_limit) |limit| {
+        const payload = record_size_limit.encode(limit) catch
+            return error.InvalidEncryptedExtensions;
+        try appendExtensionHeader(
+            &extension_bytes,
+            allocator,
+            ext_record_size_limit,
+            payload.len,
+        );
+        try extension_bytes.appendSlice(allocator, &payload);
     }
     if (extensions.ech_retry_configs) |retry_configs| {
         ech.validateConfigList(retry_configs) catch
@@ -709,6 +727,7 @@ test "ServerHello and EncryptedExtensions encode TLS 1.3 extensions" {
         .quic_transport_parameters = &.{ 0x00, 0x01, 0x00 },
         .client_certificate_type = .raw_public_key,
         .server_certificate_type = .raw_public_key,
+        .record_size_limit = 4096,
     });
     try std.testing.expectEqual(handshake_type_encrypted_extensions, out.items[0]);
     try std.testing.expect(std.mem.indexOf(u8, out.items, &.{ 0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, 'h', '2' }) != null);
@@ -718,6 +737,10 @@ test "ServerHello and EncryptedExtensions encode TLS 1.3 extensions" {
         u8,
         &.{ 0x00, 0x01, 0x00 },
         parsed_quic_extensions.quic_transport_parameters.?,
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 4096),
+        parsed_quic_extensions.record_size_limit,
     );
 
     out.clearRetainingCapacity();
