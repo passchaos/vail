@@ -221,6 +221,8 @@ fn verifyChain(
     var parsed: [hard_max_presented_certificates]Certificate.Parsed = undefined;
     var custom_algorithms: [hard_max_presented_certificates]certificate_compat.SignatureAlgorithm = undefined;
     var custom_algorithm_mask: u32 = 0;
+    var usage_cache: [hard_max_presented_certificates]UsageCache =
+        @splat(.unparsed);
     for (chain, 0..) |certificate_der, index| {
         const compatible = try certificate_compat.parse(certificate_der);
         parsed[index] = compatible.standard;
@@ -229,7 +231,9 @@ fn verifyChain(
             custom_algorithm_mask |= @as(u32, 1) << @intCast(index);
         }
     }
-    try validateLeafUsage(chain[0], purpose);
+    const leaf_usage = try certificateUsage(chain[0]);
+    usage_cache[0] = .{ .valid = leaf_usage };
+    try validateLeafUsageProfile(leaf_usage, purpose);
     var search = PathSearch{
         .bundle = bundle,
         .now_seconds = now_seconds,
@@ -237,6 +241,7 @@ fn verifyChain(
         .parsed = parsed[0..chain.len],
         .custom_algorithms = custom_algorithms[0..chain.len],
         .custom_algorithm_mask = custom_algorithm_mask,
+        .usage_cache = usage_cache[0..chain.len],
         .purpose = purpose,
         .limits = limits,
         .revocation = revocation,
@@ -255,6 +260,7 @@ const PathSearch = struct {
     parsed: []const Certificate.Parsed,
     custom_algorithms: []const certificate_compat.SignatureAlgorithm,
     custom_algorithm_mask: u32,
+    usage_cache: []UsageCache,
     purpose: EndpointPurpose,
     limits: PathLimits,
     revocation: ?RevocationPolicy,
@@ -342,6 +348,8 @@ const PathSearch = struct {
             }
         }
 
+        const subject_usage = try self.usageFor(subject_index);
+        var priorities: [hard_max_presented_certificates]u2 = @splat(3);
         for (self.parsed[1..], 1..) |issuer, issuer_index| {
             const bit = @as(u32, 1) << @intCast(issuer_index);
             if ((used & bit) != 0 or !std.mem.eql(
@@ -349,56 +357,86 @@ const PathSearch = struct {
                 subject.issuer(),
                 issuer.subject(),
             )) continue;
-            try self.consumeCandidateBudget();
-            validateIssuerUsageAndNameConstraints(
-                self.chain[issuer_index],
-                ca_below,
-                self.purpose,
-                self.constrained_identity,
-                self.chain[0],
-            ) catch |err| {
-                remembered_error = err;
-                continue;
-            };
-            self.verifyCertificateSignature(
-                subject_index,
-                subject,
-                issuer,
-            ) catch |err| {
-                remembered_error = err;
-                continue;
-            };
-            if (self.revocation) |revocation| {
-                revocation.verify(
+            if (subject_usage.authority_key_identifier) |authority_key| {
+                const issuer_usage = self.usageFor(issuer_index) catch {
+                    // A malformed same-name decoy must not consume the budget
+                    // before a well-formed exact AKI/SKI match. It is still
+                    // attempted in the fallback tier so its error is retained
+                    // when no valid path exists.
+                    priorities[issuer_index] = 2;
+                    continue;
+                };
+                priorities[issuer_index] = issuerKeyPriority(
+                    authority_key,
+                    issuer_usage.subject_key_identifier,
+                );
+            } else {
+                priorities[issuer_index] = 0;
+            }
+        }
+        const priority_count: usize = if (subject_usage.authority_key_identifier != null) 3 else 1;
+        for (0..priority_count) |priority| {
+            for (self.parsed[1..], 1..) |issuer, issuer_index| {
+                if (priorities[issuer_index] != priority) continue;
+                const bit = @as(u32, 1) << @intCast(issuer_index);
+                try self.consumeCandidateBudget();
+                const issuer_usage = self.usageFor(issuer_index) catch |err| {
+                    remembered_error = err;
+                    continue;
+                };
+                validateIssuerUsageAndNameConstraintsFromUsage(
+                    issuer_usage,
+                    ca_below,
+                    self.purpose,
+                    self.constrained_identity,
+                    self.chain[0],
+                ) catch |err| {
+                    remembered_error = err;
+                    continue;
+                };
+                self.verifyCertificateSignature(
+                    subject_index,
+                    subject,
+                    issuer,
+                ) catch |err| {
+                    remembered_error = err;
+                    continue;
+                };
+                if (self.revocation) |revocation| {
+                    revocation.verify(
+                        self.chain[subject_index],
+                        self.chain[issuer_index],
+                    ) catch |err| {
+                        remembered_error = err;
+                        continue;
+                    };
+                }
+                self.verifyStapledOcsp(
+                    subject_index,
                     self.chain[subject_index],
                     self.chain[issuer_index],
                 ) catch |err| {
                     remembered_error = err;
                     continue;
                 };
+                const next_ca_below = countCaBelow(
+                    ca_below,
+                    issuer,
+                ) catch |err| {
+                    remembered_error = err;
+                    continue;
+                };
+                self.verifyFrom(
+                    issuer_index,
+                    used | bit,
+                    next_ca_below,
+                    depth + 1,
+                ) catch |err| {
+                    remembered_error = err;
+                    continue;
+                };
+                return;
             }
-            self.verifyStapledOcsp(
-                subject_index,
-                self.chain[subject_index],
-                self.chain[issuer_index],
-            ) catch |err| {
-                remembered_error = err;
-                continue;
-            };
-            const next_ca_below = countCaBelow(ca_below, issuer) catch |err| {
-                remembered_error = err;
-                continue;
-            };
-            self.verifyFrom(
-                issuer_index,
-                used | bit,
-                next_ca_below,
-                depth + 1,
-            ) catch |err| {
-                remembered_error = err;
-                continue;
-            };
-            return;
         }
         return remembered_error orelse error.CertificateIssuerNotFound;
     }
@@ -408,6 +446,24 @@ const PathSearch = struct {
             return error.CertificatePathSearchLimitExceeded;
         }
         self.candidate_checks += 1;
+    }
+
+    fn usageFor(
+        self: *PathSearch,
+        index: usize,
+    ) !CertificateUsage {
+        switch (self.usage_cache[index]) {
+            .unparsed => {
+                const usage = certificateUsage(self.chain[index]) catch |err| {
+                    self.usage_cache[index] = .{ .invalid = err };
+                    return err;
+                };
+                self.usage_cache[index] = .{ .valid = usage };
+                return usage;
+            },
+            .valid => |usage| return usage,
+            .invalid => |err| return err,
+        }
     }
 
     fn verifyCertificateSignature(
@@ -616,7 +672,23 @@ const CertificateUsage = struct {
     any_extended_key_usage: bool = false,
     unsupported_critical_extension: bool = false,
     name_constraints: ?[]const u8 = null,
+    subject_key_identifier: ?[]const u8 = null,
+    authority_key_identifier: ?[]const u8 = null,
 };
+
+const UsageCache = union(enum) {
+    unparsed,
+    valid: CertificateUsage,
+    invalid: anyerror,
+};
+
+fn issuerKeyPriority(
+    authority_key_identifier: []const u8,
+    subject_key_identifier: ?[]const u8,
+) u2 {
+    const candidate = subject_key_identifier orelse return 1;
+    return if (std.mem.eql(u8, authority_key_identifier, candidate)) 0 else 2;
+}
 
 fn validateLeafUsage(
     certificate_der: []const u8,
@@ -664,6 +736,22 @@ fn validateIssuerUsageAndNameConstraints(
     leaf_der: ?[]const u8,
 ) !void {
     const usage = try certificateUsage(certificate_der);
+    return validateIssuerUsageAndNameConstraintsFromUsage(
+        usage,
+        ca_below,
+        purpose,
+        constrained_identity,
+        leaf_der,
+    );
+}
+
+fn validateIssuerUsageAndNameConstraintsFromUsage(
+    usage: CertificateUsage,
+    ca_below: usize,
+    purpose: EndpointPurpose,
+    constrained_identity: ?ServerIdentity,
+    leaf_der: ?[]const u8,
+) !void {
     try validateIssuerUsageProfile(usage, ca_below, purpose);
     if (usage.name_constraints) |encoded| {
         if (purpose != .server_auth) {
@@ -780,6 +868,20 @@ fn certificateUsage(certificate_der: []const u8) !CertificateUsage {
             result.any_extended_key_usage = extended.any;
         } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x11 })) {
             // Hostname verification above consumes subjectAltName.
+        } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x0e })) {
+            if (critical or result.subject_key_identifier != null) {
+                return error.InvalidCertificateExtension;
+            }
+            result.subject_key_identifier = try parseSubjectKeyIdentifier(
+                value.value,
+            );
+        } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x23 })) {
+            if (critical or result.authority_key_identifier != null) {
+                return error.InvalidCertificateExtension;
+            }
+            result.authority_key_identifier = try parseAuthorityKeyIdentifier(
+                value.value,
+            );
         } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x1e })) {
             if (result.name_constraints != null) {
                 return error.InvalidCertificateExtension;
@@ -791,6 +893,98 @@ fn certificateUsage(certificate_der: []const u8) !CertificateUsage {
         }
     }
     return result;
+}
+
+fn parseSubjectKeyIdentifier(encoded: []const u8) ![]const u8 {
+    const key_identifier = try singleInner(encoded, 0x04);
+    if (key_identifier.value.len == 0) {
+        return error.InvalidCertificateExtension;
+    }
+    return key_identifier.value;
+}
+
+fn parseAuthorityKeyIdentifier(encoded: []const u8) !?[]const u8 {
+    const sequence = try singleInner(encoded, 0x30);
+    if (sequence.value.len == 0) return error.InvalidCertificateExtension;
+    var fields = DerReader{ .bytes = sequence.value };
+    var key_identifier: ?[]const u8 = null;
+    var saw_issuer = false;
+    var saw_serial = false;
+    var previous_tag_number: ?u8 = null;
+    while (try fields.next()) |field| {
+        const tag_number = field.tag & 0x1f;
+        if ((field.tag != 0x80 and field.tag != 0xa1 and
+            field.tag != 0x82) or
+            (previous_tag_number != null and
+                tag_number <= previous_tag_number.?))
+        {
+            return error.InvalidCertificateExtension;
+        }
+        previous_tag_number = tag_number;
+        switch (field.tag) {
+            0x80 => {
+                if (field.value.len == 0) {
+                    return error.InvalidCertificateExtension;
+                }
+                key_identifier = field.value;
+            },
+            0xa1 => {
+                if (field.value.len == 0) {
+                    return error.InvalidCertificateExtension;
+                }
+                var names = DerReader{ .bytes = field.value };
+                var count: usize = 0;
+                while (try names.next()) |name| {
+                    if (!isGeneralNameTag(name.tag)) {
+                        return error.InvalidCertificateExtension;
+                    }
+                    count += 1;
+                }
+                if (count == 0) return error.InvalidCertificateExtension;
+                saw_issuer = true;
+            },
+            0x82 => {
+                try validateCertificateSerialValue(field.value);
+                saw_serial = true;
+            },
+            else => unreachable,
+        }
+    }
+    if (saw_issuer != saw_serial or
+        (key_identifier == null and !saw_issuer))
+    {
+        return error.InvalidCertificateExtension;
+    }
+    return key_identifier;
+}
+
+fn isGeneralNameTag(tag: u8) bool {
+    return switch (tag) {
+        // Constructed: otherName, x400Address, directoryName, ediPartyName.
+        0xa0,
+        0xa3,
+        0xa4,
+        0xa5,
+        // Primitive: rfc822Name, dNSName, URI, iPAddress, registeredID.
+        0x81,
+        0x82,
+        0x86,
+        0x87,
+        0x88,
+        => true,
+        else => false,
+    };
+}
+
+fn validateCertificateSerialValue(value: []const u8) !void {
+    if (value.len == 0 or value.len > 20 or (value[0] & 0x80) != 0 or
+        (value.len > 1 and value[0] == 0 and (value[1] & 0x80) == 0))
+    {
+        return error.InvalidCertificateExtension;
+    }
+    var nonzero = false;
+    for (value) |byte| nonzero = nonzero or byte != 0;
+    if (!nonzero) return error.InvalidCertificateExtension;
 }
 
 fn validateNameConstraintsSyntax(encoded: []const u8) !void {
@@ -1309,6 +1503,26 @@ pub const testing = struct {
         encoded: []const u8,
     ) !ExtendedKeyUsageValue {
         return @import("trust.zig").parseExtendedKeyUsage(encoded);
+    }
+
+    pub fn parseSubjectKeyIdentifier(encoded: []const u8) ![]const u8 {
+        return @import("trust.zig").parseSubjectKeyIdentifier(encoded);
+    }
+
+    pub fn parseAuthorityKeyIdentifier(
+        encoded: []const u8,
+    ) !?[]const u8 {
+        return @import("trust.zig").parseAuthorityKeyIdentifier(encoded);
+    }
+
+    pub fn issuerKeyPriority(
+        authority_key_identifier: []const u8,
+        subject_key_identifier: ?[]const u8,
+    ) u2 {
+        return @import("trust.zig").issuerKeyPriority(
+            authority_key_identifier,
+            subject_key_identifier,
+        );
     }
 
     pub fn validateDnsNameConstraints(

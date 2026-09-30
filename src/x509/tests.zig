@@ -133,6 +133,31 @@ test "bundle verifier builds an unordered path and backtracks decoys" {
         .server_name = "localhost",
         .chain = &.{ &leaf, &decoy, &root, &intermediate },
     });
+    const leaf_usage = try trust.testing.certificateUsage(&leaf);
+    const intermediate_usage = try trust.testing.certificateUsage(
+        &intermediate,
+    );
+    const decoy_usage = try trust.testing.certificateUsage(&decoy);
+    try std.testing.expectEqualSlices(
+        u8,
+        leaf_usage.authority_key_identifier.?,
+        intermediate_usage.subject_key_identifier.?,
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        leaf_usage.authority_key_identifier.?,
+        decoy_usage.subject_key_identifier.?,
+    ));
+    // One check selects the AKI/SKI-matched intermediate and the second reaches
+    // the root. Trying the same-subject decoy first would exceed this budget.
+    try (trust.BundleVerifier{
+        .bundle = &bundle,
+        .now_seconds = 1_900_000_000,
+        .path_limits = .{ .max_candidate_checks = 2 },
+    }).verify(.{
+        .server_name = "localhost",
+        .chain = &.{ &leaf, &decoy, &intermediate },
+    });
     try std.testing.expectError(
         error.CertificateSignatureInvalid,
         verifier.verify(.{
@@ -847,6 +872,77 @@ test "bundle verifier parses basic constraints and key usage strictly" {
     try std.testing.expect(!key_cert_sign.digital_signature);
     try std.testing.expect(key_cert_sign.key_cert_sign);
     try std.testing.expect(!key_cert_sign.crl_sign);
+}
+
+test "AKI and SKI codecs are strict while routing remains compatible" {
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 1, 2, 3 },
+        try trust.testing.parseSubjectKeyIdentifier(
+            &.{ 0x04, 0x03, 1, 2, 3 },
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 1, 2, 3 },
+        (try trust.testing.parseAuthorityKeyIdentifier(
+            &.{ 0x30, 0x05, 0x80, 0x03, 1, 2, 3 },
+        )).?,
+    );
+    try std.testing.expect((try trust.testing.parseAuthorityKeyIdentifier(
+        &.{
+            0x30, 0x08,
+            0xa1, 0x03,
+            0x82, 0x01,
+            'x',  0x82,
+            0x01, 0x01,
+        },
+    )) == null);
+    try std.testing.expectError(
+        error.InvalidCertificateExtension,
+        trust.testing.parseAuthorityKeyIdentifier(
+            &.{ 0x30, 0x03, 0xa1, 0x01, 0x00 },
+        ),
+    );
+    // dNSName is primitive; accepting its constructed form would make the
+    // GeneralName CHOICE structurally ambiguous.
+    try std.testing.expectError(
+        error.InvalidCertificateExtension,
+        trust.testing.parseAuthorityKeyIdentifier(
+            &.{
+                0x30, 0x08,
+                0xa1, 0x03,
+                0xa2, 0x01,
+                'x',  0x82,
+                0x01, 0x01,
+            },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidCertificateExtension,
+        trust.testing.parseAuthorityKeyIdentifier(
+            &.{
+                0x30, 0x0a,
+                0x80, 0x03,
+                1,    2,
+                3,    0x80,
+                0x03, 4,
+                5,    6,
+            },
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(u2, 0),
+        trust.testing.issuerKeyPriority("key", "key"),
+    );
+    try std.testing.expectEqual(
+        @as(u2, 1),
+        trust.testing.issuerKeyPriority("key", null),
+    );
+    try std.testing.expectEqual(
+        @as(u2, 2),
+        trust.testing.issuerKeyPriority("key", "other"),
+    );
 }
 
 test "bundle verifier enforces permitted and excluded DNS constraints" {
