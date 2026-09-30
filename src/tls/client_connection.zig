@@ -161,13 +161,19 @@ pub fn ClientConnection(
                 return ticket.cache(
                     self.allocator,
                     message,
-                    self.application.traffic.read.suite,
+                    self.application.suite,
                     self.master_secret,
                     self.transcript_after_client_finished,
                     server_name,
                     self.selected_alpn orelse "",
                     received_at_ms,
                 );
+            }
+
+            pub fn dangerousExtractSecrets(
+                self: *Established,
+            ) connection.Error!connection.ExtractedSecrets {
+                return self.application.dangerousExtractSecrets();
             }
 
             pub fn deinit(self: *Established) void {
@@ -1795,6 +1801,23 @@ test "client and server states establish over one-byte transport reads" {
     );
     defer opened_ticket.secret.deinit();
     try std.testing.expect(cached.psk.eql(&opened_ticket.secret));
+
+    var client_traffic_keys = try established_client.dangerousExtractSecrets();
+    defer client_traffic_keys.deinit();
+    var server_traffic_keys = try established_server.dangerousExtractSecrets();
+    defer server_traffic_keys.deinit();
+    try std.testing.expectEqual(@as(u64, 1), client_traffic_keys.tx.sequence_number);
+    try std.testing.expectEqual(@as(u64, 1), client_traffic_keys.rx.sequence_number);
+    try std.testing.expectEqualSlices(
+        u8,
+        client_traffic_keys.tx.key(),
+        server_traffic_keys.rx.key(),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        client_traffic_keys.rx.key(),
+        server_traffic_keys.tx.key(),
+    );
 }
 
 test "client and server establish mutual RFC 7250 raw public keys" {

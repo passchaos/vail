@@ -395,6 +395,28 @@ pub fn build(b: *std.Build) void {
     );
     interop_rustls_key_log_step.dependOn(&check_rustls_key_log.step);
 
+    const check_rustls_traffic_secrets = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_traffic_secrets.step.dependOn(&build_rustls_min.step);
+    check_rustls_traffic_secrets.addArg(
+        "$1 extract-secrets > /tmp/vail-traffic-secrets-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 4s bench/rustls_min_client/target/release/vail-rustls-min-client extract-secrets > /tmp/vail-traffic-secrets-client.log 2>&1; " ++
+            "wait $pid; " ++
+            "sed -n 's/^VAIL_TRAFFIC //p' /tmp/vail-traffic-secrets-server.log | sort > /tmp/vail-traffic-secrets-vail.keys; " ++
+            "sed -n 's/^RUSTLS_TRAFFIC //p' /tmp/vail-traffic-secrets-client.log | sort > /tmp/vail-traffic-secrets-rustls.keys; " ++
+            "test \"$(wc -l < /tmp/vail-traffic-secrets-vail.keys)\" -eq 2 && " ++
+            "cmp /tmp/vail-traffic-secrets-vail.keys /tmp/vail-traffic-secrets-rustls.keys",
+    );
+    check_rustls_traffic_secrets.addArg("sh");
+    check_rustls_traffic_secrets.addArtifactArg(min_tls13_server);
+    const interop_rustls_traffic_secrets_step = b.step(
+        "interop-rustls-traffic-secrets-server",
+        "Compare Vail and rustls/AWS-LC TLS 1.3 record keys and sequences",
+    );
+    interop_rustls_traffic_secrets_step.dependOn(
+        &check_rustls_traffic_secrets.step,
+    );
+
     const check_rustls_brotli = b.addSystemCommand(&.{ "sh", "-c" });
     check_rustls_brotli.step.dependOn(&build_rustls_min.step);
     check_rustls_brotli.addArg(

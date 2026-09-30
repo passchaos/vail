@@ -247,6 +247,12 @@ pub fn ServerConnection(
                 self.* = undefined;
             }
 
+            pub fn dangerousExtractSecrets(
+                self: *Established,
+            ) connection.Error!connection.ExtractedSecrets {
+                return self.application.dangerousExtractSecrets();
+            }
+
             pub fn sealNewSessionTicket(
                 self: *Established,
                 allocator: std.mem.Allocator,
@@ -273,8 +279,7 @@ pub fn ServerConnection(
                         .age_add = options.age_add,
                         .issued_at_ms = options.issued_at_ms,
                         .lifetime_seconds = options.lifetime_seconds,
-                        .cipher_suite_wire = self.application.traffic.write
-                            .suite.wireValue(),
+                        .cipher_suite_wire = self.application.suite.wireValue(),
                         .max_early_data_size = if (options.allow_early_data)
                             ticket.quic_early_data_size
                         else

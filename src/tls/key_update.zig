@@ -4,6 +4,7 @@ const std = @import("std");
 const record = @import("record.zig");
 const record_fragment = @import("record_fragment.zig");
 const traffic = @import("traffic.zig");
+const traffic_secrets = @import("traffic_secrets.zig");
 
 pub const handshake_type: u8 = 24;
 pub const encoded_len: usize = 5;
@@ -90,6 +91,20 @@ pub const Duplex = struct {
 
     pub fn responseRequired(self: *const Duplex) bool {
         return self.response_pending;
+    }
+
+    /// Transfer the current record keys out of this duplex. Both directions
+    /// are validated before either state is destroyed.
+    pub fn extractSecrets(self: *Duplex) Error!traffic_secrets.Extracted {
+        var tx = try self.write.extractedDirection();
+        errdefer tx.deinit();
+        const rx = try self.read.extractedDirection();
+        self.deinit();
+        return .{
+            .version = .tls13,
+            .tx = tx,
+            .rx = rx,
+        };
     }
 
     pub fn open(

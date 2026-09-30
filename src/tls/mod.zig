@@ -21,6 +21,7 @@ pub const record_fragment = @import("record_fragment.zig");
 pub const secret = @import("secret.zig");
 pub const stream = @import("stream.zig");
 pub const traffic = @import("traffic.zig");
+pub const traffic_secrets = @import("traffic_secrets.zig");
 pub const versioned_server_connection = @import("versioned_server_connection.zig");
 pub const versioned_client_connection = @import("versioned_client_connection.zig");
 pub const server_hello = @import("server_hello.zig");
@@ -52,6 +53,7 @@ test {
     _ = record_fragment;
     _ = stream;
     _ = traffic;
+    _ = traffic_secrets;
     _ = versioned_server_connection;
     _ = versioned_client_connection;
     _ = tls12;

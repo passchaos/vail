@@ -8,6 +8,7 @@ const std = @import("std");
 const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
 const record_fragment = @import("record_fragment.zig");
 const tls_secret = @import("secret.zig");
+const traffic_secrets = @import("traffic_secrets.zig");
 
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const HmacSha384 = std.crypto.auth.hmac.sha2.HmacSha384;
@@ -27,6 +28,7 @@ pub const finished_verify_data_len: usize = 12;
 pub const max_record_len: usize =
     header_len + explicit_nonce_len + max_plaintext_len + tag_len;
 pub const SealFragmentResult = record_fragment.SealResult;
+pub const ExtractedSecrets = traffic_secrets.Extracted;
 
 pub const Error = error{
     InvalidSecretLength,
@@ -662,6 +664,34 @@ pub const TrafficState = struct {
         return if (self.exhausted) null else self.next_sequence_number;
     }
 
+    pub fn extractedDirection(
+        self: *const TrafficState,
+    ) Error!traffic_secrets.Direction {
+        const sequence = self.sequenceNumber() orelse
+            return error.SequenceExhausted;
+        const algorithm: traffic_secrets.Algorithm = switch (self.keys.suite) {
+            .ecdhe_ecdsa_aes_128_gcm_sha256,
+            .ecdhe_rsa_aes_128_gcm_sha256,
+            => .aes_128_gcm,
+            .ecdhe_ecdsa_aes_256_gcm_sha384,
+            .ecdhe_rsa_aes_256_gcm_sha384,
+            => .aes_256_gcm,
+            .ecdhe_rsa_chacha20_poly1305_sha256,
+            .ecdhe_ecdsa_chacha20_poly1305_sha256,
+            => .chacha20_poly1305,
+        };
+        var iv = [_]u8{0} ** 12;
+        const fixed_iv_len = self.keys.suite.fixedIvLength();
+        @memcpy(iv[0..fixed_iv_len], self.keys.fixed_iv[0..fixed_iv_len]);
+        return traffic_secrets.Direction.init(
+            sequence,
+            0,
+            algorithm,
+            self.keys.key[0..self.keys.suite.keyLength()],
+            &iv,
+        ) catch unreachable;
+    }
+
     pub fn seal(
         self: *TrafficState,
         content_type: u8,
@@ -729,6 +759,24 @@ pub const TrafficState = struct {
         }
     }
 };
+
+/// Transfer both directions into an owned external record-layer key set.
+/// Both sequence numbers are checked before either source state is destroyed.
+pub fn extractTrafficSecrets(
+    read: *TrafficState,
+    write: *TrafficState,
+) Error!traffic_secrets.Extracted {
+    var tx = try write.extractedDirection();
+    errdefer tx.deinit();
+    const rx = try read.extractedDirection();
+    write.deinit();
+    read.deinit();
+    return .{
+        .version = .tls12,
+        .tx = tx,
+        .rx = rx,
+    };
+}
 
 fn pHashParts(
     comptime Hmac: type,
@@ -1006,6 +1054,98 @@ test "TLS 1.2 traffic state seals bounded fragments without losing sequence" {
     try std.testing.expectEqual(payload.len, offset);
     try std.testing.expectEqual(@as(?u64, record_count), sender.sequenceNumber());
     try std.testing.expectEqual(@as(?u64, record_count), receiver.sequenceNumber());
+}
+
+test "TLS 1.2 traffic states extract directional keys and nonce bases" {
+    inline for (.{
+        .{
+            .suite = Suite.ecdhe_rsa_aes_128_gcm_sha256,
+            .algorithm = traffic_secrets.Algorithm.aes_128_gcm,
+        },
+        .{
+            .suite = Suite.ecdhe_rsa_aes_256_gcm_sha384,
+            .algorithm = traffic_secrets.Algorithm.aes_256_gcm,
+        },
+        .{
+            .suite = Suite.ecdhe_rsa_chacha20_poly1305_sha256,
+            .algorithm = traffic_secrets.Algorithm.chacha20_poly1305,
+        },
+    }) |case| {
+        const tx_key = [_]u8{0x61} ** max_key_len;
+        const rx_key = [_]u8{0x71} ** max_key_len;
+        const tx_iv = [_]u8{0x62} ** max_iv_len;
+        const rx_iv = [_]u8{0x72} ** max_iv_len;
+        var write = TrafficState.init(try Keys.init(
+            case.suite,
+            tx_key[0..case.suite.keyLength()],
+            tx_iv[0..case.suite.fixedIvLength()],
+        ));
+        var read = TrafficState.init(try Keys.init(
+            case.suite,
+            rx_key[0..case.suite.keyLength()],
+            rx_iv[0..case.suite.fixedIvLength()],
+        ));
+        write.next_sequence_number = 3;
+        read.next_sequence_number = 7;
+
+        var extracted = try extractTrafficSecrets(&read, &write);
+        defer extracted.deinit();
+        try std.testing.expectEqual(traffic_secrets.Version.tls12, extracted.version);
+        try std.testing.expectEqual(@as(u64, 3), extracted.tx.sequence_number);
+        try std.testing.expectEqual(@as(u64, 7), extracted.rx.sequence_number);
+        try std.testing.expectEqual(@as(u64, 0), extracted.tx.generation);
+        try std.testing.expectEqual(case.algorithm, extracted.tx.algorithm);
+        try std.testing.expectEqual(case.algorithm, extracted.rx.algorithm);
+        try std.testing.expectEqualSlices(
+            u8,
+            tx_key[0..case.suite.keyLength()],
+            extracted.tx.key(),
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            rx_key[0..case.suite.keyLength()],
+            extracted.rx.key(),
+        );
+        const iv_len = case.suite.fixedIvLength();
+        try std.testing.expectEqualSlices(u8, tx_iv[0..iv_len], extracted.tx.iv[0..iv_len]);
+        try std.testing.expectEqualSlices(u8, rx_iv[0..iv_len], extracted.rx.iv[0..iv_len]);
+        if (case.suite.usesExplicitNonce()) {
+            try std.testing.expectEqualSlices(
+                u8,
+                &([_]u8{0} ** explicit_nonce_len),
+                extracted.tx.iv[iv_len..],
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                &([_]u8{0} ** explicit_nonce_len),
+                extracted.rx.iv[iv_len..],
+            );
+        }
+    }
+}
+
+test "TLS 1.2 traffic extraction is atomic when a sequence is exhausted" {
+    const suite = Suite.ecdhe_rsa_aes_128_gcm_sha256;
+    var write = TrafficState.init(try Keys.init(
+        suite,
+        &([_]u8{0x81} ** 16),
+        &([_]u8{0x82} ** 4),
+    ));
+    defer write.deinit();
+    var read = TrafficState.init(try Keys.init(
+        suite,
+        &([_]u8{0x91} ** 16),
+        &([_]u8{0x92} ** 4),
+    ));
+    defer read.deinit();
+    read.exhausted = true;
+    try std.testing.expectError(
+        error.SequenceExhausted,
+        extractTrafficSecrets(&read, &write),
+    );
+    try std.testing.expectEqual(@as(?u64, 0), write.sequenceNumber());
+    var output: [64]u8 = undefined;
+    _ = try write.seal(23, "still owned", &output);
 }
 
 test "TLS 1.2 master secret EMS Finished and key block match OpenSSL" {

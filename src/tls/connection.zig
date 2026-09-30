@@ -12,8 +12,10 @@ const record = @import("record.zig");
 const record_fragment = @import("record_fragment.zig");
 const secret = @import("secret.zig");
 const stream = @import("stream.zig");
+const traffic_secrets = @import("traffic_secrets.zig");
 
 pub const SealFragmentResult = record_fragment.SealResult;
+pub const ExtractedSecrets = traffic_secrets.Extracted;
 
 pub const Error = stream.ProtectedError || key_update.Error || error{
     LocalClosed,
@@ -45,11 +47,13 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
     return struct {
         const Self = @This();
 
+        suite: cipher_suite.Suite,
         traffic: key_update.Duplex,
         receiver: stream.ProtectedReceiver(max_handshake_message_len) = .{},
         local_closed: bool = false,
         close_response_pending: bool = false,
         failed: bool = false,
+        secrets_extracted: bool = false,
 
         pub fn init(
             suite: cipher_suite.Suite,
@@ -57,6 +61,7 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
             write_secret: secret.Secret,
         ) Error!Self {
             return .{
+                .suite = suite,
                 .traffic = try key_update.Duplex.init(
                     suite,
                     read_secret,
@@ -66,7 +71,7 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
         }
 
         pub fn deinit(self: *Self) void {
-            self.traffic.deinit();
+            if (!self.secrets_extracted) self.traffic.deinit();
             self.* = undefined;
         }
 
@@ -79,11 +84,28 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
         }
 
         pub fn keyUpdateResponseRequired(self: *const Self) bool {
+            if (self.secrets_extracted) return false;
             return self.traffic.responseRequired();
         }
 
         pub fn closeNotifyResponseRequired(self: *const Self) bool {
             return self.close_response_pending;
+        }
+
+        /// Consume the live record layer and return its current transmit and
+        /// receive keys for kTLS or another external record implementation.
+        /// The connection remains safe to `deinit` but cannot be used again.
+        pub fn dangerousExtractSecrets(
+            self: *Self,
+        ) Error!ExtractedSecrets {
+            try self.requireWritable();
+            if (self.traffic.responseRequired()) {
+                return error.KeyUpdateResponseRequired;
+            }
+            const extracted = try self.traffic.extractSecrets();
+            self.secrets_extracted = true;
+            self.failed = true;
+            return extracted;
         }
 
         /// Feed arbitrary transport bytes. One call returns at most one event;
@@ -200,6 +222,7 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
             cause: anyerror,
             output: []u8,
         ) Error!usize {
+            if (self.secrets_extracted) return error.ConnectionFailed;
             if (self.local_closed) return error.LocalClosed;
             const encoded = alert.fatalForError(cause).toBytes();
             const len = try self.traffic.seal(
@@ -309,6 +332,10 @@ test "application connection handles fragmented data and bidirectional close" {
         error.PeerClosed,
         server.sealApplicationDataFragment("late", 2, &wire),
     );
+    try std.testing.expectError(
+        error.PeerClosed,
+        server.dangerousExtractSecrets(),
+    );
 
     const response_len = try server.sealCloseNotify(&wire);
     const response = try client.receive(wire[0..response_len]);
@@ -322,6 +349,10 @@ test "application connection handles fragmented data and bidirectional close" {
     try std.testing.expectError(
         error.LocalClosed,
         client.sealApplicationDataFragment("closed", 2, &wire),
+    );
+    try std.testing.expectError(
+        error.LocalClosed,
+        client.dangerousExtractSecrets(),
     );
 }
 
@@ -403,6 +434,104 @@ test "application connection seals bounded fragments with explicit progress" {
     );
 }
 
+test "application connection extracts directional record secrets atomically" {
+    const std = @import("std");
+
+    inline for ([_]cipher_suite.Suite{
+        .aes_128_gcm_sha256,
+        .aes_256_gcm_sha384,
+        .chacha20_poly1305_sha256,
+        .sm4_gcm_sm3,
+    }) |suite| {
+        const client_secret = switch (suite.hash()) {
+            .sha256 => secret.Secret.fromSha256([_]u8{0xa1} ** 32),
+            .sha384 => secret.Secret.fromSha384([_]u8{0xa2} ** 48),
+            .sm3 => secret.Secret.fromSm3([_]u8{0xa3} ** 32),
+        };
+        const server_secret = switch (suite.hash()) {
+            .sha256 => secret.Secret.fromSha256([_]u8{0xb1} ** 32),
+            .sha384 => secret.Secret.fromSha384([_]u8{0xb2} ** 48),
+            .sm3 => secret.Secret.fromSm3([_]u8{0xb3} ** 32),
+        };
+        var client = try ApplicationConnection(256).init(
+            suite,
+            server_secret,
+            client_secret,
+        );
+        defer client.deinit();
+        var server = try ApplicationConnection(256).init(
+            suite,
+            client_secret,
+            server_secret,
+        );
+        defer server.deinit();
+
+        var wire: [128]u8 = undefined;
+        inline for (.{ "first", "second" }) |message| {
+            const len = try client.sealApplicationData(message, &wire);
+            const received = try server.receive(wire[0..len]);
+            try std.testing.expectEqualStrings(
+                message,
+                received.event.?.application_data,
+            );
+        }
+        const response_len = try server.sealApplicationData("reply", &wire);
+        const response = try client.receive(wire[0..response_len]);
+        try std.testing.expectEqualStrings(
+            "reply",
+            response.event.?.application_data,
+        );
+
+        var client_keys = try client.dangerousExtractSecrets();
+        defer client_keys.deinit();
+        var server_keys = try server.dangerousExtractSecrets();
+        defer server_keys.deinit();
+        try std.testing.expectEqual(traffic_secrets.Version.tls13, client_keys.version);
+        try std.testing.expectEqual(@as(u64, 2), client_keys.tx.sequence_number);
+        try std.testing.expectEqual(@as(u64, 1), client_keys.rx.sequence_number);
+        try std.testing.expectEqual(@as(u64, 1), server_keys.tx.sequence_number);
+        try std.testing.expectEqual(@as(u64, 2), server_keys.rx.sequence_number);
+        try std.testing.expectEqual(@as(u64, 0), client_keys.tx.generation);
+        try std.testing.expectEqual(@as(u64, 0), client_keys.rx.generation);
+        try std.testing.expectEqual(client_keys.tx.algorithm, server_keys.rx.algorithm);
+        try std.testing.expectEqual(client_keys.rx.algorithm, server_keys.tx.algorithm);
+        try std.testing.expectEqualSlices(u8, client_keys.tx.key(), server_keys.rx.key());
+        try std.testing.expectEqualSlices(u8, client_keys.rx.key(), server_keys.tx.key());
+        try std.testing.expectEqual(client_keys.tx.iv, server_keys.rx.iv);
+        try std.testing.expectEqual(client_keys.rx.iv, server_keys.tx.iv);
+        try std.testing.expectError(
+            error.ConnectionFailed,
+            client.sealApplicationData("after extraction", &wire),
+        );
+        try std.testing.expectError(
+            error.ConnectionFailed,
+            client.dangerousExtractSecrets(),
+        );
+    }
+}
+
+test "traffic-secret extraction failure preserves both directions" {
+    const std = @import("std");
+    const initial = secret.Secret.fromSha256([_]u8{0xc1} ** 32);
+    var connection = try ApplicationConnection(64).init(
+        .aes_128_gcm_sha256,
+        initial,
+        initial,
+    );
+    defer connection.deinit();
+    connection.traffic.read.next_sequence_number = std.math.maxInt(u64);
+    try std.testing.expectError(
+        error.SequenceExhausted,
+        connection.dangerousExtractSecrets(),
+    );
+    var wire: [64]u8 = undefined;
+    _ = try connection.sealApplicationData("still owned", &wire);
+    try std.testing.expectEqual(
+        @as(?u64, 1),
+        connection.traffic.write.sequenceNumber(),
+    );
+}
+
 test "application connection processes requested KeyUpdate before data" {
     const std = @import("std");
     const client_secret = secret.Secret.fromSha384([_]u8{0x41} ** 48);
@@ -438,6 +567,10 @@ test "application connection processes requested KeyUpdate before data" {
     );
     try std.testing.expectError(
         error.KeyUpdateResponseRequired,
+        server.dangerousExtractSecrets(),
+    );
+    try std.testing.expectError(
+        error.KeyUpdateResponseRequired,
         server.sealKeyUpdate(.update_requested, &wire),
     );
 
@@ -455,6 +588,17 @@ test "application connection processes requested KeyUpdate before data" {
         "updated",
         data.event.?.application_data,
     );
+
+    var client_keys = try client.dangerousExtractSecrets();
+    defer client_keys.deinit();
+    var server_keys = try server.dangerousExtractSecrets();
+    defer server_keys.deinit();
+    try std.testing.expectEqual(@as(u64, 1), client_keys.tx.generation);
+    try std.testing.expectEqual(@as(u64, 1), client_keys.rx.generation);
+    try std.testing.expectEqual(@as(u64, 1), server_keys.tx.generation);
+    try std.testing.expectEqual(@as(u64, 1), server_keys.rx.generation);
+    try std.testing.expectEqualSlices(u8, client_keys.tx.key(), server_keys.rx.key());
+    try std.testing.expectEqualSlices(u8, client_keys.rx.key(), server_keys.tx.key());
 }
 
 test "application connection latches malformed post-handshake messages" {

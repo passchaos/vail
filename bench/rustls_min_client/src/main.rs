@@ -2,8 +2,8 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::client::EchConfig;
 use rustls::compress::{CertDecompressor, DecompressionFailed};
 use rustls::{
-    CertificateCompressionAlgorithm, ClientConfig, ClientConnection, DigitallySignedStruct, Error,
-    KeyLog, RootCertStore, SignatureScheme,
+    CertificateCompressionAlgorithm, ClientConfig, ClientConnection, ConnectionTrafficSecrets,
+    DigitallySignedStruct, Error, KeyLog, RootCertStore, SignatureScheme,
 };
 use rustls_pki_types::{CertificateDer, EchConfigListBytes, ServerName, UnixTime};
 use std::net::TcpStream;
@@ -103,6 +103,7 @@ fn main() {
     let ech_enabled = mode.as_deref() == Some("ech");
     let zstd_enabled = mode.as_deref() == Some("zstd");
     let key_log_enabled = mode.as_deref() == Some("keylog");
+    let extract_secrets = mode.as_deref() == Some("extract-secrets");
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let builder = ClientConfig::builder_with_provider(provider);
     let builder = if ech_enabled {
@@ -128,6 +129,7 @@ fn main() {
     if key_log_enabled {
         config.key_log = Arc::new(StdoutKeyLog);
     }
+    config.enable_secret_extraction = extract_secrets;
 
     let name = ServerName::try_from("localhost").unwrap();
     let mut conn = ClientConnection::new(Arc::new(config), name).unwrap();
@@ -155,10 +157,34 @@ fn main() {
     while conn.wants_write() {
         conn.write_tls(&mut sock).unwrap();
     }
+    if extract_secrets {
+        let secrets = conn.dangerous_extract_secrets().unwrap();
+        print_traffic_secret("client", secrets.tx);
+        print_traffic_secret("server", secrets.rx);
+        return;
+    }
     println!(
         "rustls connected: suite={:?} alpn={:?} ech={:?}",
         conn.negotiated_cipher_suite(),
         conn.alpn_protocol(),
         conn.ech_status(),
     );
+}
+
+fn print_traffic_secret(direction: &str, (sequence, secret): (u64, ConnectionTrafficSecrets)) {
+    let (key, iv) = match secret {
+        ConnectionTrafficSecrets::Aes128Gcm { key, iv }
+        | ConnectionTrafficSecrets::Aes256Gcm { key, iv }
+        | ConnectionTrafficSecrets::Chacha20Poly1305 { key, iv } => (key, iv),
+        _ => panic!("unsupported extracted traffic secret"),
+    };
+    print!("RUSTLS_TRAFFIC {direction} {sequence} ");
+    for byte in key.as_ref() {
+        print!("{byte:02x}");
+    }
+    print!(" ");
+    for byte in iv.as_ref() {
+        print!("{byte:02x}");
+    }
+    println!();
 }

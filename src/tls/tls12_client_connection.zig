@@ -22,6 +22,7 @@ const tls12 = @import("tls12.zig");
 const tls12_ticket = @import("tls12_ticket.zig");
 const handshake = @import("tls12_handshake.zig");
 const transcript = @import("transcript.zig");
+const traffic_secrets = @import("traffic_secrets.zig");
 
 pub const Error = std.mem.Allocator.Error || stream.Error ||
     stream.HandshakeError || client_hello.Error || handshake.Error ||
@@ -171,6 +172,7 @@ pub const Established = struct {
     local_closed: bool = false,
     peer_closed: bool = false,
     failed: bool = false,
+    secrets_extracted: bool = false,
 
     pub const ApplicationEvent = union(enum) {
         application_data: []const u8,
@@ -178,8 +180,10 @@ pub const Established = struct {
     };
 
     pub fn deinit(self: *Established) void {
-        self.read.deinit();
-        self.write.deinit();
+        if (!self.secrets_extracted) {
+            self.read.deinit();
+            self.write.deinit();
+        }
         std.crypto.secureZero(u8, &self.master_secret);
         for (self.peer_certificate_chain) |certificate| {
             self.allocator.free(certificate);
@@ -191,6 +195,24 @@ pub const Established = struct {
             self.allocator.free(ticket);
         }
         self.* = undefined;
+    }
+
+    /// Consume the live record layer and return its current transmit and
+    /// receive keys. The connection remains safe to `deinit`, but all record
+    /// I/O is permanently disabled after this call.
+    pub fn dangerousExtractSecrets(
+        self: *Established,
+    ) Error!tls12.ExtractedSecrets {
+        if (self.failed or self.local_closed or self.peer_closed) {
+            return error.ConnectionFailed;
+        }
+        const extracted = try tls12.extractTrafficSecrets(
+            &self.read,
+            &self.write,
+        );
+        self.secrets_extracted = true;
+        self.failed = true;
+        return extracted;
     }
 
     pub fn sealApplicationData(
@@ -1752,6 +1774,38 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
         u8,
         client_session.id(),
         server_session.id(),
+    );
+
+    var client_secrets = try established_client.?.dangerousExtractSecrets();
+    defer client_secrets.deinit();
+    var server_secrets = try established_server.?.dangerousExtractSecrets();
+    defer server_secrets.deinit();
+    try std.testing.expectEqual(traffic_secrets.Version.tls12, client_secrets.version);
+    // Sequence zero protected each side's Finished before these two
+    // application records, so the next record uses sequence three.
+    try std.testing.expectEqual(@as(u64, 3), client_secrets.tx.sequence_number);
+    try std.testing.expectEqual(@as(u64, 3), client_secrets.rx.sequence_number);
+    try std.testing.expectEqual(@as(u64, 3), server_secrets.tx.sequence_number);
+    try std.testing.expectEqual(@as(u64, 3), server_secrets.rx.sequence_number);
+    try std.testing.expectEqualSlices(
+        u8,
+        client_secrets.tx.key(),
+        server_secrets.rx.key(),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        client_secrets.rx.key(),
+        server_secrets.tx.key(),
+    );
+    try std.testing.expectEqual(client_secrets.tx.iv, server_secrets.rx.iv);
+    try std.testing.expectEqual(client_secrets.rx.iv, server_secrets.tx.iv);
+    try std.testing.expectError(
+        error.ConnectionFailed,
+        established_client.?.sealApplicationData("after extraction", &application_record),
+    );
+    try std.testing.expectError(
+        error.ConnectionFailed,
+        established_server.?.dangerousExtractSecrets(),
     );
 
     client_wire.clearRetainingCapacity();

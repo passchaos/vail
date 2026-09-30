@@ -11,6 +11,7 @@ const key_schedule = @import("key_schedule.zig");
 const record = @import("record.zig");
 const record_fragment = @import("record_fragment.zig");
 const secret = @import("secret.zig");
+const traffic_secrets = @import("traffic_secrets.zig");
 
 pub const Error = record.Error || key_schedule.Error || error{
     SequenceExhausted,
@@ -50,6 +51,26 @@ pub const State = struct {
             null
         else
             self.next_sequence_number;
+    }
+
+    pub fn extractedDirection(
+        self: *const State,
+    ) Error!traffic_secrets.Direction {
+        const sequence = self.sequenceNumber() orelse
+            return error.SequenceExhausted;
+        const algorithm: traffic_secrets.Algorithm = switch (self.suite) {
+            .aes_128_gcm_sha256 => .aes_128_gcm,
+            .aes_256_gcm_sha384 => .aes_256_gcm,
+            .chacha20_poly1305_sha256 => .chacha20_poly1305,
+            .sm4_gcm_sm3 => .sm4_gcm,
+        };
+        return traffic_secrets.Direction.init(
+            sequence,
+            self.generation,
+            algorithm,
+            self.keys.key[0..self.suite.keyLen()],
+            &self.keys.iv,
+        ) catch unreachable;
     }
 
     pub inline fn seal(

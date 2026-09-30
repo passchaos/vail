@@ -144,6 +144,11 @@ The current foundation provides:
   configurable application-record fragmentation with explicit plaintext
   consumed/output written progress. Each call seals exactly one record, so
   output failures remain retryable without hidden buffering or nonce reuse.
+- Established TLS 1.3 and TLS 1.2 record layers can be consumed into owned
+  transmit/receive AEAD keys, 12-byte nonce bases, current sequence numbers,
+  and TLS 1.3 key generations for kTLS or user-space offload. Successful
+  extraction permanently disables Vail record I/O and the returned material
+  has an explicit wiping `deinit`.
 - TLS 1.2 cryptographic foundations for ECDHE-ECDSA/ECDHE-RSA AES-GCM and
   ChaCha20-Poly1305 suites: SHA-256/SHA-384 PRFs, ordinary and RFC 7627
   extended master secrets, Finished values, key-block separation, explicit
@@ -256,6 +261,9 @@ interfaces and libzstd only as the independent test oracle.
 lines byte-for-byte between a Vail server and rustls/AWS-LC client;
 `interop-rustls-tls12-keylog-server` performs the corresponding TLS 1.2
 `CLIENT_RANDOM` comparison.
+`zig build interop-rustls-traffic-secrets-server` consumes both established
+record layers and compares their transmit/receive AES-GCM key, IV, and current
+sequence values byte-for-byte.
 `zig build -Doptimize=ReleaseFast bench-rsa-pss` measures the built-in
 constant-time RSA-2048 PSS and PKCS#1 v1.5 signing paths.
 `zig build -Doptimize=ReleaseFast bench-hpke` measures RFC 9180 sender/receiver

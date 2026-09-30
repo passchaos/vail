@@ -162,6 +162,7 @@ pub const Established = struct {
     local_closed: bool = false,
     peer_closed: bool = false,
     failed: bool = false,
+    secrets_extracted: bool = false,
 
     pub const ApplicationEvent = union(enum) {
         application_data: []const u8,
@@ -169,13 +170,33 @@ pub const Established = struct {
     };
 
     pub fn deinit(self: *Established) void {
-        self.read.deinit();
-        self.write.deinit();
+        if (!self.secrets_extracted) {
+            self.read.deinit();
+            self.write.deinit();
+        }
         std.crypto.secureZero(u8, &self.master_secret);
         if (self.peer_certificate_chain) |chain| {
             freeCertificateChain(self.allocator, chain);
         }
         self.* = undefined;
+    }
+
+    /// Consume the live record layer and return its current transmit and
+    /// receive keys. The connection remains safe to `deinit`, but all record
+    /// I/O is permanently disabled after this call.
+    pub fn dangerousExtractSecrets(
+        self: *Established,
+    ) Error!tls12.ExtractedSecrets {
+        if (self.failed or self.local_closed or self.peer_closed) {
+            return error.ConnectionFailed;
+        }
+        const extracted = try tls12.extractTrafficSecrets(
+            &self.read,
+            &self.write,
+        );
+        self.secrets_extracted = true;
+        self.failed = true;
+        return extracted;
     }
 
     pub fn sealApplicationData(

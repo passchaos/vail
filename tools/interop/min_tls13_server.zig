@@ -42,6 +42,10 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "keylog")
     else
         false;
+    const extract_secrets = if (mode) |argument|
+        std.mem.eql(u8, argument, "extract-secrets")
+    else
+        false;
     if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
@@ -221,12 +225,36 @@ pub fn main(init: std.process.Init) !void {
             .{@tagName(algorithm)},
         );
     }
+    if (extract_secrets) {
+        var secrets = try established.dangerousExtractSecrets();
+        defer secrets.deinit();
+        printTrafficSecret("client", &secrets.rx);
+        printTrafficSecret("server", &secrets.tx);
+        return;
+    }
     var close_record: [64]u8 = undefined;
     const close_len = try established.application.sealCloseNotify(
         &close_record,
     );
     try writeAll(client, close_record[0..close_len]);
     _ = linux.shutdown(client, linux.SHUT.WR);
+}
+
+fn printTrafficSecret(
+    direction: []const u8,
+    secret: *const vail.tls.traffic_secrets.Direction,
+) void {
+    var encoded: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&encoded);
+    writer.print(
+        "VAIL_TRAFFIC {s} {d} ",
+        .{ direction, secret.sequence_number },
+    ) catch unreachable;
+    writer.printHex(secret.key(), .lower) catch unreachable;
+    writer.writeByte(' ') catch unreachable;
+    writer.printHex(&secret.iv, .lower) catch unreachable;
+    writer.writeByte('\n') catch unreachable;
+    std.debug.print("{s}", .{encoded[0..writer.end]});
 }
 
 fn writeKeyLog(
