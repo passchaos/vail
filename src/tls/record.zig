@@ -7,13 +7,13 @@
 const std = @import("std");
 
 const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
+const prepared_chacha = @import("../crypto/chacha20_poly1305.zig");
 const sm4 = @import("../crypto/sm4.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const secret = @import("secret.zig");
 
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
-const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const HkdfSha256 = std.crypto.kdf.hkdf.Hkdf(HmacSha256);
 const HmacSha384 = std.crypto.auth.hmac.sha2.HmacSha384;
@@ -225,7 +225,14 @@ pub const Keys = struct {
                     self.key,
                 );
             },
-            .chacha20_poly1305_sha256 => ChaCha20Poly1305.encrypt(ciphertext, tag, inner[0..ciphertext_len], record[0..header_len], nonce, self.key),
+            .chacha20_poly1305_sha256 => prepared_chacha.encrypt(
+                ciphertext,
+                tag,
+                inner[0..ciphertext_len],
+                record[0..header_len],
+                nonce,
+                self.key,
+            ),
             .sm4_gcm_sm3 => sm4.Gcm.encrypt(ciphertext, tag, inner[0..ciphertext_len], record[0..header_len], nonce, self.key[0..16].*),
         }
         return record_len;
@@ -288,7 +295,14 @@ pub const Keys = struct {
                     self.key,
                 ) catch return error.AuthenticationFailed;
             },
-            .chacha20_poly1305_sha256 => ChaCha20Poly1305.decrypt(plaintext[0..ciphertext_len], ciphertext, tag, record[0..header_len], nonce, self.key) catch return error.AuthenticationFailed,
+            .chacha20_poly1305_sha256 => prepared_chacha.decrypt(
+                plaintext[0..ciphertext_len],
+                ciphertext,
+                tag,
+                record[0..header_len],
+                nonce,
+                self.key,
+            ) catch return error.AuthenticationFailed,
             .sm4_gcm_sm3 => sm4.Gcm.decrypt(plaintext[0..ciphertext_len], ciphertext, tag, record[0..header_len], nonce, self.key[0..16].*) catch return error.AuthenticationFailed,
         }
         var opened_len = ciphertext_len;

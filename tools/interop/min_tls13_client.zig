@@ -8,8 +8,13 @@ pub fn main(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(init.gpa);
     defer args.deinit();
     _ = args.next();
-    const use_zstd = if (args.next()) |argument|
+    const mode = args.next();
+    const use_zstd = if (mode) |argument|
         std.mem.eql(u8, argument, "zstd")
+    else
+        false;
+    const use_chacha = if (mode) |argument|
+        std.mem.eql(u8, argument, "chacha")
     else
         false;
     if (args.next() != null) return error.InvalidArguments;
@@ -36,7 +41,10 @@ pub fn main(init: std.process.Init) !void {
         .server_name = "localhost",
         .key_material = &material,
         .retry_key_material = &retry_material,
-        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .cipher_suites = if (use_chacha)
+            &.{.chacha20_poly1305_sha256}
+        else
+            &.{.aes_128_gcm_sha256},
         .alpn_protocols = &.{"h2"},
         .certificate_compression_algorithms = if (use_zstd)
             &.{.zstd}
@@ -72,6 +80,10 @@ pub fn main(init: std.process.Init) !void {
     defer established.deinit();
     try writeAll(fd, client_flight.items);
     std.debug.print("server authenticated and finished verified\n", .{});
+    std.debug.print(
+        "cipher suite={s}\n",
+        .{@tagName(established.application.suite)},
+    );
     if (established.certificate_compression) |algorithm| {
         std.debug.print(
             "certificate compression={s}\n",

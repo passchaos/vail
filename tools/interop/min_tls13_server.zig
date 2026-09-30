@@ -46,6 +46,10 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "extract-secrets")
     else
         false;
+    const use_chacha = if (mode) |argument|
+        std.mem.eql(u8, argument, "chacha")
+    else
+        false;
     if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
@@ -149,7 +153,10 @@ pub fn main(init: std.process.Init) !void {
     var handshake = HandshakeServer.init(.{
         .allocator = std.heap.smp_allocator,
         .policy = .{
-            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .cipher_suites = if (use_chacha)
+                &.{.chacha20_poly1305_sha256}
+            else
+                &.{.aes_128_gcm_sha256},
             .groups = if (use_ech and !force_ech_hrr)
                 &ech_groups
             else

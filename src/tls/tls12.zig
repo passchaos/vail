@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
+const prepared_chacha = @import("../crypto/chacha20_poly1305.zig");
 const record_fragment = @import("record_fragment.zig");
 const tls_secret = @import("secret.zig");
 const traffic_secrets = @import("traffic_secrets.zig");
@@ -14,7 +15,6 @@ const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const HmacSha384 = std.crypto.auth.hmac.sha2.HmacSha384;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
-const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 
 pub const record_version = [_]u8{ 0x03, 0x03 };
 pub const header_len: usize = 5;
@@ -562,7 +562,7 @@ pub const Keys = struct {
             },
             .ecdhe_rsa_chacha20_poly1305_sha256,
             .ecdhe_ecdsa_chacha20_poly1305_sha256,
-            => ChaCha20Poly1305.encrypt(
+            => prepared_chacha.encrypt(
                 ciphertext,
                 tag,
                 plaintext,
@@ -628,7 +628,7 @@ pub const Keys = struct {
             },
             .ecdhe_rsa_chacha20_poly1305_sha256,
             .ecdhe_ecdsa_chacha20_poly1305_sha256,
-            => ChaCha20Poly1305.decrypt(
+            => prepared_chacha.decrypt(
                 plaintext[0..ciphertext_len],
                 ciphertext,
                 tag,

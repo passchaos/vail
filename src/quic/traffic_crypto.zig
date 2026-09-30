@@ -14,6 +14,7 @@ const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const ChaCha20IETF = std.crypto.stream.chacha.ChaCha20IETF;
 const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
+const prepared_chacha = @import("../crypto/chacha20_poly1305.zig");
 const sm3 = @import("../crypto/sm3.zig");
 const sm4 = @import("../crypto/sm4.zig");
 const cipher_suite = @import("../tls/cipher_suite.zig");
@@ -251,7 +252,7 @@ pub const Keys = struct {
                 nonce,
                 self.key[0..sm4.key_len].*,
             ),
-            .chacha20_poly1305_sha256 => ChaCha20Poly1305.encrypt(
+            .chacha20_poly1305_sha256 => prepared_chacha.encrypt(
                 ciphertext,
                 tag,
                 plaintext,
@@ -300,7 +301,7 @@ pub const Keys = struct {
                 nonce,
                 self.key[0..sm4.key_len].*,
             ),
-            .chacha20_poly1305_sha256 => try ChaCha20Poly1305.decrypt(
+            .chacha20_poly1305_sha256 => try prepared_chacha.decrypt(
                 plaintext,
                 ciphertext,
                 tag,
@@ -416,6 +417,7 @@ pub const PreparedKeys = struct {
 
     pub fn deinit(self: *PreparedKeys) void {
         if (self.aes_gcm) |*context| context.deinit();
+        self.keys.deinit();
         self.* = undefined;
     }
 

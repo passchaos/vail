@@ -106,6 +106,42 @@ pub fn build(b: *std.Build) void {
     );
     tls12_record_bench_step.dependOn(&run_tls12_record_bench.step);
 
+    const chacha_components_bench = b.addExecutable(.{
+        .name = "vail-bench-chacha-components",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/chacha_components.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_chacha_components_bench = b.addRunArtifact(
+        chacha_components_bench,
+    );
+    const chacha_components_bench_step = b.step(
+        "bench-chacha-components",
+        "Profile Zig std ChaCha20-Poly1305 components",
+    );
+    chacha_components_bench_step.dependOn(
+        &run_chacha_components_bench.step,
+    );
+
+    const aws_lc_aead_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-aead-bench",
+    });
+    const aws_lc_aead_bench_step = b.step(
+        "bench-aws-lc-aead",
+        "Benchmark test-only AWS-LC AEAD implementations",
+    );
+    aws_lc_aead_bench_step.dependOn(&aws_lc_aead_bench.step);
+
     const tls_handshake_bench = b.addExecutable(.{
         .name = "vail-bench-tls-server-handshake",
         .root_module = b.createModule(.{
@@ -372,6 +408,25 @@ pub fn build(b: *std.Build) void {
         "Exercise Vail's minimal TLS 1.3 server flight with rustls client",
     );
     interop_rustls_min_step.dependOn(&check_rustls_min.step);
+
+    const check_rustls_chacha = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_chacha.step.dependOn(&build_rustls_min.step);
+    check_rustls_chacha.addArg(
+        "$1 chacha > /tmp/vail-chacha-rustls-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 4s bench/rustls_min_client/target/release/vail-rustls-min-client > /tmp/vail-chacha-rustls-client.log 2>&1 || true; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'client finished verified' /tmp/vail-chacha-rustls-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'client finished verified' /tmp/vail-chacha-rustls-server.log && " ++
+            "grep -q 'TLS13_CHACHA20_POLY1305_SHA256' /tmp/vail-chacha-rustls-client.log",
+    );
+    check_rustls_chacha.addArg("sh");
+    check_rustls_chacha.addArtifactArg(min_tls13_server);
+    const interop_rustls_chacha_step = b.step(
+        "interop-rustls-chacha-server",
+        "Exercise Vail's accelerated ChaCha20-Poly1305 server with rustls",
+    );
+    interop_rustls_chacha_step.dependOn(&check_rustls_chacha.step);
 
     const check_rustls_key_log = b.addSystemCommand(&.{ "sh", "-c" });
     check_rustls_key_log.step.dependOn(&build_rustls_min.step);
@@ -673,6 +728,30 @@ pub fn build(b: *std.Build) void {
     );
     interop_vail_rustls_server_step.dependOn(
         &check_vail_rustls_server.step,
+    );
+
+    const check_vail_rustls_chacha_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_rustls_chacha_server.step.dependOn(&build_rustls_server.step);
+    check_vail_rustls_chacha_server.addArg(
+        "work=$(mktemp -d /tmp/vail-rustls-chacha-server.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "bench/rustls_min_server/target/release/vail-rustls-min-server \"$work/cert.pem\" \"$work/key.pem\" >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 4s $1 chacha >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'rustls server completed' \"$work/server.log\" && " ++
+            "grep -q 'server authenticated and finished verified' \"$work/client.log\" && " ++
+            "grep -q 'cipher suite=chacha20_poly1305_sha256' \"$work/client.log\" && " ++
+            "grep -q 'server application data verified' \"$work/client.log\"",
+    );
+    check_vail_rustls_chacha_server.addArg("sh");
+    check_vail_rustls_chacha_server.addArtifactArg(min_tls13_client);
+    const interop_vail_rustls_chacha_server_step = b.step(
+        "interop-rustls-chacha-client",
+        "Exercise Vail's accelerated ChaCha20-Poly1305 client against rustls",
+    );
+    interop_vail_rustls_chacha_server_step.dependOn(
+        &check_vail_rustls_chacha_server.step,
     );
 
     const check_vail_rustls_zstd_server = b.addSystemCommand(&.{ "sh", "-c" });

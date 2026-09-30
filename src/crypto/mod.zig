@@ -1,6 +1,7 @@
 //! Reusable authenticated cryptographic primitives.
 
 pub const aes_gcm = @import("aes_gcm.zig");
+pub const chacha20_poly1305 = @import("chacha20_poly1305.zig");
 pub const hpke = @import("hpke.zig");
 pub const mac = @import("mac.zig");
 pub const memory = @import("memory.zig");
@@ -17,6 +18,7 @@ pub const testing = struct {
 test {
     _ = @import("tests.zig");
     _ = aes_gcm;
+    _ = chacha20_poly1305;
     _ = hpke;
     _ = rsa;
     _ = sm2;
