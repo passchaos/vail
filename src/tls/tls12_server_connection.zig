@@ -459,6 +459,11 @@ pub fn ServerConnection(
             if (parsed.session_ticket) |offered_ticket| {
                 if (offered_ticket.len != 0) policy.new_session_id = &.{};
             }
+            if (!try parsed.supportsCertificateChain(
+                self.config.certificate_chain,
+            )) {
+                return error.UnsupportedSignatureScheme;
+            }
             const selection = try handshake.select(
                 parsed,
                 self.config.signer,

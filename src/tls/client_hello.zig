@@ -25,6 +25,7 @@ pub const ext_compress_certificate: u16 =
     certificate_compression.extension_type_compress_certificate;
 pub const ext_early_data: u16 = 0x002a;
 pub const ext_certificate_authorities: u16 = 0x002f;
+pub const ext_signature_algorithms_cert: u16 = 0x0032;
 pub const ext_record_size_limit: u16 = record_size_limit.extension_type;
 pub const ext_quic_transport_parameters: u16 = 0x0039;
 pub const ext_ticket_request: u16 = 0x003a;
@@ -91,6 +92,9 @@ pub const WriteOptions = struct {
     alpn_protocols: []const []const u8 = &.{},
     quic_transport_parameters: ?[]const u8 = null,
     signature_schemes: []const u16 = &default_signature_schemes,
+    /// RFC 8446 certificate-signature constraints. Null omits the extension
+    /// and leaves certificate-chain policy to the verifier.
+    certificate_signature_schemes: ?[]const u16 = null,
     request_ocsp: bool = false,
     offer_extended_master_secret: bool = false,
     record_size_limit: ?u16 = null,
@@ -131,6 +135,8 @@ pub const FlexibleWriteOptions = struct {
     alpn_protocols: []const []const u8 = &.{},
     quic_transport_parameters: ?[]const u8 = null,
     signature_schemes: []const u16 = &default_signature_schemes,
+    /// Null omits signature_algorithms_cert.
+    certificate_signature_schemes: ?[]const u16 = null,
     request_ocsp: bool = false,
     offer_extended_master_secret: bool = false,
     record_size_limit: ?u16 = null,
@@ -168,6 +174,7 @@ pub fn write(
         .alpn_protocols = options.alpn_protocols,
         .quic_transport_parameters = options.quic_transport_parameters,
         .signature_schemes = options.signature_schemes,
+        .certificate_signature_schemes = options.certificate_signature_schemes,
         .request_ocsp = options.request_ocsp,
         .offer_extended_master_secret = options.offer_extended_master_secret,
         .record_size_limit = options.record_size_limit,
@@ -448,6 +455,37 @@ pub fn writeWithKeyShare(
         signatures.items,
     );
 
+    if (options.certificate_signature_schemes) |schemes| {
+        if (schemes.len == 0 or schemes.len > std.math.maxInt(u16) / 2) {
+            return error.InvalidClientHello;
+        }
+        var certificate_signatures: std.ArrayList(u8) = .empty;
+        defer certificate_signatures.deinit(allocator);
+        try appendInt(
+            &certificate_signatures,
+            allocator,
+            u16,
+            schemes.len * 2,
+        );
+        for (schemes, 0..) |scheme, index| {
+            for (schemes[0..index]) |previous| {
+                if (scheme == previous) return error.InvalidClientHello;
+            }
+            try appendInt(
+                &certificate_signatures,
+                allocator,
+                u16,
+                scheme,
+            );
+        }
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_signature_algorithms_cert,
+            certificate_signatures.items,
+        );
+    }
+
     if (options.alpn_protocols.len != 0) {
         var alpn_names: std.ArrayList(u8) = .empty;
         defer alpn_names.deinit(allocator);
@@ -640,6 +678,7 @@ pub const Parsed = struct {
     session_ticket: ?[]const u8 = null,
     supported_groups: []const u8 = &.{},
     signature_algorithms: []const u8 = &.{},
+    signature_algorithms_cert: ?[]const u8 = null,
     alpn_protocols: []const u8 = &.{},
     quic_transport_parameters: ?[]const u8 = null,
     supported_versions: []const u8 = &.{},
@@ -680,17 +719,40 @@ pub const Parsed = struct {
         self: Parsed,
         target_scheme: u16,
     ) Error!bool {
-        if (self.signature_algorithms.len == 0) return false;
-        var pos: usize = 0;
-        const algorithms = try readU16Vector(
+        return supportsSignatureSchemeIn(
             self.signature_algorithms,
-            &pos,
+            target_scheme,
         );
-        if (pos != self.signature_algorithms.len or
-            algorithms.len == 0 or algorithms.len % 2 != 0)
-        {
-            return error.InvalidClientHello;
-        }
+    }
+
+    pub fn supportsCertificateSignatureScheme(
+        self: Parsed,
+        target_scheme: u16,
+    ) Error!bool {
+        return supportsSignatureSchemeIn(
+            self.signature_algorithms_cert orelse
+                self.signature_algorithms,
+            target_scheme,
+        );
+    }
+
+    pub fn supportsCertificateChain(
+        self: Parsed,
+        chain: []const []const u8,
+    ) (Error || auth.Error)!bool {
+        const extension = self.signature_algorithms_cert orelse return true;
+        return auth.certificateChainSupportsSchemes(
+            chain,
+            try parseSignatureAlgorithms(extension),
+        );
+    }
+
+    fn supportsSignatureSchemeIn(
+        encoded: []const u8,
+        target_scheme: u16,
+    ) Error!bool {
+        if (encoded.len == 0) return false;
+        const algorithms = try parseSignatureAlgorithms(encoded);
         var algorithm_pos: usize = 0;
         while (algorithm_pos < algorithms.len) : (algorithm_pos += 2) {
             if (std.mem.readInt(
@@ -874,6 +936,10 @@ pub fn parse(bytes: []const u8) Error!Parsed {
             },
             ext_supported_groups => parsed.supported_groups = payload,
             ext_signature_algorithms => parsed.signature_algorithms = payload,
+            ext_signature_algorithms_cert => {
+                _ = try parseSignatureAlgorithms(payload);
+                parsed.signature_algorithms_cert = payload;
+            },
             ext_application_layer_protocol_negotiation => parsed.alpn_protocols = payload,
             ext_extended_master_secret => {
                 if (payload.len != 0) return error.InvalidClientHello;
@@ -1106,6 +1172,33 @@ fn containsCertificateType(
     return false;
 }
 
+fn parseSignatureAlgorithms(encoded: []const u8) Error![]const u8 {
+    var pos: usize = 0;
+    const algorithms = try readU16Vector(encoded, &pos);
+    if (pos != encoded.len or algorithms.len == 0 or
+        algorithms.len % 2 != 0)
+    {
+        return error.InvalidClientHello;
+    }
+    var current: usize = 0;
+    while (current < algorithms.len) : (current += 2) {
+        const algorithm = std.mem.readInt(
+            u16,
+            algorithms[current..][0..2],
+            .big,
+        );
+        var previous: usize = 0;
+        while (previous < current) : (previous += 2) {
+            if (algorithm == std.mem.readInt(
+                u16,
+                algorithms[previous..][0..2],
+                .big,
+            )) return error.InvalidClientHello;
+        }
+    }
+    return algorithms;
+}
+
 fn readByte(bytes: []const u8, pos: *usize) Error!u8 {
     const out = try readSlice(bytes, pos, 1);
     return out[0];
@@ -1193,6 +1286,10 @@ pub fn validateSecondClientHello(
         !optionalBytesEql(first.session_ticket, second.session_ticket) or
         !std.mem.eql(u8, first.supported_groups, second.supported_groups) or
         !std.mem.eql(u8, first.signature_algorithms, second.signature_algorithms) or
+        !optionalBytesEql(
+            first.signature_algorithms_cert,
+            second.signature_algorithms_cert,
+        ) or
         !std.mem.eql(u8, first.alpn_protocols, second.alpn_protocols) or
         !std.mem.eql(u8, first.supported_versions, second.supported_versions) or
         !std.mem.eql(u8, first.psk_key_exchange_modes, second.psk_key_exchange_modes) or
@@ -1257,6 +1354,45 @@ test "ClientHello writer carries an arbitrary single key share" {
     try std.testing.expect(try parsed.supportsGroup(0x11ec));
     try std.testing.expect(try parsed.supportsGroup(0x001d));
     try std.testing.expectEqualStrings("retry-cookie", parsed.cookie.?);
+}
+
+test "HelloRetryRequest preserves certificate signature algorithms" {
+    const allocator = std.testing.allocator;
+    const groups = &.{ @as(u16, 0x001d), @as(u16, 0x0017) };
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try writeWithKeyShare(&first, allocator, .{
+        .random = [_]u8{0x73} ** 32,
+        .key_share = .{
+            .group = 0x001d,
+            .key_exchange = &([_]u8{0x74} ** 32),
+        },
+        .supported_groups = groups,
+        .certificate_signature_schemes = &.{auth.signature_scheme_ed25519},
+    });
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    try writeWithKeyShare(&second, allocator, .{
+        .random = [_]u8{0x73} ** 32,
+        .key_share = .{
+            .group = 0x0017,
+            .key_exchange = &([_]u8{0x04} ++ ([_]u8{0x75} ** 64)),
+        },
+        .supported_groups = groups,
+        .cookie = "cookie",
+        .certificate_signature_schemes = &.{
+            auth.signature_scheme_rsa_pss_rsae_sha256,
+        },
+    });
+    try std.testing.expectError(
+        error.InvalidSecondClientHello,
+        validateSecondClientHello(
+            first.items,
+            try parse(second.items),
+            0x0017,
+            "cookie",
+        ),
+    );
 }
 
 test "RFC 7250 certificate type lists round-trip and validate structure" {
@@ -1326,6 +1462,32 @@ test "certificate authorities reject empty and truncated names" {
     try std.testing.expectError(
         error.InvalidClientHello,
         parseCertificateAuthorities(&.{ 0, 3, 0, 2, 0xaa }),
+    );
+}
+
+test "certificate signature algorithm lists reject malformed encodings" {
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        parseSignatureAlgorithms(&.{ 0, 0 }),
+    );
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        parseSignatureAlgorithms(&.{ 0, 1, 0x08 }),
+    );
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        parseSignatureAlgorithms(&.{ 0, 2, 0x08 }),
+    );
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        parseSignatureAlgorithms(&.{ 0, 4, 0x08, 0x07, 0x08, 0x07 }),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x08, 0x07, 0x08, 0x04 },
+        try parseSignatureAlgorithms(
+            &.{ 0, 4, 0x08, 0x07, 0x08, 0x04 },
+        ),
     );
 }
 
@@ -1404,6 +1566,7 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
             .aes_128_gcm_sha256,
         },
         .request_ocsp = true,
+        .certificate_signature_schemes = &.{auth.signature_scheme_ed25519},
         .record_size_limit = 4096,
         .certificate_authorities = &.{
             &.{ 0x30, 0x03, 0x31, 0x01, 0x41 },
@@ -1421,6 +1584,29 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
     const parsed = try parse(encoded.items);
     try std.testing.expect(parsed.offersTls13());
     try std.testing.expect(parsed.requests_ocsp);
+    try std.testing.expect(parsed.signature_algorithms_cert != null);
+    try std.testing.expect(try parsed.supportsCertificateSignatureScheme(
+        auth.signature_scheme_ed25519,
+    ));
+    try std.testing.expect(!try parsed.supportsCertificateSignatureScheme(
+        auth.signature_scheme_rsa_pss_rsae_sha256,
+    ));
+    try std.testing.expect(try parsed.supportsSignatureScheme(
+        auth.signature_scheme_rsa_pss_rsae_sha256,
+    ));
+    var fallback_algorithms = parsed;
+    fallback_algorithms.signature_algorithms_cert = null;
+    try std.testing.expect(try fallback_algorithms.supportsCertificateSignatureScheme(
+        auth.signature_scheme_rsa_pss_rsae_sha256,
+    ));
+    var malformed_algorithms = parsed;
+    malformed_algorithms.signature_algorithms_cert = &.{ 0, 0 };
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        malformed_algorithms.supportsCertificateSignatureScheme(
+            auth.signature_scheme_ed25519,
+        ),
+    );
     try std.testing.expectEqual(@as(?u16, 4096), parsed.record_size_limit);
     var authorities = parsed.certificateAuthorityIterator();
     try std.testing.expectEqualSlices(
@@ -1469,6 +1655,16 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
             .random = [_]u8{0x55} ** 32,
             .x25519_public_key = public_key,
             .record_size_limit = record_size_limit.min - 1,
+        }),
+    );
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        write(&encoded, allocator, .{
+            .random = [_]u8{0x58} ** 32,
+            .x25519_public_key = public_key,
+            .certificate_signature_schemes = &.{},
         }),
     );
 

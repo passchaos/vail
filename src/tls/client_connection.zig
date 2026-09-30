@@ -84,6 +84,9 @@ pub const Config = struct {
     additional_cipher_suites: []const u16 = &.{},
     supported_versions: []const u16 = &.{0x0304},
     signature_schemes: []const u16 = &client_hello.default_signature_schemes,
+    /// Optional certificate-chain signature policy, distinct from the
+    /// CertificateVerify signature schemes above.
+    certificate_signature_schemes: ?[]const u16 = null,
     /// Legacy RFC 5077 extension carried only when a version-negotiating
     /// caller also offers TLS 1.2. Null omits it; an empty slice requests one.
     tls12_session_ticket: ?[]const u8 = null,
@@ -357,6 +360,7 @@ pub fn ClientConnection(
         additional_cipher_suites: []const u16,
         supported_versions: []const u16,
         signature_schemes: []const u16,
+        certificate_signature_schemes: ?[]const u16,
         offer_extended_master_secret: bool,
         alpn_protocols: []const []const u8,
         request_ocsp: bool,
@@ -448,6 +452,7 @@ pub fn ClientConnection(
                 .additional_cipher_suites = config.additional_cipher_suites,
                 .supported_versions = config.supported_versions,
                 .signature_schemes = config.signature_schemes,
+                .certificate_signature_schemes = config.certificate_signature_schemes,
                 .alpn_protocols = config.alpn_protocols,
                 .request_ocsp = config.request_ocsp,
                 .offer_extended_master_secret = config.offer_extended_master_secret,
@@ -525,6 +530,7 @@ pub fn ClientConnection(
                         .cipher_suites = config.cipher_suites,
                         .supported_versions = config.supported_versions,
                         .signature_schemes = config.signature_schemes,
+                        .certificate_signature_schemes = config.certificate_signature_schemes,
                         .record_size_limit = config.record_size_limit,
                     },
                 );
@@ -633,6 +639,7 @@ pub fn ClientConnection(
                 .additional_cipher_suites = config.additional_cipher_suites,
                 .supported_versions = config.supported_versions,
                 .signature_schemes = config.signature_schemes,
+                .certificate_signature_schemes = config.certificate_signature_schemes,
                 .offer_extended_master_secret = config.offer_extended_master_secret,
                 .alpn_protocols = config.alpn_protocols,
                 .request_ocsp = config.request_ocsp,
@@ -867,6 +874,7 @@ pub fn ClientConnection(
                     .additional_cipher_suites = self.additional_cipher_suites,
                     .supported_versions = self.supported_versions,
                     .signature_schemes = self.signature_schemes,
+                    .certificate_signature_schemes = self.certificate_signature_schemes,
                     .alpn_protocols = self.alpn_protocols,
                     .request_ocsp = self.request_ocsp,
                     .offer_extended_master_secret = self.offer_extended_master_secret,
@@ -943,6 +951,7 @@ pub fn ClientConnection(
                         .cipher_suites = self.cipher_suites,
                         .supported_versions = self.supported_versions,
                         .signature_schemes = self.signature_schemes,
+                        .certificate_signature_schemes = self.certificate_signature_schemes,
                         .record_size_limit = self.record_size_limit,
                     },
                 );
@@ -1657,6 +1666,9 @@ test "client requests future TLS 1.3 resumption without offering a PSK" {
         .random = [_]u8{0x19} ** 32,
         .server_name = "example.com",
         .key_material = &key_material,
+        .certificate_signature_schemes = &.{
+            auth.signature_scheme_ed25519,
+        },
         .request_resumption = true,
         .server_verifier = .{},
     }, &output);
@@ -1670,6 +1682,12 @@ test "client requests future TLS 1.3 resumption without offering a PSK" {
         parsed.psk_key_exchange_modes,
     );
     try std.testing.expect(parsed.pre_shared_key == null);
+    try std.testing.expect(try parsed.supportsCertificateSignatureScheme(
+        auth.signature_scheme_ed25519,
+    ));
+    try std.testing.expect(!try parsed.supportsCertificateSignatureScheme(
+        auth.signature_scheme_rsa_pss_rsae_sha256,
+    ));
 }
 
 test "ALPS offer disables zero RTT without matching cached settings" {

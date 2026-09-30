@@ -298,6 +298,11 @@ pub fn verifyServerAndWriteClientFlight(
                 certificate.entries,
             );
         } else {
+            if (!try parsed_client_hello.supportsCertificateChain(
+                certificate.entries,
+            )) {
+                return error.UnsupportedSignatureScheme;
+            }
             try options.server_verifier.verifyTrustWithOcsp(
                 options.server_name,
                 certificate.entries,
@@ -399,6 +404,13 @@ pub fn verifyServerAndWriteClientFlight(
         const identity = options.client_identity;
         const certificate_start = out.items.len;
         if (identity) |value| {
+            if (value.certificate_type == .x509 and
+                !try request.supportsCertificateChain(
+                    value.certificate_chain,
+                ))
+            {
+                return error.UnsupportedSignatureScheme;
+            }
             var ordinary_certificate: std.ArrayList(u8) = .empty;
             defer ordinary_certificate.deinit(allocator);
             try auth.writeClientCertificateWithContext(

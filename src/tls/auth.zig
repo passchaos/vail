@@ -81,6 +81,372 @@ pub const max_classical_signature_len: usize = 512;
 pub const max_certificate_verify_signature_len: usize =
     MlDsa87.Signature.encoded_length;
 
+pub const CertificateSignatureSchemes = struct {
+    primary: u16,
+    alternate: ?u16 = null,
+    self_issued: bool,
+};
+
+/// Return the TLS SignatureScheme values that describe one certificate's
+/// signature. RSA-PSS needs the issuer's SPKI category to distinguish the
+/// rsae and pss codepoints; when the issuer is omitted (normally the final
+/// intermediate), both encodings remain possible so trust-anchor choice does
+/// not become part of server identity selection.
+pub fn certificateSignatureSchemes(
+    certificate_der: []const u8,
+    issuer_der: ?[]const u8,
+) Error!CertificateSignatureSchemes {
+    const metadata = try certificateSignatureMetadata(certificate_der);
+    const self_issued = metadata.self_issued;
+    if (self_issued) return .{
+        .primary = 0,
+        .self_issued = true,
+    };
+    return switch (metadata.algorithm) {
+        .rsa_pss_sha256 => pssCertificateSchemes(
+            signature_scheme_rsa_pss_rsae_sha256,
+            signature_scheme_rsa_pss_pss_sha256,
+            issuer_der,
+        ),
+        .rsa_pss_sha384 => pssCertificateSchemes(
+            signature_scheme_rsa_pss_rsae_sha384,
+            signature_scheme_rsa_pss_pss_sha384,
+            issuer_der,
+        ),
+        .rsa_pss_sha512 => pssCertificateSchemes(
+            signature_scheme_rsa_pss_rsae_sha512,
+            signature_scheme_rsa_pss_pss_sha512,
+            issuer_der,
+        ),
+        .ecdsa_p256_sha256 => exactCertificateScheme(
+            signature_scheme_ecdsa_secp256r1_sha256,
+            .p256,
+            issuer_der,
+        ),
+        .ecdsa_p384_sha384 => exactCertificateScheme(
+            signature_scheme_ecdsa_secp384r1_sha384,
+            .p384,
+            issuer_der,
+        ),
+        .rsa_pkcs1_sha256 => exactCertificateScheme(
+            signature_scheme_rsa_pkcs1_sha256,
+            .rsa_encryption,
+            issuer_der,
+        ),
+        .rsa_pkcs1_sha384 => exactCertificateScheme(
+            signature_scheme_rsa_pkcs1_sha384,
+            .rsa_encryption,
+            issuer_der,
+        ),
+        .rsa_pkcs1_sha512 => exactCertificateScheme(
+            signature_scheme_rsa_pkcs1_sha512,
+            .rsa_encryption,
+            issuer_der,
+        ),
+        .ed25519 => exactCertificateScheme(
+            signature_scheme_ed25519,
+            .ed25519,
+            issuer_der,
+        ),
+    };
+}
+
+pub fn certificateChainSupportsSchemes(
+    chain: []const []const u8,
+    encoded_schemes: []const u8,
+) Error!bool {
+    if (encoded_schemes.len == 0 or encoded_schemes.len % 2 != 0) {
+        return false;
+    }
+    for (chain, 0..) |certificate, index| {
+        const issuer = if (index + 1 < chain.len)
+            chain[index + 1]
+        else
+            null;
+        const schemes = certificateSignatureSchemes(
+            certificate,
+            issuer,
+        ) catch |err| switch (err) {
+            error.UnsupportedSignatureScheme => return false,
+            else => return err,
+        };
+        if (index + 1 == chain.len and schemes.self_issued) continue;
+        if (encodedSchemeListContains(encoded_schemes, schemes.primary)) {
+            continue;
+        }
+        if (schemes.alternate) |alternate| {
+            if (encodedSchemeListContains(encoded_schemes, alternate)) {
+                continue;
+            }
+        }
+        return false;
+    }
+    return true;
+}
+
+pub fn certificateChainSupportsSchemeValues(
+    chain: []const []const u8,
+    supported_schemes: []const u16,
+) Error!bool {
+    if (supported_schemes.len == 0) return false;
+    for (chain, 0..) |certificate, index| {
+        const issuer = if (index + 1 < chain.len)
+            chain[index + 1]
+        else
+            null;
+        const schemes = certificateSignatureSchemes(
+            certificate,
+            issuer,
+        ) catch |err| switch (err) {
+            error.UnsupportedSignatureScheme => return false,
+            else => return err,
+        };
+        if (index + 1 == chain.len and schemes.self_issued) continue;
+        if (schemeListContains(supported_schemes, schemes.primary)) continue;
+        if (schemes.alternate) |alternate| {
+            if (schemeListContains(supported_schemes, alternate)) continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+fn encodedSchemeListContains(encoded: []const u8, target: u16) bool {
+    var pos: usize = 0;
+    while (pos < encoded.len) : (pos += 2) {
+        if (std.mem.readInt(u16, encoded[pos..][0..2], .big) == target) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn schemeListContains(schemes: []const u16, target: u16) bool {
+    for (schemes) |scheme| {
+        if (scheme == target) return true;
+    }
+    return false;
+}
+
+fn exactCertificateScheme(
+    scheme: u16,
+    expected_issuer_key: CertificatePublicKeyKind,
+    issuer_der: ?[]const u8,
+) Error!CertificateSignatureSchemes {
+    if (issuer_der) |issuer| {
+        if (try certificatePublicKeyKind(issuer) != expected_issuer_key) {
+            return error.UnsupportedSignatureScheme;
+        }
+    }
+    return .{ .primary = scheme, .self_issued = false };
+}
+
+fn pssCertificateSchemes(
+    rsae_scheme: u16,
+    pss_scheme: u16,
+    issuer_der: ?[]const u8,
+) Error!CertificateSignatureSchemes {
+    const encoded_issuer = issuer_der orelse return .{
+        .primary = rsae_scheme,
+        .alternate = pss_scheme,
+        .self_issued = false,
+    };
+    return switch (try certificatePublicKeyKind(encoded_issuer)) {
+        .rsa_encryption => .{
+            .primary = rsae_scheme,
+            .self_issued = false,
+        },
+        .rsa_pss => .{
+            .primary = pss_scheme,
+            .self_issued = false,
+        },
+        else => error.UnsupportedSignatureScheme,
+    };
+}
+
+const CertificateMetadata = struct {
+    algorithm: x509_signature.Algorithm,
+    self_issued: bool,
+};
+
+const CertificateLayout = struct {
+    tbs_signature: DerElement,
+    issuer: DerElement,
+    subject: DerElement,
+    subject_public_key_info: DerElement,
+    outer_signature: DerElement,
+};
+
+const CertificatePublicKeyKind = enum {
+    rsa_encryption,
+    rsa_pss,
+    p256,
+    p384,
+    ed25519,
+    other,
+};
+
+fn certificateSignatureMetadata(
+    certificate_der: []const u8,
+) Error!CertificateMetadata {
+    const layout = try certificateLayout(certificate_der);
+    if (!std.mem.eql(
+        u8,
+        certificate_der[layout.tbs_signature.content_start..layout.tbs_signature.end],
+        certificate_der[layout.outer_signature.content_start..layout.outer_signature.end],
+    )) return error.InvalidCertificate;
+    const algorithm = x509_signature.parseAlgorithmIdentifier(
+        certificate_der[layout.outer_signature.content_start..layout.outer_signature.end],
+    ) catch |err| switch (err) {
+        error.UnsupportedSignatureAlgorithm => return error.UnsupportedSignatureScheme,
+        else => return error.InvalidCertificate,
+    };
+    return .{
+        .algorithm = algorithm,
+        .self_issued = std.mem.eql(
+            u8,
+            certificate_der[layout.issuer.content_start..layout.issuer.end],
+            certificate_der[layout.subject.content_start..layout.subject.end],
+        ),
+    };
+}
+
+fn certificatePublicKeyKind(
+    certificate_der: []const u8,
+) Error!CertificatePublicKeyKind {
+    const layout = try certificateLayout(certificate_der);
+    var pos = layout.subject_public_key_info.content_start;
+    const algorithm = try nextCertificateElement(
+        certificate_der,
+        &pos,
+        layout.subject_public_key_info.end,
+    );
+    if (algorithm.tag != 0x30) return error.InvalidCertificate;
+    var algorithm_pos = algorithm.content_start;
+    const oid = try nextCertificateElement(
+        certificate_der,
+        &algorithm_pos,
+        algorithm.end,
+    );
+    if (oid.tag != 0x06) return error.InvalidCertificate;
+    const value = certificate_der[oid.content_start..oid.end];
+    if (std.mem.eql(u8, value, &oid_rsa_encryption)) return .rsa_encryption;
+    if (std.mem.eql(u8, value, &oid_rsassa_pss)) return .rsa_pss;
+    if (std.mem.eql(u8, value, &oid_ed25519)) {
+        return if (algorithm_pos == algorithm.end)
+            .ed25519
+        else
+            error.InvalidCertificate;
+    }
+    if (std.mem.eql(u8, value, &oid_id_ec_public_key)) {
+        const parameters = try nextCertificateElement(
+            certificate_der,
+            &algorithm_pos,
+            algorithm.end,
+        );
+        if (parameters.tag != 0x06 or algorithm_pos != algorithm.end) {
+            return error.InvalidCertificate;
+        }
+        const curve = certificate_der[parameters.content_start..parameters.end];
+        if (std.mem.eql(u8, curve, &oid_p256)) return .p256;
+        if (std.mem.eql(u8, curve, &oid_p384)) return .p384;
+    }
+    return .other;
+}
+
+fn certificateLayout(certificate_der: []const u8) Error!CertificateLayout {
+    const certificate = try DerElement.parse(certificate_der, 0);
+    if (certificate.tag != 0x30 or certificate.end != certificate_der.len) {
+        return error.InvalidCertificate;
+    }
+    var outer_pos = certificate.content_start;
+    const tbs = try nextCertificateElement(
+        certificate_der,
+        &outer_pos,
+        certificate.end,
+    );
+    if (tbs.tag != 0x30) return error.InvalidCertificate;
+    const outer_signature = try nextCertificateElement(
+        certificate_der,
+        &outer_pos,
+        certificate.end,
+    );
+    if (outer_signature.tag != 0x30) return error.InvalidCertificate;
+    const signature = try nextCertificateElement(
+        certificate_der,
+        &outer_pos,
+        certificate.end,
+    );
+    if (signature.tag != 0x03 or outer_pos != certificate.end) {
+        return error.InvalidCertificate;
+    }
+
+    var tbs_pos = tbs.content_start;
+    var serial = try nextCertificateElement(
+        certificate_der,
+        &tbs_pos,
+        tbs.end,
+    );
+    if (serial.tag == 0xa0) {
+        serial = try nextCertificateElement(
+            certificate_der,
+            &tbs_pos,
+            tbs.end,
+        );
+    }
+    if (serial.tag != 0x02) return error.InvalidCertificate;
+    const tbs_signature = try nextCertificateElement(
+        certificate_der,
+        &tbs_pos,
+        tbs.end,
+    );
+    const issuer = try nextCertificateElement(
+        certificate_der,
+        &tbs_pos,
+        tbs.end,
+    );
+    const validity = try nextCertificateElement(
+        certificate_der,
+        &tbs_pos,
+        tbs.end,
+    );
+    const subject = try nextCertificateElement(
+        certificate_der,
+        &tbs_pos,
+        tbs.end,
+    );
+    const subject_public_key_info = try nextCertificateElement(
+        certificate_der,
+        &tbs_pos,
+        tbs.end,
+    );
+    if (tbs_signature.tag != 0x30 or issuer.tag != 0x30 or
+        validity.tag != 0x30 or subject.tag != 0x30 or
+        subject_public_key_info.tag != 0x30)
+    {
+        return error.InvalidCertificate;
+    }
+    return .{
+        .tbs_signature = tbs_signature,
+        .issuer = issuer,
+        .subject = subject,
+        .subject_public_key_info = subject_public_key_info,
+        .outer_signature = outer_signature,
+    };
+}
+
+fn nextCertificateElement(
+    bytes: []const u8,
+    pos: *usize,
+    limit: usize,
+) Error!DerElement {
+    if (pos.* >= limit) return error.InvalidCertificate;
+    const element = try DerElement.parse(bytes, pos.*);
+    if (element.end > limit) return error.InvalidCertificate;
+    pos.* = element.end;
+    return element;
+}
+
 pub fn MlDsaSigner(comptime MlDsa: type) type {
     return struct {
         key_pair: *const MlDsa.KeyPair,
@@ -2210,6 +2576,64 @@ fn writeU24(bytes: *[3]u8, value: u24) void {
     bytes[0] = @truncate(value >> 16);
     bytes[1] = @truncate(value >> 8);
     bytes[2] = @truncate(value);
+}
+
+test "certificate signatures map to TLS signature schemes" {
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        certificateSignatureSchemes(&.{ 0x30, 0x00 }, null),
+    );
+    const path_vectors = @import("../x509/testdata/path_vectors.zig");
+    const leaf = decodeHex(path_vectors.leaf_hex);
+    const intermediate = decodeHex(path_vectors.intermediate_hex);
+    const ecdsa = try certificateSignatureSchemes(&leaf, &intermediate);
+    try std.testing.expectEqual(
+        signature_scheme_ecdsa_secp256r1_sha256,
+        ecdsa.primary,
+    );
+    try std.testing.expect(ecdsa.alternate == null);
+    try std.testing.expect(!ecdsa.self_issued);
+    try std.testing.expect(try certificateChainSupportsSchemeValues(
+        &.{ &leaf, &intermediate },
+        &.{signature_scheme_ecdsa_secp256r1_sha256},
+    ));
+    try std.testing.expect(!try certificateChainSupportsSchemeValues(
+        &.{ &leaf, &intermediate },
+        &.{signature_scheme_rsa_pss_rsae_sha256},
+    ));
+
+    const rsae_pss = try certificateSignatureSchemes(
+        @embedFile("../x509/testdata/rsa-pss-intermediate.der"),
+        @embedFile("../x509/testdata/rsa-pss-crl-ca.der"),
+    );
+    try std.testing.expectEqual(
+        signature_scheme_rsa_pss_rsae_sha512,
+        rsae_pss.primary,
+    );
+    try std.testing.expect(rsae_pss.alternate == null);
+
+    const constrained_pss = try certificateSignatureSchemes(
+        @embedFile("../x509/testdata/rsa-pss-constrained-child.der"),
+        @embedFile("../x509/testdata/rsa-pss-constrained-intermediate.der"),
+    );
+    try std.testing.expectEqual(
+        signature_scheme_rsa_pss_pss_sha384,
+        constrained_pss.primary,
+    );
+    try std.testing.expect(constrained_pss.alternate == null);
+
+    const omitted_issuer = try certificateSignatureSchemes(
+        @embedFile("../x509/testdata/rsa-pss-intermediate.der"),
+        null,
+    );
+    try std.testing.expectEqual(
+        signature_scheme_rsa_pss_rsae_sha512,
+        omitted_issuer.primary,
+    );
+    try std.testing.expectEqual(
+        signature_scheme_rsa_pss_pss_sha512,
+        omitted_issuer.alternate.?,
+    );
 }
 
 test "Certificate codec round-trips a leaf OCSP staple" {

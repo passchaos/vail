@@ -21,6 +21,10 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "ticket-request")
     else
         false;
+    const use_certificate_signature_algorithms = if (mode) |argument|
+        std.mem.eql(u8, argument, "certificate-signatures")
+    else
+        false;
     const use_constrained_pss = if (mode) |argument|
         std.mem.eql(u8, argument, "constrained-pss")
     else
@@ -75,6 +79,10 @@ pub fn main(init: std.process.Init) !void {
             &.{.zstd}
         else
             &.{.brotli},
+        .certificate_signature_schemes = if (use_certificate_signature_algorithms)
+            &.{vail.tls.auth.signature_scheme_ecdsa_secp256r1_sha256}
+        else
+            null,
         .ticket_request = if (use_ticket_request) .{
             .new_session_count = 3,
             .resumption_count = 1,
@@ -133,6 +141,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (use_constrained_pss) {
         std.debug.print("constrained RSA-PSS key verified\n", .{});
+    }
+    if (use_certificate_signature_algorithms) {
+        std.debug.print("certificate signature algorithms enforced\n", .{});
     }
 
     var request_record: [256]u8 = undefined;

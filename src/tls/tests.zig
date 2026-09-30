@@ -265,12 +265,17 @@ test "CertificateRequest advertises built-in signature schemes" {
     const allocator = std.testing.allocator;
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
-    try client_auth.writeRequestWithCompression(
+    try client_auth.writeRequestWithOptions(
         &encoded,
         allocator,
-        "request",
-        &.{"ca-subject"},
-        &.{.zlib},
+        .{
+            .request_context = "request",
+            .certificate_authorities = &.{"ca-subject"},
+            .compression_algorithms = &.{.zlib},
+            .certificate_signature_schemes = &.{
+                auth.signature_scheme_ed25519,
+            },
+        },
     );
     const parsed = try client_auth.parseRequest(encoded.items);
     try std.testing.expectEqualStrings("request", parsed.request_context);
@@ -287,8 +292,61 @@ test "CertificateRequest advertises built-in signature schemes" {
     try std.testing.expect(parsed.supports_ml_dsa_44);
     try std.testing.expect(parsed.supports_ml_dsa_65);
     try std.testing.expect(parsed.supports_ml_dsa_87);
+    try std.testing.expect(parsed.supportsCertificateSignatureScheme(
+        auth.signature_scheme_ed25519,
+    ));
+    try std.testing.expect(!parsed.supportsCertificateSignatureScheme(
+        auth.signature_scheme_rsa_pss_rsae_sha256,
+    ));
+    try std.testing.expect(!try parsed.supportsCertificateChain(&.{
+        @embedFile("../x509/testdata/server.der"),
+        @embedFile("../x509/testdata/ca.der"),
+    }));
     try std.testing.expect(parsed.supportsCertificateCompression(.zlib));
     try std.testing.expect(!parsed.supportsCertificateCompression(.brotli));
+
+    const empty_certificate_algorithms = [_]u8{
+        0x0d, 0x00, 0x00, 0x11,
+        0x00, 0x00, 0x0e, 0x00,
+        0x0d, 0x00, 0x04, 0x00,
+        0x02, 0x08, 0x07, 0x00,
+        0x32, 0x00, 0x02, 0x00,
+        0x00,
+    };
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.parseRequest(&empty_certificate_algorithms),
+    );
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.writeRequestWithOptions(
+            &encoded,
+            allocator,
+            .{
+                .request_context = "request",
+                .certificate_signature_schemes = &.{},
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.writeRequestWithOptions(
+            &encoded,
+            allocator,
+            .{
+                .request_context = "request",
+                .certificate_signature_schemes = &.{
+                    auth.signature_scheme_ed25519,
+                    auth.signature_scheme_ed25519,
+                },
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
 }
 
 test "optional client Certificate supports an empty chain" {

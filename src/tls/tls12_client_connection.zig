@@ -63,6 +63,9 @@ pub const Config = struct {
     client_hello_supported_groups: []const u16 = &.{},
     supported_versions: []const u16 = &.{0x0303},
     signature_schemes: []const u16 = &client_hello.default_signature_schemes,
+    /// Optional RFC 8446 certificate-signature constraints carried by the
+    /// shared ClientHello codec for version-negotiating callers.
+    certificate_signature_schemes: ?[]const u16 = null,
     request_ocsp: bool = false,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_verifier: auth.ClientVerifier,
@@ -476,6 +479,7 @@ pub fn ClientConnection(
                 .additional_cipher_suites = suites.items,
                 .supported_versions = config.supported_versions,
                 .signature_schemes = config.signature_schemes,
+                .certificate_signature_schemes = config.certificate_signature_schemes,
                 .alpn_protocols = config.policy.alpn_protocols,
                 .request_ocsp = config.request_ocsp,
                 .offer_extended_master_secret = true,
@@ -834,6 +838,11 @@ pub fn ClientConnection(
                 messages.certificate,
             );
             defer certificate.deinit(self.allocator);
+            if (!try offered_client_hello.supportsCertificateChain(
+                certificate.entries,
+            )) {
+                return error.UnsupportedSignatureScheme;
+            }
             try self.server_verifier.verifyTrustWithOcsp(
                 self.server_name,
                 certificate.entries,

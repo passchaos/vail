@@ -58,8 +58,11 @@ The current foundation provides:
 - type-safe server identities, allocation-free custom signer callbacks, and
   pinned-key client verification; the server can select identities by exact or
   one-label wildcard SNI, client signature-scheme compatibility, and TLS 1.3
-  `certificate_authorities` DER DistinguishedName hints, while keeping
-  per-identity OCSP and precompressed Certificate variants together;
+  `certificate_authorities` DER DistinguishedName hints. TLS 1.3
+  `signature_algorithms_cert` is encoded and strictly parsed in ClientHello
+  and CertificateRequest, preserved across HRR/ECH, and enforced independently
+  from CertificateVerify when selecting or authenticating X.509 chains, while
+  keeping per-identity OCSP and precompressed Certificate variants together;
 - TLS 1.3 RFC 7250 Raw Public Key authentication in both directions, including
   strict ClientHello/EncryptedExtensions certificate-type negotiation, exact
   DER SubjectPublicKeyInfo pins, single-key Certificate messages, RPK mTLS,
@@ -372,6 +375,12 @@ HelloRetryRequest, covering both directions of the retry state machine.
 `zig build interop-rustls-min-client` exercises Vail's client against a
 zlib-enabled rustls server and requires Vail to authenticate a compressed
 Certificate message before exchanging application data.
+`zig build interop-rustls-cert-signatures-client` additionally sends a
+dedicated TLS 1.3 `signature_algorithms_cert` offer and requires the Vail
+client to enforce it while completing a handshake with rustls/AWS-LC.
+`zig build interop-openssl-cert-signatures-mtls-server` exercises the reverse
+direction: Vail constrains signatures on the client certificate chain in its
+CertificateRequest and authenticates the resulting OpenSSL mTLS flight.
 `zig build interop-rustls-rpk-server` and
 `zig build interop-rustls-rpk-client` exercise mutual TLS 1.3 RFC 7250 Raw
 Public Key authentication in both directions against rustls 0.23 with its

@@ -381,6 +381,25 @@ pub fn build(b: *std.Build) void {
     );
     interop_min_server_step.dependOn(&check_min_server.step);
 
+    const check_certificate_signatures_mtls = b.addSystemCommand(&.{ "sh", "-c" });
+    check_certificate_signatures_mtls.addArg(
+        "$1 certificate-signatures-mtls > /tmp/vail-cert-signatures-mtls-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 5s openssl s_client -connect 127.0.0.1:24444 -tls1_3 -servername localhost -alpn h2 -cert src/crypto/testdata/rsa_signing_client_cert.pem -key src/crypto/testdata/rsa_signing_key.pem -ign_eof < /dev/null > /tmp/vail-cert-signatures-mtls-client.log 2>&1 || true; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'New, TLSv1.3, Cipher is TLS_AES_128_GCM_SHA256' /tmp/vail-cert-signatures-mtls-client.log && " ++
+            "grep -q 'client certificate signature algorithms enforced' /tmp/vail-cert-signatures-mtls-server.log",
+    );
+    check_certificate_signatures_mtls.addArg("sh");
+    check_certificate_signatures_mtls.addArtifactArg(min_tls13_server);
+    const interop_certificate_signatures_mtls_step = b.step(
+        "interop-openssl-cert-signatures-mtls-server",
+        "Constrain an OpenSSL TLS 1.3 client certificate chain separately",
+    );
+    interop_certificate_signatures_mtls_step.dependOn(
+        &check_certificate_signatures_mtls.step,
+    );
+
     const check_constrained_pss_server = b.addSystemCommand(&.{ "sh", "-c" });
     check_constrained_pss_server.addArg(
         "work=$(mktemp -d /tmp/vail-constrained-pss-server.XXXXXX); " ++
@@ -875,6 +894,31 @@ pub fn build(b: *std.Build) void {
     );
     interop_vail_rustls_server_step.dependOn(
         &check_vail_rustls_server.step,
+    );
+
+    const check_vail_rustls_certificate_signatures = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_rustls_certificate_signatures.step.dependOn(
+        &build_rustls_server.step,
+    );
+    check_vail_rustls_certificate_signatures.addArg(
+        "work=$(mktemp -d /tmp/vail-rustls-cert-signatures.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "bench/rustls_min_server/target/release/vail-rustls-min-server \"$work/cert.pem\" \"$work/key.pem\" >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 4s $1 certificate-signatures >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'rustls server completed' \"$work/server.log\" && " ++
+            "grep -q 'certificate signature algorithms enforced' \"$work/client.log\" && " ++
+            "grep -q 'server application data verified' \"$work/client.log\"",
+    );
+    check_vail_rustls_certificate_signatures.addArg("sh");
+    check_vail_rustls_certificate_signatures.addArtifactArg(min_tls13_client);
+    const interop_vail_rustls_certificate_signatures_step = b.step(
+        "interop-rustls-cert-signatures-client",
+        "Exercise TLS 1.3 certificate signature constraints with rustls",
+    );
+    interop_vail_rustls_certificate_signatures_step.dependOn(
+        &check_vail_rustls_certificate_signatures.step,
     );
 
     const check_vail_rustls_pss_certificate = b.addSystemCommand(&.{ "sh", "-c" });

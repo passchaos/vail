@@ -84,6 +84,9 @@ pub const Result = struct {
         if (self.client_auth) |state| {
             self.allocator.free(state.request_context);
             self.allocator.free(state.certificate_compression_algorithms);
+            if (state.certificate_signature_schemes) |schemes| {
+                self.allocator.free(schemes);
+            }
         }
         self.handshake_secret.deinit();
         self.client_handshake_traffic_secret.deinit();
@@ -236,6 +239,8 @@ pub const ClientAuthOptions = struct {
     policy: client_auth.ServerPolicy,
     request_context: []const u8 = &.{},
     certificate_authorities: []const []const u8 = &.{},
+    /// Optional constraints for signatures on the client's X.509 chain.
+    certificate_signature_schemes: ?[]const u16 = null,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{ .zlib, .brotli },
     max_decompressed_certificate_len: usize = 64 * 1024,
 };
@@ -244,6 +249,7 @@ pub const ClientAuthState = struct {
     policy: client_auth.ServerPolicy,
     request_context: []u8,
     certificate_compression_algorithms: []certificate_compression.Algorithm,
+    certificate_signature_schemes: ?[]u16,
     max_decompressed_certificate_len: usize,
 };
 
@@ -939,12 +945,15 @@ pub fn writeServerCryptoFlight(
         {
             return error.NoSupportedCertificateType;
         }
-        try client_auth.writeRequestWithCompression(
+        try client_auth.writeRequestWithOptions(
             &certificate_request,
             allocator,
-            client_auth_options.request_context,
-            client_auth_options.certificate_authorities,
-            client_auth_options.certificate_compression_algorithms,
+            .{
+                .request_context = client_auth_options.request_context,
+                .certificate_authorities = client_auth_options.certificate_authorities,
+                .compression_algorithms = client_auth_options.certificate_compression_algorithms,
+                .certificate_signature_schemes = client_auth_options.certificate_signature_schemes,
+            },
         );
         try handshake_crypto.appendSlice(allocator, certificate_request.items);
         transcript_state.update(certificate_request.items);
@@ -1038,16 +1047,25 @@ pub fn writeServerCryptoFlight(
             certificate_compression.Algorithm,
             value.certificate_compression_algorithms,
         );
+        errdefer allocator.free(algorithms);
+        const certificate_signature_schemes = if (value.certificate_signature_schemes) |schemes|
+            try allocator.dupe(u16, schemes)
+        else
+            null;
         break :blk .{
             .policy = value.policy,
             .request_context = request_context,
             .certificate_compression_algorithms = algorithms,
+            .certificate_signature_schemes = certificate_signature_schemes,
             .max_decompressed_certificate_len = value.max_decompressed_certificate_len,
         };
     } else null;
     errdefer if (retained_client_auth) |state| {
         allocator.free(state.request_context);
         allocator.free(state.certificate_compression_algorithms);
+        if (state.certificate_signature_schemes) |schemes| {
+            allocator.free(schemes);
+        }
     };
 
     return .{
@@ -1146,7 +1164,7 @@ pub fn verifyClientCryptoFlight(
             return error.InvalidClientFlight;
         }
 
-        var verification = try client_auth.verifyClientFlightWithCompression(
+        var verification = try client_auth.verifyClientFlightWithOptions(
             allocator,
             auth_state.policy,
             auth_state.request_context,
@@ -1155,8 +1173,11 @@ pub fn verifyClientCryptoFlight(
             certificate,
             certificate_verify,
             next,
-            auth_state.certificate_compression_algorithms,
-            auth_state.max_decompressed_certificate_len,
+            .{
+                .accepted_compression_algorithms = auth_state.certificate_compression_algorithms,
+                .max_decompressed_certificate_len = auth_state.max_decompressed_certificate_len,
+                .certificate_signature_schemes = auth_state.certificate_signature_schemes,
+            },
         );
         defer verification.deinit(allocator);
         const peer_certificate_chain = try copyCertificateChain(

@@ -180,8 +180,13 @@ pub const IdentitySet = struct {
 fn identityCompatible(
     hello: client_hello.Parsed,
     identity: ResolvedIdentity,
-) client_hello.Error!bool {
+) anyerror!bool {
     if (!try hello.supportsSignatureScheme(identity.signer.scheme())) {
+        return false;
+    }
+    if (identity.certificate_type == .x509 and
+        !try hello.supportsCertificateChain(identity.certificate_chain))
+    {
         return false;
     }
     if (identity.certificate_type == .x509 and
@@ -1460,7 +1465,7 @@ pub fn ServerConnection(
             }
             const request = self.config.client_auth orelse unreachable;
             const policy = self.config.client_auth_policy orelse unreachable;
-            var verification = try client_auth.verifyClientFlightWithCompression(
+            var verification = try client_auth.verifyClientFlightWithOptions(
                 self.config.allocator,
                 policy,
                 request.request_context,
@@ -1474,8 +1479,11 @@ pub fn ServerConnection(
                 else
                     null,
                 range.slice(pending.client_flight.items),
-                request.certificate_compression_algorithms,
-                request.max_decompressed_certificate_len,
+                .{
+                    .accepted_compression_algorithms = request.certificate_compression_algorithms,
+                    .max_decompressed_certificate_len = request.max_decompressed_certificate_len,
+                    .certificate_signature_schemes = request.certificate_signature_schemes,
+                },
             );
             defer verification.deinit(self.config.allocator);
             if (verification.authenticated()) {
@@ -1832,6 +1840,67 @@ test "identity set selects SNI wildcard and compatible signature scheme" {
     );
 }
 
+test "identity set honors certificate signature algorithms separately" {
+    const allocator = std.testing.allocator;
+    const path_vectors = @import("../x509/testdata/path_vectors.zig");
+    const leaf = decodeHex(path_vectors.leaf_hex);
+    const intermediate = decodeHex(path_vectors.intermediate_hex);
+    const signing_key = try std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair
+        .generateDeterministic(
+        [_]u8{0xb1} **
+            std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair.seed_length,
+    );
+    const identity = ResolvedIdentity{
+        .certificate_chain = &.{ &leaf, &intermediate },
+        .signer = .{
+            .ecdsa_p256_sha256 = .{ .key_pair = signing_key },
+        },
+    };
+    const identities = IdentitySet{ .entries = &.{.{
+        .server_name_pattern = "localhost",
+        .identity = identity,
+    }} };
+    const key_share = try key_exchange.publicKey(
+        [_]u8{0xb2} ** key_exchange.secret_len,
+    );
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try client_hello.write(&encoded, allocator, .{
+        .random = [_]u8{0xb3} ** 32,
+        .server_name = "localhost",
+        .x25519_public_key = key_share,
+        .signature_schemes = &.{
+            auth.signature_scheme_ecdsa_secp256r1_sha256,
+        },
+        .certificate_signature_schemes = &.{
+            auth.signature_scheme_rsa_pss_rsae_sha256,
+        },
+    });
+    try std.testing.expectEqual(
+        @as(?ResolvedIdentity, null),
+        try identities.resolver().resolve(
+            try client_hello.parse(encoded.items),
+        ),
+    );
+
+    encoded.clearRetainingCapacity();
+    try client_hello.write(&encoded, allocator, .{
+        .random = [_]u8{0xb4} ** 32,
+        .server_name = "localhost",
+        .x25519_public_key = key_share,
+        .signature_schemes = &.{
+            auth.signature_scheme_ecdsa_secp256r1_sha256,
+        },
+        .certificate_signature_schemes = &.{
+            auth.signature_scheme_ecdsa_secp256r1_sha256,
+        },
+    });
+    try std.testing.expect((try identities.resolver().resolve(
+        try client_hello.parse(encoded.items),
+    )) != null);
+}
+
 test "server connection incrementally establishes X25519 TLS" {
     const allocator = std.testing.allocator;
     const client_private = [_]u8{0x11} ** key_exchange.secret_len;
@@ -2138,4 +2207,10 @@ test "server connection rejects messages coalesced after client Finished" {
         error.ConnectionFailed,
         fixture.server.receive("", &output),
     );
+}
+
+fn decodeHex(comptime encoded: []const u8) [encoded.len / 2]u8 {
+    var result: [encoded.len / 2]u8 = undefined;
+    _ = std.fmt.hexToBytes(&result, encoded) catch unreachable;
+    return result;
 }

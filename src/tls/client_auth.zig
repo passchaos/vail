@@ -10,6 +10,7 @@ const transcript = @import("transcript.zig");
 pub const handshake_type_certificate_request: u8 = 0x0d;
 const ext_signature_algorithms: u16 = 0x000d;
 const ext_certificate_authorities: u16 = 0x002f;
+const ext_signature_algorithms_cert: u16 = 0x0032;
 const ext_compress_certificate: u16 =
     certificate_compression.extension_type_compress_certificate;
 
@@ -54,6 +55,8 @@ pub const ServerPolicy = struct {
 
 pub const ParsedRequest = struct {
     request_context: []const u8,
+    signature_algorithms: []const u8,
+    certificate_signature_algorithms: ?[]const u8,
     supports_ed25519: bool,
     supports_ecdsa_p256_sha256: bool,
     supports_ecdsa_p384_sha384: bool,
@@ -68,6 +71,32 @@ pub const ParsedRequest = struct {
     supports_ml_dsa_65: bool,
     supports_ml_dsa_87: bool,
     certificate_compression_algorithms: []const u8,
+
+    pub fn supportsCertificateSignatureScheme(
+        self: ParsedRequest,
+        target_scheme: u16,
+    ) bool {
+        const algorithms = self.certificate_signature_algorithms orelse
+            self.signature_algorithms;
+        var pos: usize = 0;
+        while (pos < algorithms.len) : (pos += 2) {
+            if (std.mem.readInt(
+                u16,
+                algorithms[pos..][0..2],
+                .big,
+            ) == target_scheme) return true;
+        }
+        return false;
+    }
+
+    pub fn supportsCertificateChain(
+        self: ParsedRequest,
+        chain: []const []const u8,
+    ) auth.Error!bool {
+        const algorithms = self.certificate_signature_algorithms orelse
+            return true;
+        return auth.certificateChainSupportsSchemes(chain, algorithms);
+    }
 
     pub fn supportsCertificateCompression(
         self: ParsedRequest,
@@ -152,6 +181,43 @@ pub fn verifyClientFlightWithCompression(
     accepted_compression_algorithms: []const certificate_compression.Algorithm,
     max_decompressed_certificate_len: usize,
 ) Error!Verification {
+    return verifyClientFlightWithOptions(
+        allocator,
+        policy,
+        request_context,
+        transcript_after_server_finished,
+        client_handshake_traffic_secret,
+        certificate_bytes,
+        certificate_verify_bytes,
+        finished_bytes,
+        .{
+            .accepted_compression_algorithms = accepted_compression_algorithms,
+            .max_decompressed_certificate_len = max_decompressed_certificate_len,
+        },
+    );
+}
+
+pub const VerifyOptions = struct {
+    accepted_compression_algorithms: []const certificate_compression.Algorithm = &.{},
+    max_decompressed_certificate_len: usize = 64 * 1024,
+    certificate_signature_schemes: ?[]const u16 = null,
+};
+
+pub fn verifyClientFlightWithOptions(
+    allocator: std.mem.Allocator,
+    policy: ServerPolicy,
+    request_context: []const u8,
+    transcript_after_server_finished: transcript.State,
+    client_handshake_traffic_secret: secret.Secret,
+    certificate_bytes: []const u8,
+    certificate_verify_bytes: ?[]const u8,
+    finished_bytes: []const u8,
+    options: VerifyOptions,
+) Error!Verification {
+    const accepted_compression_algorithms =
+        options.accepted_compression_algorithms;
+    const max_decompressed_certificate_len =
+        options.max_decompressed_certificate_len;
     var decompressed_certificate_message: ?[]u8 = null;
     errdefer if (decompressed_certificate_message) |message| {
         allocator.free(message);
@@ -195,6 +261,14 @@ pub fn verifyClientFlightWithCompression(
             }
             try policy.verifier.verifyRawPublicKey(null, certificate.entries);
         } else {
+            if (options.certificate_signature_schemes) |schemes| {
+                if (!try auth.certificateChainSupportsSchemeValues(
+                    certificate.entries,
+                    schemes,
+                )) {
+                    return error.UnsupportedSignatureScheme;
+                }
+            }
             try policy.verifier.verifyTrust(null, certificate.entries);
         }
         const verify_bytes = certificate_verify_bytes orelse
@@ -276,6 +350,28 @@ pub fn writeRequestWithCompression(
     certificate_authorities: []const []const u8,
     compression_algorithms: []const certificate_compression.Algorithm,
 ) Error!void {
+    return writeRequestWithOptions(list, allocator, .{
+        .request_context = request_context,
+        .certificate_authorities = certificate_authorities,
+        .compression_algorithms = compression_algorithms,
+    });
+}
+
+pub const RequestOptions = struct {
+    request_context: []const u8,
+    certificate_authorities: []const []const u8 = &.{},
+    compression_algorithms: []const certificate_compression.Algorithm = &.{},
+    certificate_signature_schemes: ?[]const u16 = null,
+};
+
+pub fn writeRequestWithOptions(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    options: RequestOptions,
+) Error!void {
+    const request_context = options.request_context;
+    const certificate_authorities = options.certificate_authorities;
+    const compression_algorithms = options.compression_algorithms;
     if (request_context.len > std.math.maxInt(u8)) {
         return error.InvalidCertificateRequest;
     }
@@ -365,6 +461,37 @@ pub fn writeRequestWithCompression(
         u16,
         auth.signature_scheme_ml_dsa_87,
     );
+    if (options.certificate_signature_schemes) |schemes| {
+        if (schemes.len == 0 or schemes.len > std.math.maxInt(u16) / 2) {
+            return error.InvalidCertificateRequest;
+        }
+        try appendInt(
+            &extensions,
+            allocator,
+            u16,
+            ext_signature_algorithms_cert,
+        );
+        try appendInt(
+            &extensions,
+            allocator,
+            u16,
+            2 + schemes.len * 2,
+        );
+        try appendInt(
+            &extensions,
+            allocator,
+            u16,
+            schemes.len * 2,
+        );
+        for (schemes, 0..) |scheme, index| {
+            for (schemes[0..index]) |previous| {
+                if (scheme == previous) {
+                    return error.InvalidCertificateRequest;
+                }
+            }
+            try appendInt(&extensions, allocator, u16, scheme);
+        }
+    }
     if (compression_algorithms.len != 0) {
         certificate_compression.validateAlgorithms(
             compression_algorithms,
@@ -483,8 +610,11 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
     var supports_ml_dsa_44 = false;
     var supports_ml_dsa_65 = false;
     var supports_ml_dsa_87 = false;
+    var signature_algorithms: []const u8 = &.{};
+    var certificate_signature_algorithms: ?[]const u8 = null;
     var certificate_compression_algorithms: []const u8 = &.{};
     var saw_signature_algorithms = false;
+    var saw_signature_algorithms_cert = false;
     var saw_certificate_compression = false;
     var ext_pos: usize = 0;
     while (ext_pos < extensions.len) {
@@ -496,15 +626,14 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
                 return error.InvalidCertificateRequest;
             }
             saw_signature_algorithms = true;
+            signature_algorithms = try parseSignatureAlgorithmList(payload);
             var scheme_pos: usize = 0;
-            const schemes_len = try readInt(u16, payload, &scheme_pos);
-            if (schemes_len == 0 or schemes_len % 2 != 0 or
-                schemes_len != payload.len - scheme_pos)
-            {
-                return error.InvalidCertificateRequest;
-            }
-            while (scheme_pos < payload.len) {
-                const scheme = try readInt(u16, payload, &scheme_pos);
+            while (scheme_pos < signature_algorithms.len) {
+                const scheme = try readInt(
+                    u16,
+                    signature_algorithms,
+                    &scheme_pos,
+                );
                 if (scheme == auth.signature_scheme_ed25519) {
                     supports_ed25519 = true;
                 }
@@ -561,6 +690,13 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
                     supports_rsa_pss_pss_sha512 = true;
                 }
             }
+        } else if (typ == ext_signature_algorithms_cert) {
+            if (saw_signature_algorithms_cert) {
+                return error.InvalidCertificateRequest;
+            }
+            saw_signature_algorithms_cert = true;
+            certificate_signature_algorithms =
+                try parseSignatureAlgorithmList(payload);
         } else if (typ == ext_certificate_authorities) {
             var ca_pos: usize = 0;
             const names_len = try readInt(u16, payload, &ca_pos);
@@ -588,6 +724,8 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
     }
     return .{
         .request_context = request_context,
+        .signature_algorithms = signature_algorithms,
+        .certificate_signature_algorithms = certificate_signature_algorithms,
         .supports_ed25519 = supports_ed25519,
         .supports_ecdsa_p256_sha256 = supports_ecdsa_p256,
         .supports_ecdsa_p384_sha384 = supports_ecdsa_p384,
@@ -603,6 +741,34 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
         .supports_ml_dsa_87 = supports_ml_dsa_87,
         .certificate_compression_algorithms = certificate_compression_algorithms,
     };
+}
+
+fn parseSignatureAlgorithmList(payload: []const u8) Error![]const u8 {
+    var pos: usize = 0;
+    const schemes_len = try readInt(u16, payload, &pos);
+    if (schemes_len == 0 or schemes_len % 2 != 0 or
+        schemes_len != payload.len - pos)
+    {
+        return error.InvalidCertificateRequest;
+    }
+    const schemes = payload[pos..];
+    var current: usize = 0;
+    while (current < schemes.len) : (current += 2) {
+        const scheme = std.mem.readInt(
+            u16,
+            schemes[current..][0..2],
+            .big,
+        );
+        var previous: usize = 0;
+        while (previous < current) : (previous += 2) {
+            if (scheme == std.mem.readInt(
+                u16,
+                schemes[previous..][0..2],
+                .big,
+            )) return error.InvalidCertificateRequest;
+        }
+    }
+    return schemes;
 }
 
 fn parseCompressionAlgorithms(payload: []const u8) Error![]const u8 {

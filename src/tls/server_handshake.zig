@@ -85,6 +85,8 @@ pub const Options = struct {
 pub const ClientAuthOptions = struct {
     request_context: []const u8 = &.{},
     certificate_authorities: []const []const u8 = &.{},
+    /// Optional constraints for signatures on the client's X.509 chain.
+    certificate_signature_schemes: ?[]const u16 = null,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{
         .zlib,
         .brotli,
@@ -221,6 +223,14 @@ fn writeServerHandshakeFlightSelected(
             return error.HashMismatch;
         }
     }
+    if (options.psk == null and
+        selection.server_certificate_type == .x509 and
+        !try options.parsed_client_hello.supportsCertificateChain(
+            options.certificate_chain,
+        ))
+    {
+        return error.UnsupportedSignatureScheme;
+    }
     var server_hello_msg: std.ArrayList(u8) = .empty;
     defer server_hello_msg.deinit(allocator);
     var server_random = options.server_random;
@@ -326,12 +336,15 @@ fn writeServerHandshakeFlightSelected(
     var certificate_request: std.ArrayList(u8) = .empty;
     defer certificate_request.deinit(allocator);
     if (options.client_auth) |client_auth_options| {
-        try client_auth.writeRequestWithCompression(
+        try client_auth.writeRequestWithOptions(
             &certificate_request,
             allocator,
-            client_auth_options.request_context,
-            client_auth_options.certificate_authorities,
-            client_auth_options.certificate_compression_algorithms,
+            .{
+                .request_context = client_auth_options.request_context,
+                .certificate_authorities = client_auth_options.certificate_authorities,
+                .compression_algorithms = client_auth_options.certificate_compression_algorithms,
+                .certificate_signature_schemes = client_auth_options.certificate_signature_schemes,
+            },
         );
         try appendEncryptedHandshake(
             out,

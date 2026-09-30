@@ -71,6 +71,10 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "constrained-pss")
     else
         false;
+    const use_certificate_signatures_mtls = if (mode) |argument|
+        std.mem.eql(u8, argument, "certificate-signatures-mtls")
+    else
+        false;
     if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
@@ -228,6 +232,15 @@ pub fn main(init: std.process.Init) !void {
             ca_identity_set.resolver()
         else
             null,
+        .client_auth = if (use_certificate_signatures_mtls) .{
+            .certificate_signature_schemes = &.{
+                vail.tls.auth.signature_scheme_rsa_pkcs1_sha256,
+            },
+        } else null,
+        .client_auth_policy = if (use_certificate_signatures_mtls) .{
+            .verifier = .{ .verify_trust = acceptClientCertificate },
+            .requirement = .required,
+        } else null,
         .max_requested_tickets = if (use_ticket_request) 2 else 0,
         .key_log = if (use_key_log) .{
             .log_fn = writeKeyLog,
@@ -281,6 +294,12 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("client finished verified\n", .{});
     if (use_constrained_pss) {
         std.debug.print("constrained RSA-PSS server verified\n", .{});
+    }
+    if (use_certificate_signatures_mtls) {
+        if (established.peer_certificate_chain == null) {
+            return error.MissingClientCertificate;
+        }
+        std.debug.print("client certificate signature algorithms enforced\n", .{});
     }
     if (use_ticket_request) {
         std.debug.print(
@@ -336,6 +355,13 @@ fn printTrafficSecret(
     writer.printHex(&secret.iv, .lower) catch unreachable;
     writer.writeByte('\n') catch unreachable;
     std.debug.print("{s}", .{encoded[0..writer.end]});
+}
+
+fn acceptClientCertificate(
+    _: ?*anyopaque,
+    trust: vail.tls.auth.TrustContext,
+) anyerror!void {
+    if (trust.chain.len == 0) return error.EmptyCertificateChain;
 }
 
 fn writeKeyLog(
@@ -395,14 +421,18 @@ const SocketHandshakeDriver = struct {
             const drained = try handshake.receive("", flight);
             if (drained.event) |event| return event;
             if (self.start < self.end) {
+                const previous_start = self.start;
                 const result = try handshake.receive(
                     self.buffer[self.start..self.end],
                     flight,
                 );
                 self.start += result.consumed;
                 if (result.event) |event| return event;
+                if (self.start == previous_start) {
+                    return error.HandshakeDriverStalled;
+                }
+                continue;
             }
-            if (self.start != self.end) return error.HandshakeDriverStalled;
 
             const rc = linux.read(
                 self.fd,
