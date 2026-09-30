@@ -233,18 +233,19 @@ median times against the former AWS-LC backend:
 | AES-256-GCM open+seal | 421 ns | 550 ns | 1.31x |
 
 ChaCha20-Poly1305 uses a prepared pure-Zig core on x86_64 AVX2 and aarch64
-NEON targets. It emits four ChaCha blocks together, derives the Poly1305
-one-time key in the first wide batch, and authenticates four 16-byte blocks at
-once with 26-bit limbs; other targets retain Zig std. On the same 1,200-byte
-QUIC workload pinned to one CPU, three alternating old/new binary runs gave:
+NEON targets. It emits eight ChaCha blocks together on AVX2 and four on NEON,
+derives the Poly1305 one-time key in the first wide batch, and authenticates
+four 16-byte blocks at once with 26-bit limbs; other targets retain Zig std.
+On the same 1,200-byte QUIC workload pinned to one CPU, five alternating
+independent-binary runs gave:
 
 | Operation | Zig std | Prepared Zig | Speedup |
 | --- | ---: | ---: | ---: |
-| ChaCha20-Poly1305 seal | 1,928 ns | 900 ns | 2.14x |
-| ChaCha20-Poly1305 open+seal | 3,866 ns | 1,891 ns | 2.04x |
+| ChaCha20-Poly1305 seal | 1,907 ns | 812 ns | 2.35x |
+| ChaCha20-Poly1305 open+seal | 3,866 ns | 1,704 ns | 2.27x |
 
 The independent test-only AWS-LC binary currently measures 639 ns and
-1,275 ns respectively, so ChaCha remains a known optimization target rather
+1,274 ns respectively, so ChaCha remains a known optimization target rather
 than a claimed performance win over AWS-LC. AES-GCM medians and the 736-byte
 prepared-key footprint remain unchanged by the ChaCha path.
 

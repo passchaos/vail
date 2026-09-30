@@ -1,8 +1,9 @@
-//! Prepared pure-Zig ChaCha20-Poly1305 with a four-block vector path.
+//! Prepared pure-Zig ChaCha20-Poly1305 with a wide vector path.
 //!
 //! The wide path combines counter zero (the Poly1305 one-time key) with the
-//! first three payload blocks, then emits four payload blocks per core call.
-//! Portable targets retain Zig std's audited implementation.
+//! first three payload blocks. AVX2 targets then emit up to eight payload
+//! blocks per core call, while NEON targets retain four-block batches. Portable
+//! targets retain Zig std's audited implementation.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -22,6 +23,7 @@ const wide_enabled = switch (builtin.cpu.arch) {
         builtin.cpu.has(.aarch64, .neon),
     else => false,
 };
+const max_bulk_degree = if (builtin.cpu.arch == .x86_64) 8 else 4;
 const StoredKey = if (wide_enabled) [8]u32 else [key_length]u8;
 
 pub const Context = struct {
@@ -141,23 +143,37 @@ pub const Context = struct {
             return blocks[0..32].*;
         }
 
-        var blocks: [256]u8 = undefined;
-        ChaChaVec(4).blocks(&blocks, self.key, nonce, 0);
+        var blocks: [64 * max_bulk_degree]u8 = undefined;
+        ChaChaVec(4).blocks(blocks[0..256], self.key, nonce, 0);
         const poly_key = blocks[0..32].*;
         const first_len: usize = @min(input.len, 3 * 64);
         xorBytes(output[0..first_len], input[0..first_len], blocks[64..][0..first_len]);
         var offset = first_len;
         var counter: u32 = 4;
         while (offset < input.len) {
-            ChaChaVec(4).blocks(&blocks, self.key, nonce, counter);
-            const len = @min(blocks.len, input.len - offset);
+            const remaining = input.len - offset;
+            // A half-empty eight-block core costs more than one four-block
+            // core. Switch widths at the exact point where eight lanes avoid
+            // a second four-block invocation.
+            const generated_len = if (comptime max_bulk_degree == 8) blk: {
+                if (remaining > 256) {
+                    ChaChaVec(8).blocks(&blocks, self.key, nonce, counter);
+                    break :blk @as(usize, 512);
+                }
+                ChaChaVec(4).blocks(blocks[0..256], self.key, nonce, counter);
+                break :blk @as(usize, 256);
+            } else blk: {
+                ChaChaVec(4).blocks(&blocks, self.key, nonce, counter);
+                break :blk @as(usize, 256);
+            };
+            const len = @min(generated_len, remaining);
             xorBytes(
                 output[offset..][0..len],
                 input[offset..][0..len],
                 blocks[0..len],
             );
             offset += len;
-            counter +%= 4;
+            counter +%= @intCast(generated_len / 64);
         }
         return poly_key;
     }
@@ -174,19 +190,30 @@ pub const Context = struct {
             xorBytes(output, input, blocks[64..][0..input.len]);
             return;
         }
-        var blocks: [256]u8 = undefined;
+        var blocks: [64 * max_bulk_degree]u8 = undefined;
         var offset: usize = 0;
         var counter: u32 = 1;
         while (offset < input.len) {
-            ChaChaVec(4).blocks(&blocks, self.key, nonce, counter);
-            const len = @min(blocks.len, input.len - offset);
+            const remaining = input.len - offset;
+            const generated_len = if (comptime max_bulk_degree == 8) blk: {
+                if (remaining > 256) {
+                    ChaChaVec(8).blocks(&blocks, self.key, nonce, counter);
+                    break :blk @as(usize, 512);
+                }
+                ChaChaVec(4).blocks(blocks[0..256], self.key, nonce, counter);
+                break :blk @as(usize, 256);
+            } else blk: {
+                ChaChaVec(4).blocks(&blocks, self.key, nonce, counter);
+                break :blk @as(usize, 256);
+            };
+            const len = @min(generated_len, remaining);
             xorBytes(
                 output[offset..][0..len],
                 input[offset..][0..len],
                 blocks[0..len],
             );
             offset += len;
-            counter +%= 4;
+            counter +%= @intCast(generated_len / 64);
         }
     }
 };
@@ -555,23 +582,35 @@ fn ChaChaVec(comptime degree: comptime_int) type {
         }
 
         fn core(state: *State) void {
-            const m0 = switch (degree) {
-                2 => [_]i32{ 3, 0, 1, 2 } ++ [_]i32{ 7, 4, 5, 6 },
-                4 => [_]i32{ 3, 0, 1, 2 } ++ [_]i32{ 7, 4, 5, 6 } ++
-                    [_]i32{ 11, 8, 9, 10 } ++ [_]i32{ 15, 12, 13, 14 },
-                else => @compileError("invalid ChaCha vector degree"),
+            const m0 = comptime blk: {
+                var mask: [4 * degree]i32 = undefined;
+                for (0..degree) |block| {
+                    const base: i32 = @intCast(4 * block);
+                    mask[4 * block ..][0..4].* = .{
+                        base + 3, base, base + 1, base + 2,
+                    };
+                }
+                break :blk mask;
             };
-            const m1 = switch (degree) {
-                2 => [_]i32{ 2, 3, 0, 1 } ++ [_]i32{ 6, 7, 4, 5 },
-                4 => [_]i32{ 2, 3, 0, 1 } ++ [_]i32{ 6, 7, 4, 5 } ++
-                    [_]i32{ 10, 11, 8, 9 } ++ [_]i32{ 14, 15, 12, 13 },
-                else => @compileError("invalid ChaCha vector degree"),
+            const m1 = comptime blk: {
+                var mask: [4 * degree]i32 = undefined;
+                for (0..degree) |block| {
+                    const base: i32 = @intCast(4 * block);
+                    mask[4 * block ..][0..4].* = .{
+                        base + 2, base + 3, base, base + 1,
+                    };
+                }
+                break :blk mask;
             };
-            const m2 = switch (degree) {
-                2 => [_]i32{ 1, 2, 3, 0 } ++ [_]i32{ 5, 6, 7, 4 },
-                4 => [_]i32{ 1, 2, 3, 0 } ++ [_]i32{ 5, 6, 7, 4 } ++
-                    [_]i32{ 9, 10, 11, 8 } ++ [_]i32{ 13, 14, 15, 12 },
-                else => @compileError("invalid ChaCha vector degree"),
+            const m2 = comptime blk: {
+                var mask: [4 * degree]i32 = undefined;
+                for (0..degree) |block| {
+                    const base: i32 = @intCast(4 * block);
+                    mask[4 * block ..][0..4].* = .{
+                        base + 1, base + 2, base + 3, base,
+                    };
+                }
+                break :blk mask;
             };
 
             var round: usize = 0;
