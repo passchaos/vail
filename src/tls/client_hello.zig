@@ -26,6 +26,7 @@ pub const ext_early_data: u16 = 0x002a;
 pub const ext_certificate_authorities: u16 = 0x002f;
 pub const ext_record_size_limit: u16 = record_size_limit.extension_type;
 pub const ext_quic_transport_parameters: u16 = 0x0039;
+pub const ext_ticket_request: u16 = 0x003a;
 pub const ext_renegotiation_info: u16 = 0xff01;
 pub const ext_supported_versions: u16 = 0x002b;
 pub const ext_cookie: u16 = 0x002c;
@@ -67,6 +68,12 @@ pub const KeyShare = struct {
     key_exchange: []const u8,
 };
 
+/// RFC 9149 ticket counts requested for a new or resumed TLS 1.3 handshake.
+pub const TicketRequest = struct {
+    new_session_count: u8,
+    resumption_count: u8,
+};
+
 pub const WriteOptions = struct {
     random: [32]u8,
     session_id: []const u8 = &.{},
@@ -83,6 +90,7 @@ pub const WriteOptions = struct {
     offer_extended_master_secret: bool = false,
     record_size_limit: ?u16 = null,
     certificate_authorities: []const []const u8 = &.{},
+    ticket_request: ?TicketRequest = null,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_certificate_types: []const auth.CertificateType = &.{},
     client_certificate_types: []const auth.CertificateType = &.{},
@@ -120,6 +128,7 @@ pub const FlexibleWriteOptions = struct {
     offer_extended_master_secret: bool = false,
     record_size_limit: ?u16 = null,
     certificate_authorities: []const []const u8 = &.{},
+    ticket_request: ?TicketRequest = null,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_certificate_types: []const auth.CertificateType = &.{},
     client_certificate_types: []const auth.CertificateType = &.{},
@@ -154,6 +163,7 @@ pub fn write(
         .offer_extended_master_secret = options.offer_extended_master_secret,
         .record_size_limit = options.record_size_limit,
         .certificate_authorities = options.certificate_authorities,
+        .ticket_request = options.ticket_request,
         .certificate_compression_algorithms = options.certificate_compression_algorithms,
         .server_certificate_types = options.server_certificate_types,
         .client_certificate_types = options.client_certificate_types,
@@ -294,6 +304,15 @@ pub fn writeWithKeyShare(
             allocator,
             ext_certificate_authorities,
             authorities.items,
+        );
+    }
+
+    if (options.ticket_request) |request| {
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_ticket_request,
+            &.{ request.new_session_count, request.resumption_count },
         );
     }
 
@@ -563,6 +582,7 @@ pub const Parsed = struct {
     offers_secure_renegotiation: bool = false,
     record_size_limit: ?u16 = null,
     certificate_authorities: ?[]const u8 = null,
+    ticket_request: ?TicketRequest = null,
     certificate_compression_algorithms: []const u8 = &.{},
     server_certificate_types: []const u8 = &.{},
     client_certificate_types: []const u8 = &.{},
@@ -805,6 +825,13 @@ pub fn parse(bytes: []const u8) Error!Parsed {
             ext_certificate_authorities => {
                 parsed.certificate_authorities =
                     try parseCertificateAuthorities(payload);
+            },
+            ext_ticket_request => {
+                if (payload.len != 2) return error.InvalidClientHello;
+                parsed.ticket_request = .{
+                    .new_session_count = payload[0],
+                    .resumption_count = payload[1],
+                };
             },
             ext_server_certificate_type => {
                 parsed.server_certificate_types =
@@ -1057,6 +1084,7 @@ pub fn validateSecondClientHello(
             first.certificate_authorities,
             second.certificate_authorities,
         ) or
+        !std.meta.eql(first.ticket_request, second.ticket_request) or
         first.offers_secure_renegotiation !=
             second.offers_secure_renegotiation or
         !std.mem.eql(
@@ -1293,6 +1321,10 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
             &.{ 0x30, 0x03, 0x31, 0x01, 0x41 },
             &.{ 0x30, 0x03, 0x31, 0x01, 0x42 },
         },
+        .ticket_request = .{
+            .new_session_count = 3,
+            .resumption_count = 2,
+        },
         .certificate_compression_algorithms = &.{.zlib},
     });
     const parsed = try parse(encoded.items);
@@ -1314,6 +1346,10 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
     try std.testing.expect(parsed.supportsCertificateAuthority(
         &.{ 0x30, 0x03, 0x31, 0x01, 0x42 },
     ));
+    try std.testing.expectEqual(
+        TicketRequest{ .new_session_count = 3, .resumption_count = 2 },
+        parsed.ticket_request.?,
+    );
     try std.testing.expect(parsed.supportsCertificateCompression(.zlib));
     try std.testing.expect(!parsed.supportsCertificateCompression(.brotli));
     try std.testing.expectEqualStrings(
