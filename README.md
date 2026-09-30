@@ -75,7 +75,8 @@ The current foundation provides:
 - X.509 bounded path construction over unordered intermediates, alternate
   issuers and cross-signs, with hostname, validity, custom-bundle, and
   system-CA verification. Strict Authority Key Identifier and Subject Key
-  Identifier decoding prioritizes exact same-subject issuer matches before
+  Identifier decoding prioritizes exact same-subject issuer matches by either
+  key identifier or the authority-certificate issuer/serial pair before
   missing or explicitly mismatched identifiers, while retaining signature-
   verified fallback compatibility for non-conforming chains. SHA-2
   RSASSA-PSS-signed leaves and intermediate CAs
@@ -293,8 +294,8 @@ record protection.
 high-level incremental server state, ClientHello framing, and default-disabled
 diagnostic hooks in the same first-flight benchmark.
 `zig build -Doptimize=ReleaseFast bench-x509-path` measures bounded unordered
-AKI/SKI-routed and cross-signed certificate-path construction plus
-issuer/delegated OCSP.
+AKI/SKI- and AKI issuer/serial-routed certificate paths, cross-sign
+backtracking, and issuer/delegated OCSP.
 `zig build -Doptimize=ReleaseFast bench-certificate-compression` compares the
 RFC 8879 zlib, Brotli, and Zstandard wire-size ratios, amortized preparation
 costs, and per-handshake decompression costs.

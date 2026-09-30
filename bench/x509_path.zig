@@ -18,6 +18,10 @@ pub fn main(init: std.process.Init) !void {
     const delegated_ocsp = decodeHex(vectors.delegated_ocsp_good_hex);
     const ip_root = decodeHex(vectors.ip_constraints_root_hex);
     const ip_leaf = decodeHex(vectors.ip_constraints_allowed_leaf_hex);
+    const serial_root = decodeHex(vectors.serial_root_hex);
+    const serial_intermediate = decodeHex(vectors.serial_intermediate_hex);
+    const serial_decoy = decodeHex(vectors.serial_decoy_hex);
+    const serial_leaf = decodeHex(vectors.serial_leaf_hex);
 
     var root_bundle: std.crypto.Certificate.Bundle = .empty;
     defer root_bundle.deinit(allocator);
@@ -106,16 +110,35 @@ pub fn main(init: std.process.Init) !void {
     }
     const ip_ns = nowNs(init.io) -| ip_start;
 
+    var serial_bundle: std.crypto.Certificate.Bundle = .empty;
+    defer serial_bundle.deinit(allocator);
+    try serial_bundle.bytes.appendSlice(allocator, &serial_root);
+    try serial_bundle.parseCert(allocator, 0, 1_900_000_000);
+    const serial_verifier = vail.x509.trust.BundleVerifier{
+        .bundle = &serial_bundle,
+        .now_seconds = 1_900_000_000,
+        .path_limits = .{ .max_candidate_checks = 2 },
+    };
+    const serial_start = nowNs(init.io);
+    for (0..iterations) |_| {
+        try serial_verifier.verify(.{
+            .server_name = "serial.localhost",
+            .chain = &.{ &serial_leaf, &serial_decoy, &serial_intermediate },
+        });
+    }
+    const serial_ns = nowNs(init.io) -| serial_start;
+
     std.debug.print(
         "unordered-decoy={d} ns/op cross-sign-backtrack={d} ns/op " ++
             "ocsp-stapled={d} ns/op delegated-ocsp={d} ns/op " ++
-            "ip-name-constraints={d} ns/op\n",
+            "ip-name-constraints={d} ns/op issuer-serial={d} ns/op\n",
         .{
             unordered_ns / iterations,
             cross_ns / iterations,
             ocsp_ns / iterations,
             delegated_ns / iterations,
             ip_ns / iterations,
+            serial_ns / iterations,
         },
     );
 }

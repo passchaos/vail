@@ -210,6 +210,49 @@ test "bundle verifier builds an unordered path and backtracks decoys" {
     );
 }
 
+test "bundle verifier routes AKI issuer and serial before a same-name decoy" {
+    const root = decodeHex(path_vectors.serial_root_hex);
+    const intermediate = decodeHex(path_vectors.serial_intermediate_hex);
+    const decoy = decodeHex(path_vectors.serial_decoy_hex);
+    const leaf = decodeHex(path_vectors.serial_leaf_hex);
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(std.testing.allocator);
+    try bundle.bytes.appendSlice(std.testing.allocator, &root);
+    try bundle.parseCert(std.testing.allocator, 0, 1_900_000_000);
+
+    const leaf_usage = try trust.testing.certificateUsage(&leaf);
+    try std.testing.expect(leaf_usage.authority_key_identifier == null);
+    const leaf_authority = (try trust.testing.certificateAuthorityKeyIdentifier(
+        &leaf,
+    )).?;
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x10, 0x01 },
+        leaf_authority.authority_cert_serial_number.?,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x10, 0x01 },
+        try trust.testing.certificateSerialNumber(&intermediate),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x10, 0x02 },
+        try trust.testing.certificateSerialNumber(&decoy),
+    );
+
+    // The matching intermediate plus the root consume the whole budget. A
+    // linear scan that tries the decoy first would require a third check.
+    try (trust.BundleVerifier{
+        .bundle = &bundle,
+        .now_seconds = 1_900_000_000,
+        .path_limits = .{ .max_candidate_checks = 2 },
+    }).verify(.{
+        .server_name = "serial.localhost",
+        .chain = &.{ &leaf, &decoy, &intermediate },
+    });
+}
+
 test "bundle verifier backtracks across cross-signed intermediates" {
     const leaf = decodeHex(path_vectors.leaf_hex);
     const original_intermediate = decodeHex(path_vectors.intermediate_hex);
@@ -882,14 +925,15 @@ test "AKI and SKI codecs are strict while routing remains compatible" {
             &.{ 0x04, 0x03, 1, 2, 3 },
         ),
     );
+    const key_identifier = try trust.testing.parseAuthorityKeyIdentifier(
+        &.{ 0x30, 0x05, 0x80, 0x03, 1, 2, 3 },
+    );
     try std.testing.expectEqualSlices(
         u8,
         &.{ 1, 2, 3 },
-        (try trust.testing.parseAuthorityKeyIdentifier(
-            &.{ 0x30, 0x05, 0x80, 0x03, 1, 2, 3 },
-        )).?,
+        key_identifier.key_identifier.?,
     );
-    try std.testing.expect((try trust.testing.parseAuthorityKeyIdentifier(
+    const issuer_and_serial = try trust.testing.parseAuthorityKeyIdentifier(
         &.{
             0x30, 0x08,
             0xa1, 0x03,
@@ -897,11 +941,59 @@ test "AKI and SKI codecs are strict while routing remains compatible" {
             'x',  0x82,
             0x01, 0x01,
         },
-    )) == null);
+    );
+    try std.testing.expect(issuer_and_serial.key_identifier == null);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x82, 0x01, 'x' },
+        issuer_and_serial.authority_cert_issuer.?,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{1},
+        issuer_and_serial.authority_cert_serial_number.?,
+    );
+    const directory_issuer = try trust.testing.parseAuthorityKeyIdentifier(
+        &.{
+            0x30, 0x0c,
+            0xa1, 0x07,
+            0xa4, 0x05,
+            0x30, 0x03,
+            0x31, 0x01,
+            0x00, 0x82,
+            0x01, 0x01,
+        },
+    );
+    try std.testing.expectEqual(
+        @as(?bool, true),
+        try trust.testing.authorityIssuerMatches(
+            directory_issuer.authority_cert_issuer.?,
+            &.{ 0x31, 0x01, 0x00 },
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(?bool, false),
+        try trust.testing.authorityIssuerMatches(
+            directory_issuer.authority_cert_issuer.?,
+            &.{ 0x31, 0x01, 0x01 },
+        ),
+    );
     try std.testing.expectError(
         error.InvalidCertificateExtension,
         trust.testing.parseAuthorityKeyIdentifier(
             &.{ 0x30, 0x03, 0xa1, 0x01, 0x00 },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidCertificateExtension,
+        trust.testing.parseAuthorityKeyIdentifier(
+            &.{
+                0x30, 0x08,
+                0xa1, 0x03,
+                0xa4, 0x01,
+                0x00, 0x82,
+                0x01, 0x01,
+            },
         ),
     );
     // dNSName is primitive; accepting its constructed form would make the
@@ -933,15 +1025,70 @@ test "AKI and SKI codecs are strict while routing remains compatible" {
     );
     try std.testing.expectEqual(
         @as(u2, 0),
-        trust.testing.issuerKeyPriority("key", "key"),
+        try trust.testing.issuerIdentityPriority(
+            key_identifier,
+            &.{ 1, 2, 3 },
+            &.{},
+            &.{},
+        ),
     );
     try std.testing.expectEqual(
         @as(u2, 1),
-        trust.testing.issuerKeyPriority("key", null),
+        try trust.testing.issuerIdentityPriority(
+            key_identifier,
+            null,
+            &.{},
+            &.{},
+        ),
     );
     try std.testing.expectEqual(
         @as(u2, 2),
-        trust.testing.issuerKeyPriority("key", "other"),
+        try trust.testing.issuerIdentityPriority(
+            key_identifier,
+            "other",
+            &.{},
+            &.{},
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(u2, 0),
+        try trust.testing.issuerIdentityPriority(
+            directory_issuer,
+            null,
+            &.{ 0x31, 0x01, 0x00 },
+            &.{1},
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(u2, 2),
+        try trust.testing.issuerIdentityPriority(
+            directory_issuer,
+            null,
+            &.{ 0x31, 0x01, 0x00 },
+            &.{2},
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(u2, 2),
+        try trust.testing.issuerIdentityPriority(
+            directory_issuer,
+            null,
+            &.{ 0x31, 0x01, 0x01 },
+            &.{1},
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{5},
+        try trust.testing.certificateSerialNumber(
+            &.{ 0x30, 0x08, 0x30, 0x06, 0xa0, 0x01, 0x00, 0x02, 0x01, 0x05 },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidCertificateExtension,
+        trust.testing.certificateSerialNumber(
+            &.{ 0x30, 0x05, 0x30, 0x03, 0x02, 0x01, 0x80 },
+        ),
     );
 }
 

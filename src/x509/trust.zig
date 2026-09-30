@@ -349,6 +349,15 @@ const PathSearch = struct {
         }
 
         const subject_usage = try self.usageFor(subject_index);
+        const authority_issuer_serial = if (subject_usage.authority_key_identifier == null) blk: {
+            const authority = try certificateAuthorityKeyIdentifier(
+                self.chain[subject_index],
+            ) orelse break :blk null;
+            break :blk if (authority.authority_cert_serial_number != null)
+                authority
+            else
+                null;
+        } else null;
         var priorities: [hard_max_presented_certificates]u2 = @splat(3);
         for (self.parsed[1..], 1..) |issuer, issuer_index| {
             const bit = @as(u32, 1) << @intCast(issuer_index);
@@ -370,11 +379,29 @@ const PathSearch = struct {
                     authority_key,
                     issuer_usage.subject_key_identifier,
                 );
+            } else if (authority_issuer_serial) |authority| {
+                const issuer_usage = self.usageFor(issuer_index) catch {
+                    priorities[issuer_index] = 2;
+                    continue;
+                };
+                const issuer_serial = certificateSerialNumber(
+                    self.chain[issuer_index],
+                ) catch {
+                    priorities[issuer_index] = 2;
+                    continue;
+                };
+                priorities[issuer_index] = issuerIdentityPriority(
+                    authority,
+                    issuer_usage.subject_key_identifier,
+                    issuer.issuer(),
+                    issuer_serial,
+                ) catch 2;
             } else {
                 priorities[issuer_index] = 0;
             }
         }
-        const priority_count: usize = if (subject_usage.authority_key_identifier != null) 3 else 1;
+        const priority_count: usize = if (subject_usage.authority_key_identifier != null or
+            authority_issuer_serial != null) 3 else 1;
         for (0..priority_count) |priority| {
             for (self.parsed[1..], 1..) |issuer, issuer_index| {
                 if (priorities[issuer_index] != priority) continue;
@@ -682,6 +709,36 @@ const UsageCache = union(enum) {
     invalid: anyerror,
 };
 
+fn issuerIdentityPriority(
+    authority: AuthorityKeyIdentifier,
+    subject_key_identifier: ?[]const u8,
+    candidate_issuer_name: []const u8,
+    candidate_serial_number: []const u8,
+) !u2 {
+    var matched = false;
+    if (authority.key_identifier) |key_identifier| {
+        if (subject_key_identifier) |candidate| {
+            if (!std.mem.eql(u8, key_identifier, candidate)) return 2;
+            matched = true;
+        }
+    }
+    if (authority.authority_cert_serial_number) |serial_number| {
+        if (!std.mem.eql(u8, serial_number, candidate_serial_number)) {
+            return 2;
+        }
+        matched = true;
+        const issuer_names = authority.authority_cert_issuer orelse
+            return error.InvalidCertificateExtension;
+        if (try authorityIssuerMatches(
+            issuer_names,
+            candidate_issuer_name,
+        )) |issuer_matches| {
+            if (!issuer_matches) return 2;
+        }
+    }
+    return if (matched) 0 else 1;
+}
+
 fn issuerKeyPriority(
     authority_key_identifier: []const u8,
     subject_key_identifier: ?[]const u8,
@@ -876,12 +933,11 @@ fn certificateUsage(certificate_der: []const u8) !CertificateUsage {
                 value.value,
             );
         } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x23 })) {
-            if (critical or result.authority_key_identifier != null) {
+            if (critical) {
                 return error.InvalidCertificateExtension;
             }
-            result.authority_key_identifier = try parseAuthorityKeyIdentifier(
-                value.value,
-            );
+            result.authority_key_identifier =
+                try parseAuthorityKeyIdentifier(value.value);
         } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x1e })) {
             if (result.name_constraints != null) {
                 return error.InvalidCertificateExtension;
@@ -895,6 +951,43 @@ fn certificateUsage(certificate_der: []const u8) !CertificateUsage {
     return result;
 }
 
+fn certificateAuthorityKeyIdentifier(
+    certificate_der: []const u8,
+) !?AuthorityKeyIdentifier {
+    const extensions = try certificateExtensions(certificate_der) orelse
+        return null;
+    var reader = DerReader{ .bytes = extensions.value };
+    while (try reader.next()) |extension| {
+        if (extension.tag != 0x30) {
+            return error.InvalidCertificateExtension;
+        }
+        var fields = DerReader{ .bytes = extension.value };
+        const oid = try fields.require(0x06);
+        var value = (try fields.next()) orelse
+            return error.InvalidCertificateExtension;
+        var critical = false;
+        if (value.tag == 0x01) {
+            if (value.value.len != 1 or value.value[0] != 0xff) {
+                return error.InvalidCertificateExtension;
+            }
+            critical = true;
+            value = (try fields.next()) orelse
+                return error.InvalidCertificateExtension;
+        }
+        if (value.tag != 0x04 or try fields.next() != null) {
+            return error.InvalidCertificateExtension;
+        }
+        if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x23 })) {
+            if (critical) return error.InvalidCertificateExtension;
+            return @as(
+                ?AuthorityKeyIdentifier,
+                try parseAuthorityKeyIdentifierDetails(value.value),
+            );
+        }
+    }
+    return null;
+}
+
 fn parseSubjectKeyIdentifier(encoded: []const u8) ![]const u8 {
     const key_identifier = try singleInner(encoded, 0x04);
     if (key_identifier.value.len == 0) {
@@ -902,6 +995,12 @@ fn parseSubjectKeyIdentifier(encoded: []const u8) ![]const u8 {
     }
     return key_identifier.value;
 }
+
+const AuthorityKeyIdentifier = struct {
+    key_identifier: ?[]const u8 = null,
+    authority_cert_issuer: ?[]const u8 = null,
+    authority_cert_serial_number: ?[]const u8 = null,
+};
 
 fn parseAuthorityKeyIdentifier(encoded: []const u8) !?[]const u8 {
     const sequence = try singleInner(encoded, 0x30);
@@ -938,6 +1037,9 @@ fn parseAuthorityKeyIdentifier(encoded: []const u8) !?[]const u8 {
                     if (!isGeneralNameTag(name.tag)) {
                         return error.InvalidCertificateExtension;
                     }
+                    if (name.tag == 0xa4) {
+                        _ = try singleInner(name.value, 0x30);
+                    }
                     count += 1;
                 }
                 if (count == 0) return error.InvalidCertificateExtension;
@@ -956,6 +1058,101 @@ fn parseAuthorityKeyIdentifier(encoded: []const u8) !?[]const u8 {
         return error.InvalidCertificateExtension;
     }
     return key_identifier;
+}
+
+fn parseAuthorityKeyIdentifierDetails(
+    encoded: []const u8,
+) !AuthorityKeyIdentifier {
+    const sequence = try singleInner(encoded, 0x30);
+    if (sequence.value.len == 0) return error.InvalidCertificateExtension;
+    var fields = DerReader{ .bytes = sequence.value };
+    var result: AuthorityKeyIdentifier = .{};
+    var previous_tag_number: ?u8 = null;
+    while (try fields.next()) |field| {
+        const tag_number = field.tag & 0x1f;
+        if ((field.tag != 0x80 and field.tag != 0xa1 and
+            field.tag != 0x82) or
+            (previous_tag_number != null and
+                tag_number <= previous_tag_number.?))
+        {
+            return error.InvalidCertificateExtension;
+        }
+        previous_tag_number = tag_number;
+        switch (field.tag) {
+            0x80 => {
+                if (field.value.len == 0) {
+                    return error.InvalidCertificateExtension;
+                }
+                result.key_identifier = field.value;
+            },
+            0xa1 => {
+                if (field.value.len == 0) {
+                    return error.InvalidCertificateExtension;
+                }
+                var names = DerReader{ .bytes = field.value };
+                var count: usize = 0;
+                while (try names.next()) |name| {
+                    if (!isGeneralNameTag(name.tag)) {
+                        return error.InvalidCertificateExtension;
+                    }
+                    if (name.tag == 0xa4) {
+                        _ = try singleInner(name.value, 0x30);
+                    }
+                    count += 1;
+                }
+                if (count == 0) return error.InvalidCertificateExtension;
+                result.authority_cert_issuer = field.value;
+            },
+            0x82 => {
+                try validateCertificateSerialValue(field.value);
+                result.authority_cert_serial_number = field.value;
+            },
+            else => unreachable,
+        }
+    }
+    if ((result.authority_cert_issuer == null) !=
+        (result.authority_cert_serial_number == null) or
+        (result.key_identifier == null and
+            result.authority_cert_issuer == null))
+    {
+        return error.InvalidCertificateExtension;
+    }
+    return result;
+}
+
+fn authorityIssuerMatches(
+    encoded_names: []const u8,
+    candidate_issuer_name: []const u8,
+) !?bool {
+    var names = DerReader{ .bytes = encoded_names };
+    var saw_directory_name = false;
+    while (try names.next()) |name| {
+        if (name.tag != 0xa4) continue;
+        const directory_name = try singleInner(name.value, 0x30);
+        saw_directory_name = true;
+        if (std.mem.eql(
+            u8,
+            directory_name.value,
+            candidate_issuer_name,
+        )) return true;
+    }
+    return if (saw_directory_name) false else null;
+}
+
+fn certificateSerialNumber(certificate_der: []const u8) ![]const u8 {
+    const certificate = try singleInner(certificate_der, 0x30);
+    var certificate_fields = DerReader{ .bytes = certificate.value };
+    const tbs = try certificate_fields.require(0x30);
+    var tbs_fields = DerReader{ .bytes = tbs.value };
+    var serial = (try tbs_fields.next()) orelse
+        return error.InvalidCertificate;
+    if (serial.tag == 0xa0) {
+        serial = try tbs_fields.require(0x02);
+    } else if (serial.tag != 0x02) {
+        return error.InvalidCertificate;
+    }
+    try validateCertificateSerialValue(serial.value);
+    return serial.value;
 }
 
 fn isGeneralNameTag(tag: u8) bool {
@@ -1452,6 +1649,7 @@ const DerReader = struct {
 
 pub const testing = struct {
     pub const Usage = CertificateUsage;
+    pub const AuthorityKeyIdentifierValue = AuthorityKeyIdentifier;
     pub const BasicConstraintsValue = BasicConstraints;
     pub const KeyUsageValue = KeyUsage;
     pub const ExtendedKeyUsageValue = ExtendedKeyUsage;
@@ -1511,17 +1709,45 @@ pub const testing = struct {
 
     pub fn parseAuthorityKeyIdentifier(
         encoded: []const u8,
-    ) !?[]const u8 {
-        return @import("trust.zig").parseAuthorityKeyIdentifier(encoded);
+    ) !AuthorityKeyIdentifierValue {
+        return @import("trust.zig").parseAuthorityKeyIdentifierDetails(
+            encoded,
+        );
     }
 
-    pub fn issuerKeyPriority(
-        authority_key_identifier: []const u8,
+    pub fn issuerIdentityPriority(
+        authority: AuthorityKeyIdentifierValue,
         subject_key_identifier: ?[]const u8,
-    ) u2 {
-        return @import("trust.zig").issuerKeyPriority(
-            authority_key_identifier,
+        candidate_issuer_name: []const u8,
+        candidate_serial_number: []const u8,
+    ) !u2 {
+        return @import("trust.zig").issuerIdentityPriority(
+            authority,
             subject_key_identifier,
+            candidate_issuer_name,
+            candidate_serial_number,
+        );
+    }
+
+    pub fn authorityIssuerMatches(
+        encoded_names: []const u8,
+        candidate_issuer_name: []const u8,
+    ) !?bool {
+        return @import("trust.zig").authorityIssuerMatches(
+            encoded_names,
+            candidate_issuer_name,
+        );
+    }
+
+    pub fn certificateSerialNumber(certificate_der: []const u8) ![]const u8 {
+        return @import("trust.zig").certificateSerialNumber(certificate_der);
+    }
+
+    pub fn certificateAuthorityKeyIdentifier(
+        certificate_der: []const u8,
+    ) !?AuthorityKeyIdentifierValue {
+        return @import("trust.zig").certificateAuthorityKeyIdentifier(
+            certificate_der,
         );
     }
 
