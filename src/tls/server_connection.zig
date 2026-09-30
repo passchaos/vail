@@ -20,6 +20,7 @@ const key_log = @import("key_log.zig");
 const key_schedule = @import("key_schedule.zig");
 const psk = @import("psk.zig");
 const record = @import("record.zig");
+const record_size_limit = @import("record_size_limit.zig");
 const secret = @import("secret.zig");
 const server_flight = @import("server_flight.zig");
 const server_handshake = @import("server_handshake.zig");
@@ -69,6 +70,8 @@ pub const Config = struct {
     identity_resolver: ?IdentityResolver = null,
     client_auth: ?server_handshake.ClientAuthOptions = null,
     client_auth_policy: ?client_auth.ServerPolicy = null,
+    /// RFC 8449 limit advertised when the client offers the extension.
+    record_size_limit: ?u16 = null,
     retry_cookie: ?[]const u8 = null,
     resumption: ?ServerResumption = null,
     early_data: ?EarlyDataPolicy = null,
@@ -222,6 +225,8 @@ pub fn ServerConnection(
             client_certificate_compression: ?certificate_compression.Algorithm,
             server_certificate_type: auth.CertificateType,
             client_certificate_type: auth.CertificateType,
+            local_record_size_limit: ?u16,
+            peer_record_size_limit: ?u16,
             peer_certificate_chain: ?[][]u8 = null,
             ech_accepted: bool,
 
@@ -345,6 +350,8 @@ pub fn ServerConnection(
             client_certificate_verify: ?MessageRange = null,
             authenticated_client_chain: ?[][]u8 = null,
             client_certificate_compression: ?certificate_compression.Algorithm = null,
+            local_record_size_limit: ?u16,
+            peer_record_size_limit: ?u16,
             transcript_after_client_finished: ?transcript.Digest = null,
 
             fn deinit(self: *PendingHandshake) void {
@@ -848,6 +855,7 @@ pub fn ServerConnection(
                         null,
                     .transcript_prefix = transcript_prefix,
                     .client_auth = self.config.client_auth,
+                    .record_size_limit = self.config.record_size_limit,
                 },
             );
             errdefer {
@@ -885,6 +893,8 @@ pub fn ServerConnection(
                 .certificate_compression = result.certificate_compression,
                 .server_certificate_type = result.selection.server_certificate_type,
                 .client_certificate_type = result.selection.client_certificate_type,
+                .local_record_size_limit = result.local_record_size_limit,
+                .peer_record_size_limit = result.peer_record_size_limit,
                 .client_records = client_records,
                 .early_records = early_records,
                 .early_data_accepted = early_limit != null,
@@ -892,6 +902,11 @@ pub fn ServerConnection(
                 .expect_end_of_early_data = early_limit != null,
                 .saw_change_cipher_spec = self.saw_retry_change_cipher_spec,
             };
+            if (result.local_record_size_limit) |limit| {
+                self.pending.?.receiver.setMaxCiphertextFragmentLen(
+                    try record_size_limit.maxCiphertextFragment(limit),
+                );
+            }
             if (self.ech_context) |*context| context.deinit();
             self.ech_context = null;
             self.stage = .client_finished;
@@ -1322,10 +1337,12 @@ pub fn ServerConnection(
                 application.client_traffic_secret.deinit();
                 application.server_traffic_secret.deinit();
             }
-            var application_connection = try Application.init(
+            var application_connection = try Application.initWithRecordSizeLimits(
                 pending.suite,
                 application.client_traffic_secret,
                 application.server_traffic_secret,
+                pending.local_record_size_limit,
+                pending.peer_record_size_limit,
             );
             errdefer application_connection.deinit();
             if (self.config.key_log) |logger| {
@@ -1367,6 +1384,8 @@ pub fn ServerConnection(
                 .client_certificate_compression = pending.client_certificate_compression,
                 .server_certificate_type = pending.server_certificate_type,
                 .client_certificate_type = pending.client_certificate_type,
+                .local_record_size_limit = pending.local_record_size_limit,
+                .peer_record_size_limit = pending.peer_record_size_limit,
                 .peer_certificate_chain = pending.authenticated_client_chain,
                 .ech_accepted = self.ech_accepted,
             };

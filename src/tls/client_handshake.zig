@@ -81,6 +81,10 @@ pub const Result = struct {
     client_certificate_compression: ?certificate_compression.Algorithm,
     server_certificate_type: auth.CertificateType,
     client_certificate_type: auth.CertificateType,
+    /// Limit this client advertised for records sent by the server.
+    local_record_size_limit: ?u16,
+    /// Limit the server advertised for records sent by this client.
+    peer_record_size_limit: ?u16,
     ech_retry_configs: ?[]const u8,
 
     pub fn deinit(self: *Result) void {
@@ -122,6 +126,11 @@ pub fn verifyServerAndWriteClientFlight(
     const parsed_client_hello = try client_hello.parse(
         options.client_hello_bytes,
     );
+    if (encrypted_extensions.record_size_limit != null and
+        parsed_client_hello.record_size_limit == null)
+    {
+        return error.InvalidServerFlight;
+    }
     if (encrypted_extensions.quic_transport_parameters != null and
         parsed_client_hello.quic_transport_parameters == null)
     {
@@ -357,6 +366,8 @@ pub fn verifyServerAndWriteClientFlight(
         .client_certificate_compression = selected_client_certificate_compression,
         .server_certificate_type = negotiated_server_certificate_type,
         .client_certificate_type = negotiated_client_certificate_type,
+        .local_record_size_limit = parsed_client_hello.record_size_limit,
+        .peer_record_size_limit = encrypted_extensions.record_size_limit,
         .ech_retry_configs = encrypted_extensions.ech_retry_configs,
     };
 }

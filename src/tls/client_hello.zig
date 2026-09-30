@@ -965,6 +965,7 @@ pub fn validateSecondClientHello(
         first.requests_ocsp != second.requests_ocsp or
         first.offers_extended_master_secret !=
             second.offers_extended_master_secret or
+        first.record_size_limit != second.record_size_limit or
         first.offers_secure_renegotiation !=
             second.offers_secure_renegotiation or
         !std.mem.eql(

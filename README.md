@@ -31,7 +31,9 @@ The current foundation provides:
   reassembly, internally owned classical/hybrid key exchange, authenticated
   transition to application traffic, HelloRetryRequest with RFC 8446
   `message_hash` transcripts and cookies, automatic sequence numbers and AEAD
-  usage limits, KeyUpdate generations, and bidirectional `close_notify`;
+  usage limits, RFC 8449 bidirectional record-size negotiation with bounded
+  handshake/application fragmentation and pre-decryption enforcement,
+  KeyUpdate generations, and bidirectional `close_notify`;
 - unified incremental client and server frontends that emit/consume one
   ClientHello, prefer TLS 1.3 when both peers support it, otherwise select TLS
   1.2 without reconstructing transcript bytes, and wipe the unused version's

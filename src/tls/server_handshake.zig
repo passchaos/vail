@@ -14,6 +14,7 @@ const ech = @import("ech.zig");
 const key_exchange = @import("key_exchange.zig");
 const key_schedule = @import("key_schedule.zig");
 const record = @import("record.zig");
+const record_size_limit = @import("record_size_limit.zig");
 const secret = @import("secret.zig");
 const server_flight = @import("server_flight.zig");
 const server_hello = @import("server_hello.zig");
@@ -27,6 +28,7 @@ pub const Error = std.mem.Allocator.Error || server_flight.Error ||
     client_hello.Error ||
     key_schedule.Error || record.Error || traffic.Error || auth.Error ||
     certificate_compression.Error ||
+    record_size_limit.Error ||
     key_exchange.Error ||
     client_auth.Error || ech.Error || error{
     InvalidFinished,
@@ -45,6 +47,8 @@ pub const Result = struct {
     transcript_state_after_server_finished: transcript.State,
     early_data_accepted: bool,
     certificate_compression: ?certificate_compression.Algorithm,
+    local_record_size_limit: ?u16,
+    peer_record_size_limit: ?u16,
 };
 
 pub const Options = struct {
@@ -67,6 +71,7 @@ pub const Options = struct {
     transcript_prefix: ?transcript.State = null,
     /// Emit CertificateRequest immediately after EncryptedExtensions.
     client_auth: ?ClientAuthOptions = null,
+    record_size_limit: ?u16 = null,
 };
 
 pub const ClientAuthOptions = struct {
@@ -98,6 +103,7 @@ pub const ManagedOptions = struct {
     ech_retry_configs: ?[]const u8 = null,
     transcript_prefix: ?transcript.State = null,
     client_auth: ?ClientAuthOptions = null,
+    record_size_limit: ?u16 = null,
 };
 
 /// Select the offered share, complete key exchange, and construct the server
@@ -149,6 +155,7 @@ pub fn writeServerHandshakeFlightManaged(
         .ech_retry_configs = options.ech_retry_configs,
         .transcript_prefix = options.transcript_prefix,
         .client_auth = options.client_auth,
+        .record_size_limit = options.record_size_limit,
     }, selection);
 }
 
@@ -187,6 +194,10 @@ fn writeServerHandshakeFlightSelected(
         options.ech_retry_configs != null)
     {
         return error.InvalidEchExtension;
+    }
+    if (options.record_size_limit) |limit| {
+        _ = record_size_limit.validate(limit) catch
+            return error.InvalidEncryptedExtensions;
     }
     if (options.psk) |psk_secret| {
         if (psk_secret.hash != selection.suite.hash()) {
@@ -247,6 +258,8 @@ fn writeServerHandshakeFlightSelected(
 
     var encrypted_extensions: std.ArrayList(u8) = .empty;
     defer encrypted_extensions.deinit(allocator);
+    const local_record_size_limit = if (options.parsed_client_hello.record_size_limit != null) options.record_size_limit else null;
+    const peer_fragment_limit = if (options.parsed_client_hello.record_size_limit) |limit| try record_size_limit.maxApplicationData(limit) else record.max_plaintext_len;
     try server_hello.writeEncryptedExtensions(&encrypted_extensions, allocator, .{
         .alpn_protocol = selection.alpn_protocol,
         .quic_transport_parameters = options.policy.quic_transport_parameters,
@@ -260,12 +273,14 @@ fn writeServerHandshakeFlightSelected(
         else
             null,
         .ech_retry_configs = options.ech_retry_configs,
+        .record_size_limit = local_record_size_limit,
     });
     try appendEncryptedHandshake(
         out,
         allocator,
         &record_traffic,
         encrypted_extensions.items,
+        peer_fragment_limit,
     );
     transcript_state.update(encrypted_extensions.items);
 
@@ -284,6 +299,7 @@ fn writeServerHandshakeFlightSelected(
             allocator,
             &record_traffic,
             certificate_request.items,
+            peer_fragment_limit,
         );
         transcript_state.update(certificate_request.items);
     }
@@ -329,6 +345,7 @@ fn writeServerHandshakeFlightSelected(
             allocator,
             &record_traffic,
             certificate_wire,
+            peer_fragment_limit,
         );
         transcript_state.update(certificate_wire);
 
@@ -344,6 +361,7 @@ fn writeServerHandshakeFlightSelected(
             allocator,
             &record_traffic,
             certificate_verify.items,
+            peer_fragment_limit,
         );
         transcript_state.update(certificate_verify.items);
     }
@@ -361,6 +379,7 @@ fn writeServerHandshakeFlightSelected(
         allocator,
         &record_traffic,
         finished.items,
+        peer_fragment_limit,
     );
     transcript_state.update(finished.items);
     const transcript_after_server_finished = transcript_state.digest();
@@ -374,6 +393,8 @@ fn writeServerHandshakeFlightSelected(
         .transcript_state_after_server_finished = transcript_state,
         .early_data_accepted = options.accept_early_data,
         .certificate_compression = selected_certificate_compression,
+        .local_record_size_limit = local_record_size_limit,
+        .peer_record_size_limit = options.parsed_client_hello.record_size_limit,
     };
 }
 
@@ -382,12 +403,13 @@ fn appendEncryptedHandshake(
     allocator: std.mem.Allocator,
     record_traffic: *traffic.State,
     handshake_message: []const u8,
+    max_fragment_plaintext: usize,
 ) Error!void {
     var buffer: [record.max_record_len]u8 = undefined;
     var offset: usize = 0;
     while (offset < handshake_message.len) {
         const chunk_len = @min(
-            record.max_plaintext_len,
+            max_fragment_plaintext,
             handshake_message.len - offset,
         );
         const len = try record_traffic.seal(

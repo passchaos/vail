@@ -20,6 +20,7 @@ const key_log = @import("key_log.zig");
 const key_schedule = @import("key_schedule.zig");
 const psk = @import("psk.zig");
 const record = @import("record.zig");
+const record_size_limit = @import("record_size_limit.zig");
 const secret = @import("secret.zig");
 const server_handshake = @import("server_handshake.zig");
 const server_hello = @import("server_hello.zig");
@@ -94,6 +95,8 @@ pub const Config = struct {
         .zstd,
     },
     max_decompressed_certificate_len: usize = 64 * 1024,
+    /// RFC 8449 limit for TLSInnerPlaintext records received from the server.
+    record_size_limit: ?u16 = null,
     server_verifier: auth.ClientVerifier,
     server_certificate_type: auth.CertificateType = .x509,
     client_identity: ?client_auth.ClientIdentity = null,
@@ -150,6 +153,8 @@ pub fn ClientConnection(
             client_certificate_compression: ?certificate_compression.Algorithm,
             server_certificate_type: auth.CertificateType,
             client_certificate_type: auth.CertificateType,
+            local_record_size_limit: ?u16,
+            peer_record_size_limit: ?u16,
             ech_accepted: bool,
 
             pub fn cacheNewSessionTicket(
@@ -289,6 +294,7 @@ pub fn ClientConnection(
         request_ocsp: bool,
         certificate_compression_algorithms: []const certificate_compression.Algorithm,
         max_decompressed_certificate_len: usize,
+        record_size_limit: ?u16,
         key_logger: ?key_log.Logger = null,
         stage: Stage = .server_hello,
         client_hello_bytes: ?[]u8,
@@ -364,6 +370,7 @@ pub fn ClientConnection(
                 .alpn_protocols = config.alpn_protocols,
                 .request_ocsp = config.request_ocsp,
                 .offer_extended_master_secret = config.offer_extended_master_secret,
+                .record_size_limit = config.record_size_limit,
                 .certificate_compression_algorithms = config.certificate_compression_algorithms,
                 .session_ticket = config.tls12_session_ticket,
                 .server_certificate_types = if (config.server_certificate_type == .raw_public_key)
@@ -428,6 +435,7 @@ pub fn ClientConnection(
                         .cipher_suites = config.cipher_suites,
                         .supported_versions = config.supported_versions,
                         .signature_schemes = config.signature_schemes,
+                        .record_size_limit = config.record_size_limit,
                     },
                 );
                 if (resumption != null) {
@@ -530,6 +538,7 @@ pub fn ClientConnection(
                 .request_ocsp = config.request_ocsp,
                 .certificate_compression_algorithms = config.certificate_compression_algorithms,
                 .max_decompressed_certificate_len = config.max_decompressed_certificate_len,
+                .record_size_limit = config.record_size_limit,
                 .key_logger = config.key_log,
                 .client_hello_bytes = owned_hello,
                 .exchange = exchange,
@@ -751,6 +760,7 @@ pub fn ClientConnection(
                     .alpn_protocols = self.alpn_protocols,
                     .request_ocsp = self.request_ocsp,
                     .offer_extended_master_secret = self.offer_extended_master_secret,
+                    .record_size_limit = self.record_size_limit,
                     .certificate_compression_algorithms = self.certificate_compression_algorithms,
                     .session_ticket = parsed_client.session_ticket,
                     .server_certificate_types = if (self.server_certificate_type == .raw_public_key)
@@ -819,6 +829,7 @@ pub fn ClientConnection(
                         .cipher_suites = self.cipher_suites,
                         .supported_versions = self.supported_versions,
                         .signature_schemes = self.signature_schemes,
+                        .record_size_limit = self.record_size_limit,
                     },
                 );
                 if (self.resumption != null) {
@@ -1041,6 +1052,11 @@ pub fn ClientConnection(
                 .client_records = client_records,
                 .saw_change_cipher_spec = self.saw_retry_change_cipher_spec,
             };
+            if (self.record_size_limit) |limit| {
+                self.pending.?.receiver.setMaxCiphertextFragmentLen(
+                    try record_size_limit.maxCiphertextFragment(limit),
+                );
+            }
             if (self.resumption) |*resumption| {
                 resumption.deinit();
             }
@@ -1202,10 +1218,12 @@ pub fn ClientConnection(
             else
                 null;
             errdefer if (alpn_copy) |selected| self.allocator.free(selected);
-            var application = try Application.init(
+            var application = try Application.initWithRecordSizeLimits(
                 verified.cipher_suite,
                 verified.application.server_traffic_secret,
                 verified.application.client_traffic_secret,
+                verified.local_record_size_limit,
+                verified.peer_record_size_limit,
             );
             errdefer application.deinit();
             if (self.key_logger) |logger| {
@@ -1265,8 +1283,9 @@ pub fn ClientConnection(
                 self.early_write = null;
             }
             while (offset < client_messages.items.len) {
+                const peer_fragment_limit = if (verified.peer_record_size_limit) |limit| try record_size_limit.maxApplicationData(limit) else record.max_plaintext_len;
                 const chunk_len = @min(
-                    record.max_plaintext_len,
+                    peer_fragment_limit,
                     client_messages.items.len - offset,
                 );
                 var encrypted: [record.max_record_len]u8 = undefined;
@@ -1297,6 +1316,8 @@ pub fn ClientConnection(
                 .client_certificate_compression = verified.client_certificate_compression,
                 .server_certificate_type = verified.server_certificate_type,
                 .client_certificate_type = verified.client_certificate_type,
+                .local_record_size_limit = verified.local_record_size_limit,
+                .peer_record_size_limit = verified.peer_record_size_limit,
                 .ech_accepted = self.ech_accepted,
             };
             verified_owned = false;
@@ -1590,6 +1611,7 @@ test "client and server states establish over one-byte transport reads" {
         .cipher_suites = &.{.aes_128_gcm_sha256},
         .alpn_protocols = &.{"h2"},
         .request_ocsp = true,
+        .record_size_limit = 256,
         .certificate_compression_algorithms = &.{.zstd},
         .key_log = client_key_log.logger(),
         .server_verifier = .{ .verify_trust = struct {
@@ -1642,6 +1664,7 @@ test "client and server states establish over one-byte transport reads" {
             .ed25519 = .{ .key_pair = fallback_signing_key },
         },
         .identity_resolver = identity_set.resolver(),
+        .record_size_limit = 192,
         .key_log = server_key_log.logger(),
         .client_auth = .{
             .request_context = "mtls",
@@ -1725,6 +1748,14 @@ test "client and server states establish over one-byte transport reads" {
         certificate_compression.Algorithm.zstd,
         established_client.certificate_compression.?,
     );
+    try std.testing.expectEqual(
+        @as(?u16, 256),
+        established_client.local_record_size_limit,
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 192),
+        established_client.peer_record_size_limit,
+    );
 
     const server_established_result = try server.receive(
         client_finished.items,
@@ -1745,6 +1776,14 @@ test "client and server states establish over one-byte transport reads" {
         certificate_compression.Algorithm.zstd,
         established_server.client_certificate_compression.?,
     );
+    try std.testing.expectEqual(
+        @as(?u16, 192),
+        established_server.local_record_size_limit,
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 256),
+        established_server.peer_record_size_limit,
+    );
     try client_key_log.expectMatches(
         &server_key_log,
         [_]u8{0xc3} ** 32,
@@ -1759,6 +1798,13 @@ test "client and server states establish over one-byte transport reads" {
     try std.testing.expectEqualStrings(
         "state-machine round trip",
         application.event.?.application_data,
+    );
+    try std.testing.expectError(
+        error.PeerRecordSizeLimitExceeded,
+        established_client.application.sealApplicationData(
+            &([_]u8{0xaa} ** 192),
+            &application_record,
+        ),
     );
 
     const ticket_module = @import("ticket_keyring.zig");
