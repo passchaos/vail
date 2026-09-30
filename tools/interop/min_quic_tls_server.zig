@@ -102,6 +102,24 @@ pub fn main(init: std.process.Init) !void {
             .io = init.io,
         },
     };
+    var certificate_message: std.ArrayList(u8) = .empty;
+    defer certificate_message.deinit(allocator);
+    try vail.tls.auth.writeCertificate(
+        &certificate_message,
+        allocator,
+        &.{&certificate_der},
+    );
+    var compressed_certificate = try vail.tls.certificate_compression.Prepared
+        .initBrotli(
+        allocator,
+        certificate_message.items,
+        .amortized,
+    );
+    defer compressed_certificate.deinit();
+    const compressed_certificates =
+        [_]vail.tls.certificate_compression.PreparedView{
+            compressed_certificate.view(),
+        };
 
     var server_initial: std.ArrayList(u8) = .empty;
     defer server_initial.deinit(allocator);
@@ -119,6 +137,7 @@ pub fn main(init: std.process.Init) !void {
                 .groups = &groups,
                 .alpn_protocols = &.{"h3"},
                 .quic_transport_parameters = &server_transport_parameters,
+                .compressed_certificates = &compressed_certificates,
             },
             .server_random = [_]u8{0xc2} ** 32,
             .server_key_share = exchange.serverShare(),
@@ -128,6 +147,9 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     defer result.deinit();
+    if (result.certificate_compression != .brotli) {
+        return error.CertificateCompressionNotNegotiated;
+    }
     try writeFrame(peer, server_initial.items);
     try writeFrame(peer, server_handshake.items);
 
@@ -143,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
         return error.UnexpectedClientCertificate;
     }
     std.debug.print(
-        "Vail QUIC server verified rustls/AWS-LC client group={s}\n",
+        "Vail QUIC server verified rustls/AWS-LC client group={s} compression=Brotli\n",
         .{switch (mode) {
             .x25519 => "X25519",
             .hybrid => "X25519MLKEM768",

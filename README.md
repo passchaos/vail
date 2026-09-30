@@ -210,7 +210,9 @@ The current foundation provides:
   mTLS and verifies the client's Finished before returning an owned peer chain.
   Both sides require QUIC transport parameters and a common ALPN, while
   packetization, retransmission, packet-number spaces, and congestion/recovery
-  remain transport responsibilities.
+  remain transport responsibilities. QUIC certificate flights use the same
+  reusable RFC 8879 zlib/Brotli/Zstandard preparations as stream TLS, including
+  Vort's pure-Zig Brotli and Zstandard encoders.
 - ShangMi coverage: SM2 signs and verifies ZA-bound raw/DER signatures against
   SEC1 public keys and SM2 X.509 SubjectPublicKeyInfo, and is wired into TLS
   CertificateVerify generation/verification for raw and X.509 SM2 keys,

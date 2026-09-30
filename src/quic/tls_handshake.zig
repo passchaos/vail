@@ -75,6 +75,7 @@ pub const Result = struct {
     ech_accepted: bool,
     ech_rejected: bool,
     requested_ticket_count: u8,
+    certificate_compression: ?certificate_compression.Algorithm,
     application_settings: ?application_settings.Payload,
     peer_application_settings: ?[]const u8,
     client_application_settings_required: bool,
@@ -949,16 +950,42 @@ pub fn writeServerCryptoFlight(
         transcript_state.update(certificate_request.items);
     }
 
+    var selected_certificate_compression: ?certificate_compression.Algorithm = null;
     if (selected_psk == null) {
         var certificate: std.ArrayList(u8) = .empty;
         defer certificate.deinit(allocator);
-        try auth.writeCertificate(
-            &certificate,
-            allocator,
-            options.certificate_chain,
-        );
-        try handshake_crypto.appendSlice(allocator, certificate.items);
-        transcript_state.update(certificate.items);
+        if (selection.server_certificate_type == .x509 and
+            options.parsed_client_hello.requests_ocsp and
+            options.policy.ocsp_response != null)
+        {
+            try auth.writeCertificateWithOcsp(
+                &certificate,
+                allocator,
+                options.certificate_chain,
+                options.policy.ocsp_response.?,
+            );
+        } else {
+            try auth.writeCertificate(
+                &certificate,
+                allocator,
+                options.certificate_chain,
+            );
+        }
+        var compressed_certificate: std.ArrayList(u8) = .empty;
+        defer compressed_certificate.deinit(allocator);
+        const certificate_wire = for (options.policy.compressed_certificates) |prepared| {
+            if (options.parsed_client_hello.supportsCertificateCompression(
+                prepared.algorithm,
+            ) and prepared.matchesCertificateMessage(certificate.items) and
+                prepared.savesBytes(certificate.items.len))
+            {
+                try prepared.write(&compressed_certificate, allocator);
+                selected_certificate_compression = prepared.algorithm;
+                break compressed_certificate.items;
+            }
+        } else certificate.items;
+        try handshake_crypto.appendSlice(allocator, certificate_wire);
+        transcript_state.update(certificate_wire);
 
         var certificate_verify: std.ArrayList(u8) = .empty;
         defer certificate_verify.deinit(allocator);
@@ -1051,6 +1078,7 @@ pub fn writeServerCryptoFlight(
         .ech_accepted = ech_accepted,
         .ech_rejected = ech_rejected,
         .requested_ticket_count = requested_ticket_count,
+        .certificate_compression = selected_certificate_compression,
         .application_settings = selection.application_settings,
         .peer_application_settings = if (early_data_accepted)
             if (options.resumption.?.application_settings) |settings|
@@ -1745,6 +1773,142 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
         &public_key_spki,
         client_result.verified.peer_certificate_chain[0],
     );
+}
+
+test "QUIC TLS server sends a Vort Brotli compressed certificate" {
+    const allocator = std.testing.allocator;
+    const rsa = @import("../crypto/rsa.zig");
+    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    var certificate_der: [vectors.certificate_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&certificate_der, vectors.certificate_hex);
+    var private_key_der: [vectors.private_key_pkcs8_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(
+        &private_key_der,
+        vectors.private_key_pkcs8_hex,
+    );
+    const private_key = try rsa.PrivateKey.fromDer(&private_key_der);
+    var prepared_key = try private_key.prepare();
+    defer prepared_key.deinit();
+
+    var certificate_message: std.ArrayList(u8) = .empty;
+    defer certificate_message.deinit(allocator);
+    try auth.writeCertificate(
+        &certificate_message,
+        allocator,
+        &.{&certificate_der},
+    );
+    var compressed_certificate = try certificate_compression.Prepared
+        .initBrotli(
+        allocator,
+        certificate_message.items,
+        .amortized,
+    );
+    defer compressed_certificate.deinit();
+    try std.testing.expect(
+        compressed_certificate.view().savesBytes(certificate_message.items.len),
+    );
+    const compressed_certificates = [_]certificate_compression.PreparedView{
+        compressed_certificate.view(),
+    };
+
+    var client_hello_bytes: std.ArrayList(u8) = .empty;
+    defer client_hello_bytes.deinit(allocator);
+    try client_hello.write(&client_hello_bytes, allocator, .{
+        .random = [_]u8{0x61} ** 32,
+        .session_id = "quic-compression",
+        .server_name = "localhost",
+        .x25519_public_key = [_]u8{0x62} ** 32,
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .alpn_protocols = &.{"h3"},
+        .quic_transport_parameters = &.{ 1, 2, 3 },
+        .certificate_compression_algorithms = &.{.brotli},
+    });
+    const shared_secret = [_]u8{0x63} ** 32;
+    var initial_crypto: std.ArrayList(u8) = .empty;
+    defer initial_crypto.deinit(allocator);
+    var server_crypto: std.ArrayList(u8) = .empty;
+    defer server_crypto.deinit(allocator);
+    var server_result = try writeServerCryptoFlight(
+        &initial_crypto,
+        &server_crypto,
+        allocator,
+        .{
+            .client_hello_bytes = client_hello_bytes.items,
+            .parsed_client_hello = try client_hello.parse(
+                client_hello_bytes.items,
+            ),
+            .policy = .{
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .alpn_protocols = &.{"h3"},
+                .quic_transport_parameters = &.{ 4, 5, 6 },
+                .compressed_certificates = &compressed_certificates,
+            },
+            .server_random = [_]u8{0x64} ** 32,
+            .server_key_share = &([_]u8{0x65} ** 32),
+            .shared_secret = &shared_secret,
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .rsa_pss = .{
+                .prepared_key = &prepared_key,
+                .io = std.testing.io,
+            } },
+        },
+    );
+    defer server_result.deinit();
+    try std.testing.expectEqual(
+        certificate_compression.Algorithm.brotli,
+        server_result.certificate_compression.?,
+    );
+    const server_flight_messages = try client_handshake.splitServerFlight(
+        server_crypto.items,
+    );
+    try std.testing.expectEqual(
+        certificate_compression.handshake_type_compressed_certificate,
+        server_flight_messages.certificate.?[0],
+    );
+
+    const Trust = struct {
+        fn verify(
+            _: ?*anyopaque,
+            trust: auth.TrustContext,
+        ) anyerror!void {
+            if (trust.chain.len != 1 or trust.server_name == null or
+                !std.mem.eql(u8, trust.server_name.?, "localhost"))
+            {
+                return error.UnexpectedCertificate;
+            }
+        }
+    };
+    var client_crypto: std.ArrayList(u8) = .empty;
+    defer client_crypto.deinit(allocator);
+    var client_result = try writeClientCryptoFlight(
+        &client_crypto,
+        allocator,
+        .{
+            .client_hello_bytes = client_hello_bytes.items,
+            .server_hello_bytes = initial_crypto.items,
+            .server_handshake_crypto = server_crypto.items,
+            .shared_secret = &shared_secret,
+            .server_verifier = .{ .verify_trust = Trust.verify },
+            .server_name = "localhost",
+            .certificate_compression_algorithms = &.{.brotli},
+        },
+    );
+    defer client_result.deinit();
+    try std.testing.expectEqual(
+        certificate_compression.Algorithm.brotli,
+        client_result.verified.certificate_compression.?,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &certificate_der,
+        client_result.verified.peer_certificate_chain[0],
+    );
+    var verified_client = try verifyClientCryptoFlight(
+        allocator,
+        &server_result,
+        client_crypto.items,
+    );
+    defer verified_client.deinit();
 }
 
 test "QUIC ECH rejection authenticates the outer public name and retry configs" {
