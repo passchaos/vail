@@ -84,14 +84,21 @@ pub const ResolvedIdentity = struct {
     certificate_chain: []const []const u8,
     signer: auth.Signer,
     certificate_type: auth.CertificateType = .x509,
+    /// Exact DER DistinguishedNames under which this X.509 chain is valid.
+    /// When populated, IdentitySet uses ClientHello CA hints to filter it.
+    certificate_authorities: []const []const u8 = &.{},
     ocsp_response: ?[]const u8 = null,
     compressed_certificates: []const certificate_compression.PreparedView = &.{},
 
     pub fn validate(self: ResolvedIdentity) auth.Error!void {
         if (self.certificate_type == .raw_public_key and
-            self.ocsp_response != null)
+            (self.ocsp_response != null or
+                self.certificate_authorities.len != 0))
         {
             return error.InvalidCertificate;
+        }
+        for (self.certificate_authorities) |name| {
+            if (name.len == 0) return error.InvalidCertificate;
         }
         try (auth.ServerIdentity{
             .certificate_chain = self.certificate_chain,
@@ -172,6 +179,14 @@ fn identityCompatible(
 ) client_hello.Error!bool {
     if (!try hello.supportsSignatureScheme(identity.signer.scheme())) {
         return false;
+    }
+    if (identity.certificate_type == .x509 and
+        hello.certificate_authorities != null and
+        identity.certificate_authorities.len != 0)
+    {
+        for (identity.certificate_authorities) |name| {
+            if (hello.supportsCertificateAuthority(name)) break;
+        } else return false;
     }
     if (hello.server_certificate_types.len == 0) {
         return identity.certificate_type == .x509;
@@ -1508,6 +1523,7 @@ test "identity set selects SNI wildcard and compatible signature scheme" {
         .server_name = "api.example.com",
         .x25519_public_key = client_public,
         .server_certificate_types = &.{.raw_public_key},
+        .certificate_authorities = &.{"ca-b"},
     });
     var hello = try client_hello.parse(encoded_hello.items);
     const only_ed25519 = [_]u8{
@@ -1573,6 +1589,32 @@ test "identity set selects SNI wildcard and compatible signature scheme" {
         "*.example.com",
         "deep.api.example.com",
     ));
+
+    var ca_hello = hello;
+    ca_hello.server_certificate_types = &.{};
+    const ca_identities = IdentitySet{ .entries = &.{
+        .{
+            .server_name_pattern = "api.example.com",
+            .identity = .{
+                .certificate_chain = &.{&ed25519_certificate},
+                .signer = .{ .ed25519 = .{ .key_pair = ed25519_key } },
+                .certificate_authorities = &.{"ca-a"},
+                .ocsp_response = "first",
+            },
+        },
+        .{
+            .server_name_pattern = "api.example.com",
+            .identity = .{
+                .certificate_chain = &.{&ed25519_certificate},
+                .signer = .{ .ed25519 = .{ .key_pair = ed25519_key } },
+                .certificate_authorities = &.{"ca-b"},
+                .ocsp_response = "second",
+            },
+        },
+    } };
+    const ca_selected = (try ca_identities.resolver().resolve(ca_hello)) orelse
+        return error.ExpectedIdentity;
+    try std.testing.expectEqualStrings("second", ca_selected.ocsp_response.?);
 
     var unknown = hello;
     unknown.server_name = "other.test";

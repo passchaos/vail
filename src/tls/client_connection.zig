@@ -97,6 +97,8 @@ pub const Config = struct {
     max_decompressed_certificate_len: usize = 64 * 1024,
     /// RFC 8449 limit for TLSInnerPlaintext records received from the server.
     record_size_limit: ?u16 = null,
+    /// DER-encoded X.501 DistinguishedNames accepted for the server chain.
+    certificate_authorities: []const []const u8 = &.{},
     server_verifier: auth.ClientVerifier,
     server_certificate_type: auth.CertificateType = .x509,
     client_identity: ?client_auth.ClientIdentity = null,
@@ -295,6 +297,7 @@ pub fn ClientConnection(
         certificate_compression_algorithms: []const certificate_compression.Algorithm,
         max_decompressed_certificate_len: usize,
         record_size_limit: ?u16,
+        certificate_authorities: []const []const u8,
         key_logger: ?key_log.Logger = null,
         stage: Stage = .server_hello,
         client_hello_bytes: ?[]u8,
@@ -371,6 +374,7 @@ pub fn ClientConnection(
                 .request_ocsp = config.request_ocsp,
                 .offer_extended_master_secret = config.offer_extended_master_secret,
                 .record_size_limit = config.record_size_limit,
+                .certificate_authorities = config.certificate_authorities,
                 .certificate_compression_algorithms = config.certificate_compression_algorithms,
                 .session_ticket = config.tls12_session_ticket,
                 .server_certificate_types = if (config.server_certificate_type == .raw_public_key)
@@ -539,6 +543,7 @@ pub fn ClientConnection(
                 .certificate_compression_algorithms = config.certificate_compression_algorithms,
                 .max_decompressed_certificate_len = config.max_decompressed_certificate_len,
                 .record_size_limit = config.record_size_limit,
+                .certificate_authorities = config.certificate_authorities,
                 .key_logger = config.key_log,
                 .client_hello_bytes = owned_hello,
                 .exchange = exchange,
@@ -761,6 +766,7 @@ pub fn ClientConnection(
                     .request_ocsp = self.request_ocsp,
                     .offer_extended_master_secret = self.offer_extended_master_secret,
                     .record_size_limit = self.record_size_limit,
+                    .certificate_authorities = self.certificate_authorities,
                     .certificate_compression_algorithms = self.certificate_compression_algorithms,
                     .session_ticket = parsed_client.session_ticket,
                     .server_certificate_types = if (self.server_certificate_type == .raw_public_key)
@@ -1564,6 +1570,7 @@ test "client and server states establish over one-byte transport reads" {
                 .certificate_chain = &certificate_chain,
                 .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
                 .ocsp_response = server_ocsp_response,
+                .certificate_authorities = &.{"test-ca"},
                 .compressed_certificates = &compressed_certificates,
             },
         }},
@@ -1612,6 +1619,7 @@ test "client and server states establish over one-byte transport reads" {
         .alpn_protocols = &.{"h2"},
         .request_ocsp = true,
         .record_size_limit = 256,
+        .certificate_authorities = &.{"test-ca"},
         .certificate_compression_algorithms = &.{.zstd},
         .key_log = client_key_log.logger(),
         .server_verifier = .{ .verify_trust = struct {
@@ -2091,6 +2099,7 @@ test "client and server establish with an accepted RFC 9849 ECH offer" {
         .cipher_suites = &.{.aes_256_gcm_sha384},
         .alpn_protocols = &.{"h2"},
         .request_resumption = true,
+        .certificate_authorities = &.{"private-ca"},
         .server_verifier = .{ .pinned_raw_public_key = &server_spki },
         .server_certificate_type = .raw_public_key,
         .ech = .{
@@ -2109,6 +2118,9 @@ test "client and server establish with an accepted RFC 9849 ECH offer" {
     try std.testing.expect(!outer.supportsServerCertificateType(
         .raw_public_key,
     ));
+    try std.testing.expect(outer.certificate_authorities == null);
+    const inner = try client_hello.parse(client.client_hello_bytes.?);
+    try std.testing.expect(inner.supportsCertificateAuthority("private-ca"));
 
     var server_material = key_exchange.ServerKeyMaterial{
         .x25519 = [_]u8{0xdf} ** key_exchange.secret_len,

@@ -409,6 +409,25 @@ pub fn build(b: *std.Build) void {
     );
     interop_rustls_min_step.dependOn(&check_rustls_min.step);
 
+    const check_rustls_ca_hints = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_ca_hints.step.dependOn(&build_rustls_min.step);
+    check_rustls_ca_hints.addArg(
+        "$1 ca-hints > /tmp/vail-ca-hints-rustls-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 4s bench/rustls_min_client/target/release/vail-rustls-min-client ca-hints > /tmp/vail-ca-hints-rustls-client.log 2>&1 || true; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'client finished verified' /tmp/vail-ca-hints-rustls-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'client finished verified' /tmp/vail-ca-hints-rustls-server.log && " ++
+            "grep -q 'rustls connected' /tmp/vail-ca-hints-rustls-client.log",
+    );
+    check_rustls_ca_hints.addArg("sh");
+    check_rustls_ca_hints.addArtifactArg(min_tls13_server);
+    const interop_rustls_ca_hints_step = b.step(
+        "interop-rustls-ca-hints-server",
+        "Select a Vail server identity from rustls certificate authority hints",
+    );
+    interop_rustls_ca_hints_step.dependOn(&check_rustls_ca_hints.step);
+
     const check_rustls_chacha = b.addSystemCommand(&.{ "sh", "-c" });
     check_rustls_chacha.step.dependOn(&build_rustls_min.step);
     check_rustls_chacha.addArg(

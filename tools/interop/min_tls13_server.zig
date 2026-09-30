@@ -15,6 +15,10 @@ const cert_der = [_]u8{
 const rsa_vectors = vail.crypto.testing.rsa_signing;
 const rsa_cert_der = decodeHex(rsa_vectors.certificate_hex);
 const rsa_private_key_der = decodeHex(rsa_vectors.private_key_pkcs8_hex);
+const localhost_ca_name = [_]u8{
+    0x30, 0x14, 0x31, 0x12, 0x30, 0x10, 0x06, 0x03, 0x55, 0x04, 0x03,
+    0x0c, 0x09, 'l',  'o',  'c',  'a',  'l',  'h',  'o',  's',  't',
+};
 
 pub fn main(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(init.gpa);
@@ -48,6 +52,10 @@ pub fn main(init: std.process.Init) !void {
         false;
     const use_chacha = if (mode) |argument|
         std.mem.eql(u8, argument, "chacha")
+    else
+        false;
+    const use_ca_hints = if (mode) |argument|
+        std.mem.eql(u8, argument, "ca-hints")
     else
         false;
     if (args.next() != null) return error.InvalidArguments;
@@ -150,6 +158,17 @@ pub fn main(init: std.process.Init) !void {
         null;
     const regular_groups = [_]u16{vail.tls.key_exchange.named_group_secp256r1};
     const ech_groups = [_]u16{vail.tls.key_exchange.named_group_x25519};
+    const ca_identity_set = vail.tls.server_connection.IdentitySet{
+        .entries = &.{.{
+            .server_name_pattern = "localhost",
+            .identity = .{
+                .certificate_chain = &.{&rsa_cert_der},
+                .signer = signer,
+                .certificate_authorities = &.{&localhost_ca_name},
+                .compressed_certificates = &zlib_certificates,
+            },
+        }},
+    };
     var handshake = HandshakeServer.init(.{
         .allocator = std.heap.smp_allocator,
         .policy = .{
@@ -173,6 +192,10 @@ pub fn main(init: std.process.Init) !void {
         .key_material = &key_material,
         .certificate_chain = &.{&rsa_cert_der},
         .signer = signer,
+        .identity_resolver = if (use_ca_hints)
+            ca_identity_set.resolver()
+        else
+            null,
         .key_log = if (use_key_log) .{
             .log_fn = writeKeyLog,
         } else null,

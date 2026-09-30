@@ -51,8 +51,9 @@ The current foundation provides:
   verifier;
 - type-safe server identities, allocation-free custom signer callbacks, and
   pinned-key client verification; the server can select identities by exact or
-  one-label wildcard SNI and client signature-scheme compatibility, while
-  keeping per-identity OCSP and precompressed Certificate variants together;
+  one-label wildcard SNI, client signature-scheme compatibility, and TLS 1.3
+  `certificate_authorities` DER DistinguishedName hints, while keeping
+  per-identity OCSP and precompressed Certificate variants together;
 - TLS 1.3 RFC 7250 Raw Public Key authentication in both directions, including
   strict ClientHello/EncryptedExtensions certificate-type negotiation, exact
   DER SubjectPublicKeyInfo pins, single-key Certificate messages, RPK mTLS,

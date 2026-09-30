@@ -3,7 +3,7 @@ use rustls::client::EchConfig;
 use rustls::compress::{CertDecompressor, DecompressionFailed};
 use rustls::{
     CertificateCompressionAlgorithm, ClientConfig, ClientConnection, ConnectionTrafficSecrets,
-    DigitallySignedStruct, Error, KeyLog, RootCertStore, SignatureScheme,
+    DigitallySignedStruct, DistinguishedName, Error, KeyLog, RootCertStore, SignatureScheme,
 };
 use rustls_pki_types::{CertificateDer, EchConfigListBytes, ServerName, UnixTime};
 use std::net::TcpStream;
@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug)]
-struct NoVerifier;
+struct NoVerifier {
+    root_hints: Option<Vec<DistinguishedName>>,
+}
 
 #[derive(Debug)]
 struct ZstdDecompressor;
@@ -59,6 +61,10 @@ const ECH_CONFIG_LIST: &[u8] = &[
 ];
 
 impl ServerCertVerifier for NoVerifier {
+    fn root_hint_subjects(&self) -> Option<&[DistinguishedName]> {
+        self.root_hints.as_deref()
+    }
+
     fn verify_server_cert(
         &self,
         _end_entity: &CertificateDer<'_>,
@@ -104,6 +110,7 @@ fn main() {
     let zstd_enabled = mode.as_deref() == Some("zstd");
     let key_log_enabled = mode.as_deref() == Some("keylog");
     let extract_secrets = mode.as_deref() == Some("extract-secrets");
+    let ca_hints_enabled = mode.as_deref() == Some("ca-hints");
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let builder = ClientConfig::builder_with_provider(provider);
     let builder = if ech_enabled {
@@ -121,7 +128,16 @@ fn main() {
         .with_no_client_auth();
     config
         .dangerous()
-        .set_certificate_verifier(Arc::new(NoVerifier));
+        .set_certificate_verifier(Arc::new(NoVerifier {
+            root_hints: if ca_hints_enabled {
+                Some(vec![DistinguishedName::in_sequence(&[
+                    0x31, 0x12, 0x30, 0x10, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x09, b'l', b'o',
+                    b'c', b'a', b'l', b'h', b'o', b's', b't',
+                ])])
+            } else {
+                None
+            },
+        }));
     config.alpn_protocols.push(b"h2".to_vec());
     if zstd_enabled {
         config.cert_decompressors = vec![&ZSTD_DECOMPRESSOR];
