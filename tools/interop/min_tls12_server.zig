@@ -60,6 +60,9 @@ pub fn main(init: std.process.Init) !void {
         .server_private_key = &ecdh_private,
         .certificate_chain = &.{&certificate},
         .signer = signer,
+        .key_log = if (profile.key_log) .{
+            .log_fn = writeKeyLog,
+        } else null,
         .client_auth_policy = if (profile.client_auth) .{
             .verifier = .{ .verify_trust = acceptTestCertificate },
             .requirement = .required,
@@ -139,6 +142,7 @@ const Profile = struct {
     client_auth: bool = false,
     pkcs1: bool = false,
     ocsp: bool = false,
+    key_log: bool = false,
 };
 
 fn selectedProfile(init: std.process.Init) !Profile {
@@ -183,7 +187,31 @@ fn selectedProfile(init: std.process.Init) !Profile {
             .ocsp = true,
         };
     }
+    if (std.mem.eql(u8, name, "keylog")) {
+        return .{
+            .suite = .ecdhe_rsa_aes_128_gcm_sha256,
+            .key_log = true,
+        };
+    }
     return error.InvalidArguments;
+}
+
+fn writeKeyLog(
+    _: ?*anyopaque,
+    label: []const u8,
+    client_random: *const [32]u8,
+    secret: []const u8,
+) void {
+    var encoded: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&encoded);
+    writer.writeAll("VAIL_KEY_LOG ") catch unreachable;
+    vail.tls.key_log.writeNssLine(
+        &writer,
+        label,
+        client_random,
+        secret,
+    ) catch unreachable;
+    std.debug.print("{s}", .{encoded[0..writer.end]});
 }
 
 fn acceptTestCertificate(

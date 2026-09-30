@@ -122,6 +122,26 @@ pub fn build(b: *std.Build) void {
     );
     tls_handshake_bench_step.dependOn(&run_tls_handshake_bench.step);
 
+    const tls_server_connection_bench = b.addExecutable(.{
+        .name = "vail-bench-tls-server-connection",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/tls_server_connection.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_tls_server_connection_bench = b.addRunArtifact(
+        tls_server_connection_bench,
+    );
+    const tls_server_connection_bench_step = b.step(
+        "bench-tls-server-connection",
+        "Benchmark the managed TLS 1.3 server connection first flight",
+    );
+    tls_server_connection_bench_step.dependOn(
+        &run_tls_server_connection_bench.step,
+    );
+
     const x509_path_bench = b.addExecutable(.{
         .name = "vail-bench-x509-path",
         .root_module = b.createModule(.{
@@ -352,6 +372,28 @@ pub fn build(b: *std.Build) void {
         "Exercise Vail's minimal TLS 1.3 server flight with rustls client",
     );
     interop_rustls_min_step.dependOn(&check_rustls_min.step);
+
+    const check_rustls_key_log = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_key_log.step.dependOn(&build_rustls_min.step);
+    check_rustls_key_log.addArg(
+        "$1 keylog > /tmp/vail-keylog-rustls-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 4s bench/rustls_min_client/target/release/vail-rustls-min-client keylog > /tmp/vail-keylog-rustls-client.log 2>&1 || true; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'client finished verified' /tmp/vail-keylog-rustls-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "sed -n 's/^VAIL_KEY_LOG //p' /tmp/vail-keylog-rustls-server.log | sort > /tmp/vail-keylog-vail.keys; " ++
+            "sed -n 's/^RUSTLS_KEY_LOG //p' /tmp/vail-keylog-rustls-client.log | sort > /tmp/vail-keylog-rustls.keys; " ++
+            "test \"$(wc -l < /tmp/vail-keylog-vail.keys)\" -eq 5 && " ++
+            "cmp /tmp/vail-keylog-vail.keys /tmp/vail-keylog-rustls.keys && " ++
+            "grep -q 'rustls connected' /tmp/vail-keylog-rustls-client.log",
+    );
+    check_rustls_key_log.addArg("sh");
+    check_rustls_key_log.addArtifactArg(min_tls13_server);
+    const interop_rustls_key_log_step = b.step(
+        "interop-rustls-keylog-server",
+        "Compare Vail and rustls/AWS-LC NSS key logs for one TLS 1.3 session",
+    );
+    interop_rustls_key_log_step.dependOn(&check_rustls_key_log.step);
 
     const check_rustls_brotli = b.addSystemCommand(&.{ "sh", "-c" });
     check_rustls_brotli.step.dependOn(&build_rustls_min.step);
@@ -805,6 +847,30 @@ pub fn build(b: *std.Build) void {
     );
     interop_rustls_tls12_server_step.dependOn(
         &check_rustls_tls12_server.step,
+    );
+
+    const check_rustls_tls12_key_log = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_tls12_key_log.step.dependOn(&build_rustls_min.step);
+    check_rustls_tls12_key_log.addArg(
+        "$1 keylog > /tmp/vail-tls12-keylog-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 8s bench/rustls_min_client/target/release/vail-rustls-tls12-client keylog > /tmp/vail-tls12-keylog-client.log 2>&1 || true; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'TLS 1.2 application data verified' /tmp/vail-tls12-keylog-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "sed -n 's/^VAIL_KEY_LOG //p' /tmp/vail-tls12-keylog-server.log > /tmp/vail-tls12-keylog-vail.keys; " ++
+            "sed -n 's/^RUSTLS_KEY_LOG //p' /tmp/vail-tls12-keylog-client.log > /tmp/vail-tls12-keylog-rustls.keys; " ++
+            "test \"$(wc -l < /tmp/vail-tls12-keylog-vail.keys)\" -eq 1 && " ++
+            "cmp /tmp/vail-tls12-keylog-vail.keys /tmp/vail-tls12-keylog-rustls.keys && " ++
+            "grep -q 'rustls TLS 1.2 application data verified' /tmp/vail-tls12-keylog-client.log",
+    );
+    check_rustls_tls12_key_log.addArg("sh");
+    check_rustls_tls12_key_log.addArtifactArg(min_tls12_server);
+    const interop_rustls_tls12_key_log_step = b.step(
+        "interop-rustls-tls12-keylog-server",
+        "Compare Vail and rustls/AWS-LC NSS key logs for one TLS 1.2 session",
+    );
+    interop_rustls_tls12_key_log_step.dependOn(
+        &check_rustls_tls12_key_log.step,
     );
 
     const min_tls12_client = b.addExecutable(.{

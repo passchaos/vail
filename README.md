@@ -106,6 +106,10 @@ The current foundation provides:
   allocation-free caller-buffer RFC 8446 exporter output; runtime traffic-
   secret updates dispatch across SHA-256, SHA-384, and SM3 rather than assuming
   the default suite.
+- Opt-in, allocation-free NSS key-log callbacks cover TLS 1.3 early,
+  handshake, generation-zero application and exporter secrets plus the TLS 1.2
+  `CLIENT_RANDOM` master secret. A caller-owned writer helper emits exact
+  `SSLKEYLOGFILE` lines without giving the library implicit filesystem access.
 - X25519 plus constant-time secp256r1 and secp384r1 ECDH key exchange, with
   uncompressed SEC1 validation and incremental SHA-256/SHA-384 transcript
   hashing.
@@ -234,6 +238,9 @@ record benchmark with automatic nonce sequencing and AEAD usage limits.
 `zig build -Doptimize=ReleaseFast bench-tls-server-handshake` measures managed
 X25519/Ed25519 TLS 1.3 server flights, including key exchange, signing, and
 record protection.
+`zig build -Doptimize=ReleaseFast bench-tls-server-connection` includes the
+high-level incremental server state, ClientHello framing, and default-disabled
+diagnostic hooks in the same first-flight benchmark.
 `zig build -Doptimize=ReleaseFast bench-x509-path` measures bounded unordered
 and cross-signed certificate-path construction plus issuer/delegated OCSP.
 `zig build -Doptimize=ReleaseFast bench-certificate-compression` compares the
@@ -245,6 +252,10 @@ Vort decoder against rustls's independent Brotli encoder.
 `interop-rustls-zstd-server` and `interop-rustls-zstd-client` perform the same
 two directions for RFC 8879 Zstandard using rustls's public custom compression
 interfaces and libzstd only as the independent test oracle.
+`zig build interop-rustls-keylog-server` compares all five TLS 1.3 NSS key-log
+lines byte-for-byte between a Vail server and rustls/AWS-LC client;
+`interop-rustls-tls12-keylog-server` performs the corresponding TLS 1.2
+`CLIENT_RANDOM` comparison.
 `zig build -Doptimize=ReleaseFast bench-rsa-pss` measures the built-in
 constant-time RSA-2048 PSS and PKCS#1 v1.5 signing paths.
 `zig build -Doptimize=ReleaseFast bench-hpke` measures RFC 9180 sender/receiver

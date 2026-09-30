@@ -15,6 +15,7 @@ const cipher_suite = @import("cipher_suite.zig");
 const client_auth = @import("client_auth.zig");
 const client_hello = @import("client_hello.zig");
 const key_exchange = @import("key_exchange.zig");
+const key_log = @import("key_log.zig");
 const record13 = @import("record.zig");
 const stream = @import("stream.zig");
 const tls12 = @import("tls12.zig");
@@ -70,6 +71,8 @@ pub const Config = struct {
     /// Borrowed cached ticket; `init` deep-copies it before returning.
     ticket_resumption: ?*const tls12_ticket.Cached = null,
     now_seconds: u64 = 0,
+    /// Opt-in NSS-compatible master-secret logging for diagnostics.
+    key_log: ?key_log.Logger = null,
 };
 
 pub const Event = union(enum) {
@@ -338,6 +341,7 @@ pub fn ClientConnection(
         server_name: ?[]const u8,
         server_verifier: auth.ClientVerifier,
         client_identity: ?client_auth.ClientIdentity,
+        key_logger: ?key_log.Logger = null,
         now_seconds: u64 = 0,
         stage: Stage = .server_flight,
         records: stream.RecordDeframer = .{},
@@ -479,6 +483,7 @@ pub fn ClientConnection(
                 .server_name = config.server_name,
                 .server_verifier = config.server_verifier,
                 .client_identity = config.client_identity,
+                .key_logger = config.key_log,
                 .now_seconds = config.now_seconds,
                 .pending = .{
                     .allocator = config.allocator,
@@ -615,6 +620,7 @@ pub fn ClientConnection(
                 .server_name = config.server_name,
                 .server_verifier = config.server_verifier,
                 .client_identity = config.client_identity,
+                .key_logger = config.key_log,
                 .now_seconds = config.now_seconds,
                 .pending = .{
                     .allocator = config.allocator,
@@ -1303,6 +1309,12 @@ pub fn ClientConnection(
 
         fn establish(self: *Self) Established {
             const pending = &(self.pending orelse unreachable);
+            key_log.emit(
+                self.key_logger,
+                key_log.client_random,
+                &pending.client_random,
+                &pending.master_secret.?,
+            );
             const established = Established{
                 .allocator = self.allocator,
                 .read = pending.server_traffic.?,
@@ -1475,8 +1487,38 @@ fn appendPlaintextRecords(
     }
 }
 
+const TestMasterSecretLog = struct {
+    calls: usize = 0,
+    label: []const u8 = &.{},
+    client_random: [32]u8 = undefined,
+    secret_bytes: [tls12.master_secret_len]u8 = undefined,
+
+    fn logger(self: *TestMasterSecretLog) key_log.Logger {
+        return .{
+            .context = self,
+            .log_fn = TestMasterSecretLog.record,
+        };
+    }
+
+    fn record(
+        context: ?*anyopaque,
+        label: []const u8,
+        client_random_bytes: *const [32]u8,
+        secret_bytes: []const u8,
+    ) void {
+        const self: *TestMasterSecretLog = @ptrCast(@alignCast(context.?));
+        std.debug.assert(secret_bytes.len == tls12.master_secret_len);
+        self.calls += 1;
+        self.label = label;
+        self.client_random = client_random_bytes.*;
+        self.secret_bytes = secret_bytes[0..tls12.master_secret_len].*;
+    }
+};
+
 test "TLS 1.2 client and server authenticate and exchange application data" {
     const allocator = std.testing.allocator;
+    var client_key_log: TestMasterSecretLog = .{};
+    var server_key_log: TestMasterSecretLog = .{};
     const server_module = @import("tls12_server_connection.zig");
     const rsa = @import("../crypto/rsa.zig");
     const vectors = @import("../crypto/testdata/rsa_signing.zig");
@@ -1512,6 +1554,7 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
         .request_ocsp = true,
         .server_verifier = .{ .verify_trust = expectTestOcsp },
         .request_session_ticket = true,
+        .key_log = client_key_log.logger(),
     }, &client_wire);
     defer client.deinit();
     try std.testing.expectEqualSlices(
@@ -1533,6 +1576,7 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
             .prepared_key = &prepared_key,
             .io = std.testing.io,
         } },
+        .key_log = server_key_log.logger(),
         .session_tickets = .{
             .keyring = &ticket_keys,
             .server_id = "server-identity",
@@ -1607,6 +1651,17 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
     }
     try std.testing.expect(established_client != null);
     defer established_client.?.deinit();
+    try std.testing.expectEqual(@as(usize, 1), client_key_log.calls);
+    try std.testing.expectEqual(@as(usize, 1), server_key_log.calls);
+    try std.testing.expectEqualStrings(key_log.client_random, client_key_log.label);
+    try std.testing.expectEqualStrings(key_log.client_random, server_key_log.label);
+    try std.testing.expectEqual([_]u8{0x91} ** 32, client_key_log.client_random);
+    try std.testing.expectEqual(client_key_log.client_random, server_key_log.client_random);
+    try std.testing.expectEqual(client_key_log.secret_bytes, server_key_log.secret_bytes);
+    try std.testing.expectEqual(
+        established_client.?.master_secret,
+        client_key_log.secret_bytes,
+    );
     try std.testing.expectEqualStrings(
         "h2",
         established_client.?.selected_alpn.?,

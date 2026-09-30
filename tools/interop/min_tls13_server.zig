@@ -38,6 +38,10 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "zstd")
     else
         false;
+    const use_key_log = if (mode) |argument|
+        std.mem.eql(u8, argument, "keylog")
+    else
+        false;
     if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
@@ -158,6 +162,9 @@ pub fn main(init: std.process.Init) !void {
         .key_material = &key_material,
         .certificate_chain = &.{&rsa_cert_der},
         .signer = signer,
+        .key_log = if (use_key_log) .{
+            .log_fn = writeKeyLog,
+        } else null,
         .ech = if (selected_ech) |config| .{
             .config = config,
             .key_pair = &ech_key_pair,
@@ -220,6 +227,24 @@ pub fn main(init: std.process.Init) !void {
     );
     try writeAll(client, close_record[0..close_len]);
     _ = linux.shutdown(client, linux.SHUT.WR);
+}
+
+fn writeKeyLog(
+    _: ?*anyopaque,
+    label: []const u8,
+    client_random: *const [32]u8,
+    secret: []const u8,
+) void {
+    var encoded: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&encoded);
+    writer.writeAll("VAIL_KEY_LOG ") catch unreachable;
+    vail.tls.key_log.writeNssLine(
+        &writer,
+        label,
+        client_random,
+        secret,
+    ) catch unreachable;
+    std.debug.print("{s}", .{encoded[0..writer.end]});
 }
 
 fn sysSocket() !i32 {

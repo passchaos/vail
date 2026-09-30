@@ -3,7 +3,7 @@ use rustls::client::EchConfig;
 use rustls::compress::{CertDecompressor, DecompressionFailed};
 use rustls::{
     CertificateCompressionAlgorithm, ClientConfig, ClientConnection, DigitallySignedStruct, Error,
-    RootCertStore, SignatureScheme,
+    KeyLog, RootCertStore, SignatureScheme,
 };
 use rustls_pki_types::{CertificateDer, EchConfigListBytes, ServerName, UnixTime};
 use std::net::TcpStream;
@@ -17,6 +17,23 @@ struct NoVerifier;
 struct ZstdDecompressor;
 
 static ZSTD_DECOMPRESSOR: ZstdDecompressor = ZstdDecompressor;
+
+#[derive(Debug)]
+struct StdoutKeyLog;
+
+impl KeyLog for StdoutKeyLog {
+    fn log(&self, label: &str, client_random: &[u8], secret: &[u8]) {
+        print!("RUSTLS_KEY_LOG {label} ");
+        for byte in client_random {
+            print!("{byte:02x}");
+        }
+        print!(" ");
+        for byte in secret {
+            print!("{byte:02x}");
+        }
+        println!();
+    }
+}
 
 impl CertDecompressor for ZstdDecompressor {
     fn decompress(&self, input: &[u8], output: &mut [u8]) -> Result<(), DecompressionFailed> {
@@ -85,6 +102,7 @@ fn main() {
     let mode = std::env::args().nth(1);
     let ech_enabled = mode.as_deref() == Some("ech");
     let zstd_enabled = mode.as_deref() == Some("zstd");
+    let key_log_enabled = mode.as_deref() == Some("keylog");
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let builder = ClientConfig::builder_with_provider(provider);
     let builder = if ech_enabled {
@@ -106,6 +124,9 @@ fn main() {
     config.alpn_protocols.push(b"h2".to_vec());
     if zstd_enabled {
         config.cert_decompressors = vec![&ZSTD_DECOMPRESSOR];
+    }
+    if key_log_enabled {
+        config.key_log = Arc::new(StdoutKeyLog);
     }
 
     let name = ServerName::try_from("localhost").unwrap();

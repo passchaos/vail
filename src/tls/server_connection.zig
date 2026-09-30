@@ -16,6 +16,7 @@ const connection = @import("connection.zig");
 const early_data = @import("early_data.zig");
 const ech = @import("ech.zig");
 const key_exchange = @import("key_exchange.zig");
+const key_log = @import("key_log.zig");
 const key_schedule = @import("key_schedule.zig");
 const psk = @import("psk.zig");
 const record = @import("record.zig");
@@ -72,6 +73,8 @@ pub const Config = struct {
     resumption: ?ServerResumption = null,
     early_data: ?EarlyDataPolicy = null,
     ech: ?ech.ServerConfig = null,
+    /// Opt-in NSS-compatible traffic-secret logging for diagnostics.
+    key_log: ?key_log.Logger = null,
 };
 
 pub const ResolvedIdentity = struct {
@@ -312,6 +315,7 @@ pub fn ServerConnection(
         const PendingHandshake = struct {
             allocator: std.mem.Allocator,
             suite: cipher_suite.Suite,
+            client_random: [32]u8,
             handshake_secret: secret.Secret,
             client_handshake_secret: secret.Secret,
             transcript_after_server_finished: transcript.Digest,
@@ -783,6 +787,12 @@ pub fn ServerConnection(
                         hello_hash,
                     );
                 defer early_secret.deinit();
+                key_log.emit(
+                    self.config.key_log,
+                    key_log.client_early_traffic_secret,
+                    parsed.random,
+                    early_secret.bytes(),
+                );
                 early_records = try traffic.State.init(
                     selection.suite,
                     early_secret,
@@ -845,10 +855,23 @@ pub fn ServerConnection(
                 result.client_handshake_traffic_secret,
             );
             errdefer client_records.deinit();
+            key_log.emit(
+                self.config.key_log,
+                key_log.client_handshake_traffic_secret,
+                parsed.random,
+                result.client_handshake_traffic_secret.bytes(),
+            );
+            key_log.emit(
+                self.config.key_log,
+                key_log.server_handshake_traffic_secret,
+                parsed.random,
+                result.server_handshake_traffic_secret.bytes(),
+            );
             result.server_handshake_traffic_secret.deinit();
             self.pending = .{
                 .allocator = self.config.allocator,
                 .suite = result.selection.suite,
+                .client_random = parsed.random.*,
                 .handshake_secret = result.handshake_secret,
                 .client_handshake_secret = result.client_handshake_traffic_secret,
                 .transcript_after_server_finished = result.transcript_after_server_finished,
@@ -1300,6 +1323,31 @@ pub fn ServerConnection(
                 application.server_traffic_secret,
             );
             errdefer application_connection.deinit();
+            if (self.config.key_log) |logger| {
+                logger.log(
+                    key_log.client_traffic_secret_0,
+                    &pending.client_random,
+                    application.client_traffic_secret.bytes(),
+                );
+                logger.log(
+                    key_log.server_traffic_secret_0,
+                    &pending.client_random,
+                    application.server_traffic_secret.bytes(),
+                );
+                if (logger.willLog(key_log.exporter_secret)) {
+                    var exporter = try key_schedule
+                        .deriveExporterMasterSecretFor(
+                        application.master_secret,
+                        pending.transcript_after_server_finished,
+                    );
+                    defer exporter.deinit();
+                    logger.logEnabled(
+                        key_log.exporter_secret,
+                        &pending.client_random,
+                        exporter.bytes(),
+                    );
+                }
+            }
             application.client_traffic_secret.deinit();
             application.server_traffic_secret.deinit();
             const established = Established{

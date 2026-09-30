@@ -1,5 +1,7 @@
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, Error, SignatureScheme};
+use rustls::{
+    ClientConfig, ClientConnection, DigitallySignedStruct, Error, KeyLog, SignatureScheme,
+};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
@@ -11,6 +13,23 @@ use std::time::Duration;
 struct NoVerifier {
     pkcs1: bool,
     expect_ocsp: bool,
+}
+
+#[derive(Debug)]
+struct StdoutKeyLog;
+
+impl KeyLog for StdoutKeyLog {
+    fn log(&self, label: &str, client_random: &[u8], secret: &[u8]) {
+        print!("RUSTLS_KEY_LOG {label} ");
+        for byte in client_random {
+            print!("{byte:02x}");
+        }
+        print!(" ");
+        for byte in secret {
+            print!("{byte:02x}");
+        }
+        println!();
+    }
 }
 
 impl ServerCertVerifier for NoVerifier {
@@ -75,6 +94,7 @@ fn main() {
     let pkcs1 = matches!(mode.as_deref(), Some("pkcs1" | "mtls-pkcs1"));
     let mtls = mode.as_deref() == Some("mtls-pkcs1");
     let expect_ocsp = mode.as_deref() == Some("ocsp");
+    let key_log_enabled = mode.as_deref() == Some("keylog");
     let builder = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoVerifier { pkcs1, expect_ocsp }));
@@ -94,6 +114,9 @@ fn main() {
         builder.with_no_client_auth()
     };
     config.alpn_protocols.push(b"h2".to_vec());
+    if key_log_enabled {
+        config.key_log = Arc::new(StdoutKeyLog);
+    }
 
     let name = ServerName::try_from("localhost").unwrap();
     let mut conn = ClientConnection::new(Arc::new(config), name).unwrap();

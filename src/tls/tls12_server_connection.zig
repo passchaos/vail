@@ -11,6 +11,7 @@ const auth = @import("auth.zig");
 const client_auth = @import("client_auth.zig");
 const client_hello = @import("client_hello.zig");
 const key_exchange = @import("key_exchange.zig");
+const key_log = @import("key_log.zig");
 const record13 = @import("record.zig");
 const stream = @import("stream.zig");
 const tls12 = @import("tls12.zig");
@@ -61,6 +62,8 @@ pub const Config = struct {
     /// Stateless RFC 5077 tickets. This is currently mutually exclusive with
     /// TLS 1.2 client authentication, matching the session-ID resume policy.
     session_tickets: ?SessionTicketPolicy = null,
+    /// Opt-in NSS-compatible master-secret logging for diagnostics.
+    key_log: ?key_log.Logger = null,
 };
 
 pub const Resumption = struct {
@@ -982,6 +985,12 @@ pub fn ServerConnection(
             const pending = &(self.pending orelse unreachable);
             const selected_alpn: []const u8 =
                 pending.selection.alpn_protocol orelse "";
+            key_log.emit(
+                self.config.key_log,
+                key_log.client_random,
+                &pending.client_random,
+                &pending.master_secret.?,
+            );
             const established = Established{
                 .allocator = self.config.allocator,
                 .read = pending.client_traffic.?,

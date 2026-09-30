@@ -16,6 +16,7 @@ const client_hello = @import("client_hello.zig");
 const connection = @import("connection.zig");
 const ech = @import("ech.zig");
 const key_exchange = @import("key_exchange.zig");
+const key_log = @import("key_log.zig");
 const key_schedule = @import("key_schedule.zig");
 const psk = @import("psk.zig");
 const record = @import("record.zig");
@@ -101,6 +102,8 @@ pub const Config = struct {
     request_resumption: bool = false,
     resumption: ?ClientPsk = null,
     ech: ?EchClientConfig = null,
+    /// Opt-in NSS-compatible traffic-secret logging for diagnostics.
+    key_log: ?key_log.Logger = null,
 };
 
 pub const ClientPsk = struct {
@@ -280,6 +283,7 @@ pub fn ClientConnection(
         request_ocsp: bool,
         certificate_compression_algorithms: []const certificate_compression.Algorithm,
         max_decompressed_certificate_len: usize,
+        key_logger: ?key_log.Logger = null,
         stage: Stage = .server_hello,
         client_hello_bytes: ?[]u8,
         exchange: ?key_exchange.ClientExchange,
@@ -490,6 +494,12 @@ pub fn ClientConnection(
                             hello_hash,
                         );
                     defer early_secret.deinit();
+                    key_log.emit(
+                        config.key_log,
+                        key_log.client_early_traffic_secret,
+                        &config.random,
+                        early_secret.bytes(),
+                    );
                     early_write = try traffic.State.init(
                         value.suite,
                         early_secret,
@@ -514,6 +524,7 @@ pub fn ClientConnection(
                 .request_ocsp = config.request_ocsp,
                 .certificate_compression_algorithms = config.certificate_compression_algorithms,
                 .max_decompressed_certificate_len = config.max_decompressed_certificate_len,
+                .key_logger = config.key_log,
                 .client_hello_bytes = owned_hello,
                 .exchange = exchange,
                 .retry_material = retry_material,
@@ -986,6 +997,18 @@ pub fn ClientConnection(
                 handshake.client_traffic_secret.deinit();
                 handshake.server_traffic_secret.deinit();
             }
+            key_log.emit(
+                self.key_logger,
+                key_log.client_handshake_traffic_secret,
+                &self.random,
+                handshake.client_traffic_secret.bytes(),
+            );
+            key_log.emit(
+                self.key_logger,
+                key_log.server_handshake_traffic_secret,
+                &self.random,
+                handshake.server_traffic_secret.bytes(),
+            );
             var server_records = try traffic.State.init(
                 parsed_server.cipher_suite,
                 handshake.server_traffic_secret,
@@ -1179,6 +1202,31 @@ pub fn ClientConnection(
                 verified.application.client_traffic_secret,
             );
             errdefer application.deinit();
+            if (self.key_logger) |logger| {
+                logger.log(
+                    key_log.client_traffic_secret_0,
+                    &self.random,
+                    verified.application.client_traffic_secret.bytes(),
+                );
+                logger.log(
+                    key_log.server_traffic_secret_0,
+                    &self.random,
+                    verified.application.server_traffic_secret.bytes(),
+                );
+                if (logger.willLog(key_log.exporter_secret)) {
+                    var exporter = try key_schedule
+                        .deriveExporterMasterSecretFor(
+                        verified.application.master_secret,
+                        verified.transcript_after_server_finished,
+                    );
+                    defer exporter.deinit();
+                    logger.logEnabled(
+                        key_log.exporter_secret,
+                        &self.random,
+                        exporter.bytes(),
+                    );
+                }
+            }
 
             var offset: usize = 0;
             if (verified.early_data_accepted) {
@@ -1323,6 +1371,98 @@ fn ed25519SubjectPublicKeyInfo(public_key: [32]u8) [44]u8 {
     return spki;
 }
 
+const TestKeyLogCapture = struct {
+    const max_entries = 6;
+    const Entry = struct {
+        label: []const u8,
+        client_random: [32]u8,
+        secret: [secret.max_len]u8,
+        secret_len: usize,
+    };
+
+    entries: [max_entries]Entry = undefined,
+    len: usize = 0,
+
+    fn logger(self: *TestKeyLogCapture) key_log.Logger {
+        return .{
+            .context = self,
+            .log_fn = TestKeyLogCapture.record,
+        };
+    }
+
+    fn record(
+        context: ?*anyopaque,
+        label: []const u8,
+        client_random_bytes: *const [32]u8,
+        secret_bytes: []const u8,
+    ) void {
+        const self: *TestKeyLogCapture = @ptrCast(@alignCast(context.?));
+        std.debug.assert(self.len < self.entries.len);
+        std.debug.assert(secret_bytes.len <= secret.max_len);
+        const entry = &self.entries[self.len];
+        entry.label = label;
+        entry.client_random = client_random_bytes.*;
+        entry.secret_len = secret_bytes.len;
+        @memcpy(entry.secret[0..secret_bytes.len], secret_bytes);
+        self.len += 1;
+    }
+
+    fn expectMatches(
+        self: *const TestKeyLogCapture,
+        other: *const TestKeyLogCapture,
+        expected_random: [32]u8,
+    ) !void {
+        const expected_labels = [_][]const u8{
+            key_log.client_handshake_traffic_secret,
+            key_log.server_handshake_traffic_secret,
+            key_log.client_traffic_secret_0,
+            key_log.server_traffic_secret_0,
+            key_log.exporter_secret,
+        };
+        try self.expectLabels(other, expected_random, &expected_labels);
+    }
+
+    fn expectMatchesWithEarlyData(
+        self: *const TestKeyLogCapture,
+        other: *const TestKeyLogCapture,
+        expected_random: [32]u8,
+    ) !void {
+        const expected_labels = [_][]const u8{
+            key_log.client_early_traffic_secret,
+            key_log.client_handshake_traffic_secret,
+            key_log.server_handshake_traffic_secret,
+            key_log.client_traffic_secret_0,
+            key_log.server_traffic_secret_0,
+            key_log.exporter_secret,
+        };
+        try self.expectLabels(other, expected_random, &expected_labels);
+    }
+
+    fn expectLabels(
+        self: *const TestKeyLogCapture,
+        other: *const TestKeyLogCapture,
+        expected_random: [32]u8,
+        expected_labels: []const []const u8,
+    ) !void {
+        try std.testing.expectEqual(expected_labels.len, self.len);
+        try std.testing.expectEqual(self.len, other.len);
+        for (expected_labels, 0..) |label, index| {
+            const left = self.entries[index];
+            const right = other.entries[index];
+            try std.testing.expectEqualStrings(label, left.label);
+            try std.testing.expectEqualStrings(label, right.label);
+            try std.testing.expectEqual(expected_random, left.client_random);
+            try std.testing.expectEqual(expected_random, right.client_random);
+            try std.testing.expectEqual(left.secret_len, right.secret_len);
+            try std.testing.expectEqualSlices(
+                u8,
+                left.secret[0..left.secret_len],
+                right.secret[0..right.secret_len],
+            );
+        }
+    }
+};
+
 test "client requests future TLS 1.3 resumption without offering a PSK" {
     const allocator = std.testing.allocator;
     const Client = ClientConnection(4096, 256);
@@ -1353,6 +1493,8 @@ test "client requests future TLS 1.3 resumption without offering a PSK" {
 
 test "client and server states establish over one-byte transport reads" {
     const allocator = std.testing.allocator;
+    var client_key_log: TestKeyLogCapture = .{};
+    var server_key_log: TestKeyLogCapture = .{};
     const Client = ClientConnection(64 * 1024, 256);
     const Server = @import("server_connection.zig").ServerConnection(
         64 * 1024,
@@ -1443,6 +1585,7 @@ test "client and server states establish over one-byte transport reads" {
         .alpn_protocols = &.{"h2"},
         .request_ocsp = true,
         .certificate_compression_algorithms = &.{.zstd},
+        .key_log = client_key_log.logger(),
         .server_verifier = .{ .verify_trust = struct {
             fn verify(
                 context: ?*anyopaque,
@@ -1493,6 +1636,7 @@ test "client and server states establish over one-byte transport reads" {
             .ed25519 = .{ .key_pair = fallback_signing_key },
         },
         .identity_resolver = identity_set.resolver(),
+        .key_log = server_key_log.logger(),
         .client_auth = .{
             .request_context = "mtls",
             .certificate_compression_algorithms = &.{.zstd},
@@ -1594,6 +1738,10 @@ test "client and server states establish over one-byte transport reads" {
     try std.testing.expectEqual(
         certificate_compression.Algorithm.zstd,
         established_server.client_certificate_compression.?,
+    );
+    try client_key_log.expectMatches(
+        &server_key_log,
+        [_]u8{0xc3} ** 32,
     );
 
     var application_record: [128]u8 = undefined;
@@ -3144,6 +3292,8 @@ test "server state rejects a tampered selected PSK binder and locks" {
 
 test "ECH client and server accept bounded replay-guarded 0-RTT" {
     const allocator = std.testing.allocator;
+    var client_key_log: TestKeyLogCapture = .{};
+    var server_key_log: TestKeyLogCapture = .{};
     const server_module = @import("server_connection.zig");
     const early_module = @import("early_data.zig");
     const ticket_module = @import("ticket_keyring.zig");
@@ -3204,6 +3354,7 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
         .alpn_protocols = &.{"h2"},
         .server_verifier = .{},
         .resumption = offered_psk,
+        .key_log = client_key_log.logger(),
         .ech = .{
             .io = std.testing.io,
             .config = selected_ech,
@@ -3268,6 +3419,7 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
             .replay_guard = replay_cache.guard(),
             .max_bytes = 1024,
         },
+        .key_log = server_key_log.logger(),
         .ech = .{
             .config = selected_ech,
             .key_pair = &ech_key_pair,
@@ -3351,6 +3503,10 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
     defer established_server.deinit();
     try std.testing.expect(established_server.early_data_accepted);
     try std.testing.expect(established_server.ech_accepted);
+    try client_key_log.expectMatchesWithEarlyData(
+        &server_key_log,
+        [_]u8{0xcb} ** 32,
+    );
 
     // A second connection can still resume, but the same ticket identity is
     // replayed and therefore its 0-RTT records are decrypted and discarded.
