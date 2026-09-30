@@ -5,6 +5,7 @@
 //! lengths and extracts the extensions Vail negotiates today.
 
 const std = @import("std");
+const application_settings = @import("application_settings.zig");
 const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
@@ -34,6 +35,10 @@ pub const ext_psk_key_exchange_modes: u16 = 0x002d;
 pub const ext_key_share: u16 = 0x0033;
 pub const ext_pre_shared_key: u16 = 0x0029;
 pub const ext_encrypted_client_hello: u16 = 0xfe0d;
+pub const ext_application_settings_legacy: u16 =
+    application_settings.legacy_extension_type;
+pub const ext_application_settings: u16 =
+    application_settings.current_extension_type;
 pub const tls13: u16 = 0x0304;
 
 pub const default_signature_schemes = [_]u16{
@@ -91,6 +96,8 @@ pub const WriteOptions = struct {
     record_size_limit: ?u16 = null,
     certificate_authorities: []const []const u8 = &.{},
     ticket_request: ?TicketRequest = null,
+    application_settings_protocols: []const []const u8 = &.{},
+    application_settings_codepoint: application_settings.Codepoint = .legacy,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_certificate_types: []const auth.CertificateType = &.{},
     client_certificate_types: []const auth.CertificateType = &.{},
@@ -129,6 +136,8 @@ pub const FlexibleWriteOptions = struct {
     record_size_limit: ?u16 = null,
     certificate_authorities: []const []const u8 = &.{},
     ticket_request: ?TicketRequest = null,
+    application_settings_protocols: []const []const u8 = &.{},
+    application_settings_codepoint: application_settings.Codepoint = .legacy,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_certificate_types: []const auth.CertificateType = &.{},
     client_certificate_types: []const auth.CertificateType = &.{},
@@ -164,6 +173,8 @@ pub fn write(
         .record_size_limit = options.record_size_limit,
         .certificate_authorities = options.certificate_authorities,
         .ticket_request = options.ticket_request,
+        .application_settings_protocols = options.application_settings_protocols,
+        .application_settings_codepoint = options.application_settings_codepoint,
         .certificate_compression_algorithms = options.certificate_compression_algorithms,
         .server_certificate_types = options.server_certificate_types,
         .client_certificate_types = options.client_certificate_types,
@@ -199,7 +210,8 @@ pub fn writeWithKeyShare(
     }
     if (!offers_tls13 and
         (options.certificate_authorities.len != 0 or
-            options.ticket_request != null))
+            options.ticket_request != null or
+            options.application_settings_protocols.len != 0))
     {
         return error.InvalidClientHello;
     }
@@ -323,6 +335,33 @@ pub fn writeWithKeyShare(
             allocator,
             ext_ticket_request,
             &.{ request.new_session_count, request.resumption_count },
+        );
+    }
+
+    if (options.application_settings_protocols.len != 0) {
+        if (options.alpn_protocols.len == 0) {
+            return error.InvalidClientHello;
+        }
+        for (options.application_settings_protocols) |protocol| {
+            for (options.alpn_protocols) |alpn| {
+                if (std.mem.eql(u8, protocol, alpn)) break;
+            } else return error.InvalidClientHello;
+        }
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        application_settings.appendSupportPayload(
+            &payload,
+            allocator,
+            options.application_settings_protocols,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidApplicationSettings => return error.InvalidClientHello,
+        };
+        try appendExtension(
+            &extensions,
+            allocator,
+            @intFromEnum(options.application_settings_codepoint),
+            payload.items,
         );
     }
 
@@ -593,6 +632,8 @@ pub const Parsed = struct {
     record_size_limit: ?u16 = null,
     certificate_authorities: ?[]const u8 = null,
     ticket_request: ?TicketRequest = null,
+    application_settings_protocols: ?[]const u8 = null,
+    application_settings_codepoint: ?application_settings.Codepoint = null,
     certificate_compression_algorithms: []const u8 = &.{},
     server_certificate_types: []const u8 = &.{},
     client_certificate_types: []const u8 = &.{},
@@ -755,6 +796,16 @@ pub const Parsed = struct {
         return false;
     }
 
+    pub fn supportsApplicationSettings(
+        self: Parsed,
+        protocol: []const u8,
+    ) bool {
+        return if (self.application_settings_protocols) |protocols|
+            application_settings.supportsProtocol(protocols, protocol)
+        else
+            false;
+    }
+
     pub fn firstKeyShare(self: Parsed) Error!?KeyShare {
         var pos: usize = 0;
         if (self.key_shares.len == 0) return null;
@@ -843,6 +894,17 @@ pub fn parse(bytes: []const u8) Error!Parsed {
                     .resumption_count = payload[1],
                 };
             },
+            ext_application_settings_legacy,
+            ext_application_settings,
+            => {
+                if (parsed.application_settings_protocols != null) {
+                    return error.DuplicateExtension;
+                }
+                parsed.application_settings_codepoint = if (typ == ext_application_settings_legacy) .legacy else .current;
+                parsed.application_settings_protocols =
+                    application_settings.parseSupportPayload(payload) catch
+                        return error.InvalidClientHello;
+            },
             ext_server_certificate_type => {
                 parsed.server_certificate_types =
                     try parseCertificateTypes(payload);
@@ -877,6 +939,16 @@ pub fn parse(bytes: []const u8) Error!Parsed {
                 parsed.offers_secure_renegotiation = true;
             },
             else => {},
+        }
+    }
+    if (parsed.application_settings_protocols) |protocols| {
+        var iterator = application_settings.ProtocolIterator{
+            .bytes = protocols,
+        };
+        while (iterator.next()) |protocol| {
+            if (!try parsed.supportsAlpnProtocol(protocol)) {
+                return error.InvalidClientHello;
+            }
         }
     }
     return parsed;
@@ -1095,6 +1167,12 @@ pub fn validateSecondClientHello(
             second.certificate_authorities,
         ) or
         !std.meta.eql(first.ticket_request, second.ticket_request) or
+        first.application_settings_codepoint !=
+            second.application_settings_codepoint or
+        !optionalBytesEql(
+            first.application_settings_protocols,
+            second.application_settings_protocols,
+        ) or
         first.offers_secure_renegotiation !=
             second.offers_secure_renegotiation or
         !std.mem.eql(
@@ -1335,6 +1413,9 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
             .new_session_count = 3,
             .resumption_count = 2,
         },
+        .alpn_protocols = &.{ "h2", "http/1.1" },
+        .application_settings_protocols = &.{"h2"},
+        .application_settings_codepoint = .current,
         .certificate_compression_algorithms = &.{.zlib},
     });
     const parsed = try parse(encoded.items);
@@ -1359,6 +1440,12 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
     try std.testing.expectEqual(
         TicketRequest{ .new_session_count = 3, .resumption_count = 2 },
         parsed.ticket_request.?,
+    );
+    try std.testing.expect(parsed.supportsApplicationSettings("h2"));
+    try std.testing.expect(!parsed.supportsApplicationSettings("http/1.1"));
+    try std.testing.expectEqual(
+        application_settings.Codepoint.current,
+        parsed.application_settings_codepoint.?,
     );
     try std.testing.expect(parsed.supportsCertificateCompression(.zlib));
     try std.testing.expect(!parsed.supportsCertificateCompression(.brotli));

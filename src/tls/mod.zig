@@ -1,6 +1,7 @@
 //! TLS 1.3 authentication and handshake-message primitives.
 
 pub const alert = @import("alert.zig");
+pub const application_settings = @import("application_settings.zig");
 pub const auth = @import("auth.zig");
 pub const certificate_compression = @import("certificate_compression.zig");
 pub const cipher_suite = @import("cipher_suite.zig");
@@ -41,6 +42,7 @@ pub const transcript = @import("transcript.zig");
 test {
     _ = @import("tests.zig");
     _ = alert;
+    _ = application_settings;
     _ = certificate_compression;
     _ = client_hello;
     _ = client_handshake;

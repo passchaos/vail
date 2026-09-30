@@ -5,6 +5,7 @@
 //! from parsed ClientHello state without duplicating extension encoding logic.
 
 const std = @import("std");
+const application_settings = @import("application_settings.zig");
 const auth = @import("auth.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const ech = @import("ech.zig");
@@ -360,6 +361,7 @@ pub const EncryptedExtensions = struct {
     server_certificate_type: ?auth.CertificateType = null,
     record_size_limit: ?u16 = null,
     ticket_request_hint: ?u8 = null,
+    application_settings: ?application_settings.Payload = null,
     /// Exact RFC 9849 ECHConfigList returned after rejecting an ECH offer.
     ech_retry_configs: ?[]const u8 = null,
 };
@@ -373,6 +375,7 @@ pub const ParsedEncryptedExtensions = struct {
     server_certificate_type: ?auth.CertificateType = null,
     record_size_limit: ?u16 = null,
     ticket_request_hint: ?u8 = null,
+    application_settings: ?application_settings.Payload = null,
     ech_retry_configs: ?[]const u8 = null,
 };
 
@@ -456,6 +459,19 @@ pub fn parseEncryptedExtensions(
         } else if (typ == ext_ticket_request) {
             if (payload.len != 1) return error.InvalidEncryptedExtensions;
             result.ticket_request_hint = payload[0];
+        } else if (typ == application_settings.legacy_extension_type or
+            typ == application_settings.current_extension_type)
+        {
+            if (result.application_settings != null) {
+                return error.InvalidEncryptedExtensions;
+            }
+            result.application_settings = .{
+                .codepoint = if (typ == application_settings.legacy_extension_type)
+                    .legacy
+                else
+                    .current,
+                .settings = payload,
+            };
         } else if (typ == ech.extension_type) {
             ech.validateConfigList(payload) catch
                 return error.InvalidEncryptedExtensions;
@@ -555,6 +571,18 @@ pub fn writeEncryptedExtensions(
             1,
         );
         try extension_bytes.append(allocator, expected_count);
+    }
+    if (extensions.application_settings) |settings| {
+        if (settings.settings.len > std.math.maxInt(u16)) {
+            return error.InvalidEncryptedExtensions;
+        }
+        try appendExtensionHeader(
+            &extension_bytes,
+            allocator,
+            @intFromEnum(settings.codepoint),
+            settings.settings.len,
+        );
+        try extension_bytes.appendSlice(allocator, settings.settings);
     }
     if (extensions.ech_retry_configs) |retry_configs| {
         ech.validateConfigList(retry_configs) catch
@@ -744,6 +772,10 @@ test "ServerHello and EncryptedExtensions encode TLS 1.3 extensions" {
         .server_certificate_type = .raw_public_key,
         .record_size_limit = 4096,
         .ticket_request_hint = 2,
+        .application_settings = .{
+            .codepoint = .current,
+            .settings = &.{ 9, 8, 7 },
+        },
     });
     try std.testing.expectEqual(handshake_type_encrypted_extensions, out.items[0]);
     try std.testing.expect(std.mem.indexOf(u8, out.items, &.{ 0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, 'h', '2' }) != null);
@@ -761,6 +793,15 @@ test "ServerHello and EncryptedExtensions encode TLS 1.3 extensions" {
     try std.testing.expectEqual(
         @as(?u8, 2),
         parsed_quic_extensions.ticket_request_hint,
+    );
+    try std.testing.expectEqual(
+        application_settings.Codepoint.current,
+        parsed_quic_extensions.application_settings.?.codepoint,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 9, 8, 7 },
+        parsed_quic_extensions.application_settings.?.settings,
     );
 
     out.clearRetainingCapacity();
