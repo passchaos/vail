@@ -3,7 +3,8 @@
 //!
 //! A result is returned only after CertID binding, responder identity,
 //! responder authorization, signature, and time-window verification succeed.
-//! Response and SingleResponse extensions remain fail-closed.
+//! Response and SingleResponse extensions are bounded, unknown critical
+//! extensions fail closed, and RFC 8954 response nonces can be matched exactly.
 
 const std = @import("std");
 const x509_signature = @import("signature.zig");
@@ -28,6 +29,11 @@ const oid_ocsp_signing = [_]u8{
 const oid_ocsp_no_check = [_]u8{
     0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01, 0x05,
 };
+const oid_ocsp_nonce = [_]u8{
+    0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01, 0x02,
+};
+const max_extensions_per_scope = 32;
+const max_nonce_len = 32;
 
 pub const Status = enum {
     good,
@@ -40,6 +46,11 @@ pub const Policy = struct {
     max_age_without_next_update_seconds: u64 = 24 * 60 * 60,
     max_response_bytes: usize = 64 * 1024,
     max_embedded_responder_certificates: usize = 8,
+    /// When set, require an RFC 8954 response nonce with these exact bytes.
+    /// A syntactically valid unsolicited nonce is otherwise ignored, as TLS
+    /// stapling does not carry the corresponding OCSP request.
+    expected_nonce: ?[]const u8 = null,
+    max_extensions: usize = max_extensions_per_scope,
 };
 
 pub const Error = error{
@@ -61,7 +72,11 @@ pub const Error = error{
     UnauthorizedResponder,
     DuplicateResponder,
     TooManyResponderCertificates,
+    TooManyExtensions,
     OcspResponseTooLarge,
+    InvalidNonce,
+    MissingNonce,
+    NonceMismatch,
 };
 
 pub fn verify(
@@ -74,6 +89,11 @@ pub fn verify(
     if (now_seconds < 0) return error.OcspResponseNotYetValid;
     if (response_der.len > policy.max_response_bytes) {
         return error.OcspResponseTooLarge;
+    }
+    if (policy.expected_nonce) |nonce| {
+        if (nonce.len == 0 or nonce.len > max_nonce_len) {
+            return error.InvalidNonce;
+        }
     }
     const certificate = parseCertificate(certificate_der) catch
         return error.InvalidOcspResponse;
@@ -152,7 +172,7 @@ pub fn verify(
         issuer_der,
         issuer,
         @intCast(now_seconds),
-        policy,
+        &policy,
     );
     const signature_algorithm = try parseSignatureAlgorithm(
         signature_algorithm_element,
@@ -163,7 +183,7 @@ pub fn verify(
         issuer,
         embedded_certificates,
         now_seconds,
-        policy,
+        &policy,
         signature_algorithm,
         basic.value[response_data.start..response_data.end],
         signature_value.value[1..],
@@ -183,7 +203,7 @@ fn verifyResponseData(
     issuer_der: []const u8,
     issuer: Certificate.Parsed,
     now: u64,
-    policy: Policy,
+    policy: *const Policy,
 ) Error!ResponseDataResult {
     var fields = Reader{ .bytes = response_data.value };
     var responder = (fields.next() catch return error.InvalidOcspResponse) orelse
@@ -213,8 +233,21 @@ fn verifyResponseData(
     const responses = fields.require(0x30) catch
         return error.InvalidOcspResponse;
     if (responses.value.len == 0) return error.InvalidOcspResponse;
-    if (fields.next() catch return error.InvalidOcspResponse) |_| {
-        return error.UnsupportedExtension;
+    var response_nonce: ?[]const u8 = null;
+    if (fields.next() catch return error.InvalidOcspResponse) |extensions| {
+        if (extensions.tag != 0xa1) return error.InvalidOcspResponse;
+        response_nonce = try parseExtensions(
+            extensions.value,
+            @min(policy.max_extensions, max_extensions_per_scope),
+            true,
+        );
+        if ((fields.next() catch return error.InvalidOcspResponse) != null) {
+            return error.InvalidOcspResponse;
+        }
+    }
+    if (policy.expected_nonce) |expected| {
+        const actual = response_nonce orelse return error.MissingNonce;
+        if (!std.mem.eql(u8, expected, actual)) return error.NonceMismatch;
     }
 
     var matches: usize = 0;
@@ -296,7 +329,7 @@ fn verifyAuthorizedResponderSignature(
     issuer: Certificate.Parsed,
     embedded_certificates: ?[]const u8,
     now_seconds: i64,
-    policy: Policy,
+    policy: *const Policy,
     signature_algorithm: x509_signature.Algorithm,
     message: []const u8,
     signature: []const u8,
@@ -567,7 +600,7 @@ fn parseSingleResponse(
     issuer_der: []const u8,
     issuer: Certificate.Parsed,
     now: u64,
-    policy: Policy,
+    policy: *const Policy,
 ) Error!?Status {
     var fields = Reader{ .bytes = single.value };
     const cert_id = fields.require(0x30) catch
@@ -617,25 +650,28 @@ fn parseSingleResponse(
         this_update_element,
     ) catch return error.InvalidOcspResponse;
     var next_update: ?u64 = null;
-    if (fields.next() catch return error.InvalidOcspResponse) |next| {
-        if (next.tag == 0xa0) {
-            var explicit = Reader{ .bytes = next.value };
-            const time = (explicit.next() catch
-                return error.InvalidOcspResponse) orelse
-                return error.InvalidOcspResponse;
-            next_update = parseGeneralizedTime(
-                next.value,
-                time,
-            ) catch return error.InvalidOcspResponse;
-            if (!explicit.done()) return error.InvalidOcspResponse;
-            if ((fields.next() catch
-                return error.InvalidOcspResponse) != null)
-            {
-                return error.UnsupportedExtension;
-            }
-        } else {
-            return error.UnsupportedExtension;
-        }
+    var next_field = fields.next() catch return error.InvalidOcspResponse;
+    if (next_field != null and next_field.?.tag == 0xa0) {
+        const next_update_wrapper = next_field.?;
+        var explicit = Reader{ .bytes = next_update_wrapper.value };
+        const time = (explicit.next() catch
+            return error.InvalidOcspResponse) orelse
+            return error.InvalidOcspResponse;
+        next_update = parseGeneralizedTime(
+            next_update_wrapper.value,
+            time,
+        ) catch return error.InvalidOcspResponse;
+        if (!explicit.done()) return error.InvalidOcspResponse;
+        next_field = fields.next() catch return error.InvalidOcspResponse;
+    }
+    if (next_field) |extensions| {
+        if (extensions.tag != 0xa1) return error.InvalidOcspResponse;
+        _ = try parseExtensions(
+            extensions.value,
+            @min(policy.max_extensions, max_extensions_per_scope),
+            false,
+        );
+        if (!fields.done()) return error.InvalidOcspResponse;
     }
     if (!matches) return null;
     if (this_update > now +| policy.clock_skew_seconds) {
@@ -652,6 +688,74 @@ fn parseSingleResponse(
         return error.OcspResponseExpired;
     }
     return status;
+}
+
+fn parseExtensions(
+    encoded: []const u8,
+    max_extensions: usize,
+    response_scope: bool,
+) Error!?[]const u8 {
+    var explicit = Reader{ .bytes = encoded };
+    const sequence = explicit.require(0x30) catch
+        return error.InvalidOcspResponse;
+    if (!explicit.done() or sequence.value.len == 0) {
+        return error.InvalidOcspResponse;
+    }
+    var extensions = Reader{ .bytes = sequence.value };
+    var seen_oids: [max_extensions_per_scope][]const u8 = undefined;
+    var seen_count: usize = 0;
+    var nonce: ?[]const u8 = null;
+    while (extensions.next() catch
+        return error.InvalidOcspResponse) |extension|
+    {
+        if (extension.tag != 0x30) return error.InvalidOcspResponse;
+        if (seen_count >= max_extensions) return error.TooManyExtensions;
+        var fields = Reader{ .bytes = extension.value };
+        const oid = fields.require(0x06) catch
+            return error.InvalidOcspResponse;
+        validateOid(oid.value) catch return error.InvalidOcspResponse;
+        for (seen_oids[0..seen_count]) |previous| {
+            if (std.mem.eql(u8, previous, oid.value)) {
+                return error.InvalidOcspResponse;
+            }
+        }
+        seen_oids[seen_count] = oid.value;
+        seen_count += 1;
+
+        var value = (fields.next() catch
+            return error.InvalidOcspResponse) orelse
+            return error.InvalidOcspResponse;
+        var critical = false;
+        if (value.tag == 0x01) {
+            if (value.value.len != 1 or value.value[0] != 0xff) {
+                return error.InvalidOcspResponse;
+            }
+            critical = true;
+            value = (fields.next() catch
+                return error.InvalidOcspResponse) orelse
+                return error.InvalidOcspResponse;
+        }
+        if (value.tag != 0x04 or !fields.done()) {
+            return error.InvalidOcspResponse;
+        }
+        if (std.mem.eql(u8, oid.value, &oid_ocsp_nonce)) {
+            if (!response_scope or critical or nonce != null) {
+                return error.UnsupportedExtension;
+            }
+            var nonce_reader = Reader{ .bytes = value.value };
+            const nonce_value = nonce_reader.require(0x04) catch
+                return error.InvalidNonce;
+            if (!nonce_reader.done() or nonce_value.value.len == 0 or
+                nonce_value.value.len > max_nonce_len)
+            {
+                return error.InvalidNonce;
+            }
+            nonce = nonce_value.value;
+        } else if (critical) {
+            return error.UnsupportedExtension;
+        }
+    }
+    return nonce;
 }
 
 const CertIdHash = enum { sha1, sha256 };
@@ -933,6 +1037,121 @@ test "issuer-signed OCSP verifies OpenSSL RSA SHA-2 responses" {
     try std.testing.expectError(
         error.InvalidOcspSignature,
         verify(tampered, leaf, issuer, now, .{}),
+    );
+
+    const nonce_response = @embedFile(
+        "testdata/rsa-pss-sha256-nonce.ocsp.der",
+    );
+    const nonce = [_]u8{
+        0x49, 0x4a, 0x9a, 0x78, 0xe5, 0xaa, 0x73, 0x40,
+        0xa1, 0x5b, 0xce, 0x19, 0xb1, 0xa0, 0x87, 0xad,
+    };
+    try std.testing.expectEqual(
+        Status.good,
+        try verify(nonce_response, leaf, issuer, now, .{}),
+    );
+    try std.testing.expectEqual(
+        Status.good,
+        try verify(nonce_response, leaf, issuer, now, .{
+            .expected_nonce = &nonce,
+        }),
+    );
+    var wrong_nonce = nonce;
+    wrong_nonce[0] ^= 1;
+    try std.testing.expectError(
+        error.NonceMismatch,
+        verify(nonce_response, leaf, issuer, now, .{
+            .expected_nonce = &wrong_nonce,
+        }),
+    );
+    try std.testing.expectError(
+        error.MissingNonce,
+        verify(responses[0], leaf, issuer, now, .{
+            .expected_nonce = &nonce,
+        }),
+    );
+}
+
+test "OCSP extensions ignore unknown non-critical values and bound each scope" {
+    const unknown_noncritical = [_]u8{
+        0x30, 0x0a,
+        0x30, 0x08,
+        0x06, 0x03,
+        0x2a, 0x03,
+        0x04, 0x04,
+        0x01, 0x00,
+    };
+    try std.testing.expect((try parseExtensions(
+        &unknown_noncritical,
+        max_extensions_per_scope,
+        true,
+    )) == null);
+    try std.testing.expectError(
+        error.TooManyExtensions,
+        parseExtensions(&unknown_noncritical, 0, true),
+    );
+    const duplicate = [_]u8{
+        0x30, 0x14,
+        0x30, 0x08,
+        0x06, 0x03,
+        0x2a, 0x03,
+        0x04, 0x04,
+        0x01, 0x00,
+        0x30, 0x08,
+        0x06, 0x03,
+        0x2a, 0x03,
+        0x04, 0x04,
+        0x01, 0x01,
+    };
+    try std.testing.expectError(
+        error.InvalidOcspResponse,
+        parseExtensions(&duplicate, max_extensions_per_scope, true),
+    );
+
+    const unknown_critical = [_]u8{
+        0x30, 0x0d,
+        0x30, 0x0b,
+        0x06, 0x03,
+        0x2a, 0x03,
+        0x04, 0x01,
+        0x01, 0xff,
+        0x04, 0x01,
+        0x00,
+    };
+    try std.testing.expectError(
+        error.UnsupportedExtension,
+        parseExtensions(
+            &unknown_critical,
+            max_extensions_per_scope,
+            true,
+        ),
+    );
+
+    const nonce = [_]u8{
+        0x30, 0x13,
+        0x30, 0x11,
+        0x06, 0x09,
+        0x2b, 0x06,
+        0x01, 0x05,
+        0x05, 0x07,
+        0x30, 0x01,
+        0x02, 0x04,
+        0x04, 0x04,
+        0x02, 0xaa,
+        0xbb,
+    };
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xaa, 0xbb },
+        (try parseExtensions(
+            &nonce,
+            max_extensions_per_scope,
+            true,
+        )).?,
+    );
+    try std.testing.expectError(
+        error.UnsupportedExtension,
+        parseExtensions(&nonce, max_extensions_per_scope, false),
     );
 }
 

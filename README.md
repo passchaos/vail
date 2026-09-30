@@ -97,13 +97,13 @@ The current foundation provides:
   validity/KeyUsage, SHA-1/SHA-256 issuer hashes, ECDSA/Ed25519 signatures,
   and RSA PKCS#1 v1.5 or RSA-PSS signatures with SHA-256/384/512,
   bounded embedded certificates, response time windows, and
-  good/revoked/unknown handling. TLS 1.2 and TLS 1.3 clients can request
+  good/revoked/unknown handling, RFC 8954 response nonce matching, bounded
+  extension parsing, non-critical extension tolerance, and fail-closed unknown
+  critical extensions. TLS 1.2 and TLS 1.3 clients can request
   stapling, servers attach the configured response only when requested, and
   bundle trust policy supports ignore/if-present/require modes. TLS 1.2 binds
   the RFC 6066 CertificateStatus message into the Finished transcript and
   rejects unsolicited, missing, duplicated, or malformed status messages.
-  Response and SingleResponse
-  extensions currently fail closed;
   An exact certificate or cross-signed form with the same Subject and complete
   SubjectPublicKeyInfo is recognized as a configured trust anchor without
   verifying the anchor's issuer signature. Hostname and validity remain
