@@ -3,7 +3,8 @@
 //! A list is returned only after issuer, signature, update-window, extension,
 //! and revoked-entry validation succeeds. Supported signatures are Ed25519,
 //! ECDSA P-256/SHA-256, ECDSA P-384/SHA-384, and RSA PKCS#1
-//! v1.5/SHA-256 with 1024-4096-bit keys; other algorithms fail explicitly.
+//! v1.5 or RSA-PSS with SHA-256/384/512 and 1024-4096-bit keys; other
+//! algorithms fail explicitly.
 
 const std = @import("std");
 const trust = @import("trust.zig");
@@ -13,6 +14,8 @@ const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const Sha384 = std.crypto.hash.sha2.Sha384;
+const Sha512 = std.crypto.hash.sha2.Sha512;
 
 pub const Error = error{
     InvalidCrl,
@@ -34,6 +37,27 @@ const oid_ecdsa_sha384 = [_]u8{
 };
 const oid_rsa_sha256 = [_]u8{
     0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b,
+};
+const oid_rsa_sha384 = [_]u8{
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c,
+};
+const oid_rsa_sha512 = [_]u8{
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0d,
+};
+const oid_rsassa_pss = [_]u8{
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a,
+};
+const oid_mgf1 = [_]u8{
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x08,
+};
+const oid_sha256 = [_]u8{
+    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+};
+const oid_sha384 = [_]u8{
+    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02,
+};
+const oid_sha512 = [_]u8{
+    0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
 };
 const oid_ed25519 = [_]u8{ 0x2b, 0x65, 0x70 };
 const oid_delta_crl_indicator = [_]u8{ 0x55, 0x1d, 0x1b };
@@ -227,7 +251,34 @@ const SignatureAlgorithm = enum {
     ecdsa_p256_sha256,
     ecdsa_p384_sha384,
     rsa_pkcs1_sha256,
+    rsa_pkcs1_sha384,
+    rsa_pkcs1_sha512,
+    rsa_pss_sha256,
+    rsa_pss_sha384,
+    rsa_pss_sha512,
     ed25519,
+};
+
+const PssHash = enum {
+    sha256,
+    sha384,
+    sha512,
+
+    fn digestLength(self: PssHash) usize {
+        return switch (self) {
+            .sha256 => Sha256.digest_length,
+            .sha384 => Sha384.digest_length,
+            .sha512 => Sha512.digest_length,
+        };
+    }
+
+    fn signatureAlgorithm(self: PssHash) SignatureAlgorithm {
+        return switch (self) {
+            .sha256 => .rsa_pss_sha256,
+            .sha384 => .rsa_pss_sha384,
+            .sha512 => .rsa_pss_sha512,
+        };
+    }
 };
 
 fn parseSignatureAlgorithm(algorithm: Element) Error!SignatureAlgorithm {
@@ -241,7 +292,10 @@ fn parseSignatureAlgorithm(algorithm: Element) Error!SignatureAlgorithm {
         if (!fields.done()) return error.InvalidCrl;
         return .ecdsa_p384_sha384;
     }
-    if (std.mem.eql(u8, oid.value, &oid_rsa_sha256)) {
+    if (std.mem.eql(u8, oid.value, &oid_rsa_sha256) or
+        std.mem.eql(u8, oid.value, &oid_rsa_sha384) or
+        std.mem.eql(u8, oid.value, &oid_rsa_sha512))
+    {
         const parameters = (fields.next() catch return error.InvalidCrl) orelse
             return error.InvalidCrl;
         if (parameters.tag != 0x05 or parameters.value.len != 0 or
@@ -249,7 +303,21 @@ fn parseSignatureAlgorithm(algorithm: Element) Error!SignatureAlgorithm {
         {
             return error.InvalidCrl;
         }
-        return .rsa_pkcs1_sha256;
+        if (std.mem.eql(u8, oid.value, &oid_rsa_sha256)) {
+            return .rsa_pkcs1_sha256;
+        }
+        if (std.mem.eql(u8, oid.value, &oid_rsa_sha384)) {
+            return .rsa_pkcs1_sha384;
+        }
+        return .rsa_pkcs1_sha512;
+    }
+    if (std.mem.eql(u8, oid.value, &oid_rsassa_pss)) {
+        const parameters = (fields.next() catch return error.InvalidCrl) orelse
+            return error.InvalidCrl;
+        if (parameters.tag != 0x30 or !fields.done()) {
+            return error.InvalidCrl;
+        }
+        return parsePssParameters(parameters.value);
     }
     if (std.mem.eql(u8, oid.value, &oid_ed25519)) {
         // RFC 8410 section 3 requires parameters to be absent, including the
@@ -258,6 +326,103 @@ fn parseSignatureAlgorithm(algorithm: Element) Error!SignatureAlgorithm {
         return .ed25519;
     }
     return error.UnsupportedSignatureAlgorithm;
+}
+
+fn parsePssParameters(encoded: []const u8) Error!SignatureAlgorithm {
+    var fields = Reader{ .bytes = encoded };
+    var hash: ?PssHash = null;
+    var mask_hash: ?PssHash = null;
+    var salt_length: usize = 20;
+    var trailer_field: usize = 1;
+    var previous_tag: u8 = 0x9f;
+    while (fields.next() catch return error.InvalidCrl) |field| {
+        if (field.tag < 0xa0 or field.tag > 0xa3 or
+            (previous_tag != 0x9f and field.tag <= previous_tag))
+        {
+            return error.InvalidCrl;
+        }
+        previous_tag = field.tag;
+        switch (field.tag) {
+            0xa0 => hash = try parseExplicitHashAlgorithm(field),
+            0xa1 => mask_hash = try parseExplicitMaskAlgorithm(field),
+            0xa2 => salt_length = try parseExplicitSmallInteger(field),
+            0xa3 => trailer_field = try parseExplicitSmallInteger(field),
+            else => unreachable,
+        }
+    }
+    const selected_hash = hash orelse
+        return error.UnsupportedSignatureAlgorithm;
+    const selected_mask_hash = mask_hash orelse
+        return error.UnsupportedSignatureAlgorithm;
+    if (selected_mask_hash != selected_hash or
+        salt_length != selected_hash.digestLength() or trailer_field != 1)
+    {
+        return error.UnsupportedSignatureAlgorithm;
+    }
+    return selected_hash.signatureAlgorithm();
+}
+
+fn parseExplicitHashAlgorithm(field: Element) Error!PssHash {
+    var explicit = Reader{ .bytes = field.value };
+    const algorithm = explicit.require(0x30) catch return error.InvalidCrl;
+    if (!explicit.done()) return error.InvalidCrl;
+    return parseHashAlgorithm(algorithm.value);
+}
+
+fn parseExplicitMaskAlgorithm(field: Element) Error!PssHash {
+    var explicit = Reader{ .bytes = field.value };
+    const algorithm = explicit.require(0x30) catch return error.InvalidCrl;
+    if (!explicit.done()) return error.InvalidCrl;
+    var fields = Reader{ .bytes = algorithm.value };
+    const oid = fields.require(0x06) catch return error.InvalidCrl;
+    if (!std.mem.eql(u8, oid.value, &oid_mgf1)) {
+        return error.UnsupportedSignatureAlgorithm;
+    }
+    const parameters = fields.require(0x30) catch return error.InvalidCrl;
+    if (!fields.done()) return error.InvalidCrl;
+    return parseHashAlgorithm(parameters.value);
+}
+
+fn parseHashAlgorithm(encoded: []const u8) Error!PssHash {
+    var fields = Reader{ .bytes = encoded };
+    const oid = fields.require(0x06) catch return error.InvalidCrl;
+    const hash: PssHash = if (std.mem.eql(u8, oid.value, &oid_sha256))
+        .sha256
+    else if (std.mem.eql(u8, oid.value, &oid_sha384))
+        .sha384
+    else if (std.mem.eql(u8, oid.value, &oid_sha512))
+        .sha512
+    else
+        return error.UnsupportedSignatureAlgorithm;
+    if (fields.next() catch return error.InvalidCrl) |parameters| {
+        if (parameters.tag != 0x05 or parameters.value.len != 0 or
+            !fields.done())
+        {
+            return error.InvalidCrl;
+        }
+    }
+    return hash;
+}
+
+fn parseExplicitSmallInteger(field: Element) Error!usize {
+    var explicit = Reader{ .bytes = field.value };
+    const integer = explicit.require(0x02) catch return error.InvalidCrl;
+    if (!explicit.done() or integer.value.len == 0 or
+        (integer.value[0] & 0x80) != 0 or
+        (integer.value.len > 1 and integer.value[0] == 0 and
+            (integer.value[1] & 0x80) == 0) or
+        integer.value.len > @sizeOf(usize))
+    {
+        return error.InvalidCrl;
+    }
+    var result: usize = 0;
+    for (integer.value) |byte| {
+        result = std.math.mul(usize, result, 256) catch
+            return error.InvalidCrl;
+        result = std.math.add(usize, result, byte) catch
+            return error.InvalidCrl;
+    }
+    return result;
 }
 
 fn verifySignature(
@@ -299,33 +464,42 @@ fn verifySignature(
             signature.verify(message, public_key) catch
                 return error.InvalidCrlSignature;
         },
-        .rsa_pkcs1_sha256 => {
-            if (issuer.pub_key_algo != .rsaEncryption) {
-                return error.UnsupportedSignatureAlgorithm;
-            }
-            const parts = Certificate.rsa.PublicKey.parseDer(
-                issuer.pubKey(),
-            ) catch return error.InvalidIssuer;
-            switch (parts.modulus.len) {
-                inline 128, 256, 384, 512 => |modulus_len| {
-                    if (signature_bytes.len != modulus_len) {
-                        return error.InvalidCrlSignature;
-                    }
-                    const public_key = Certificate.rsa.PublicKey.fromBytes(
-                        parts.exponent,
-                        parts.modulus,
-                    ) catch return error.InvalidIssuer;
-                    Certificate.rsa.PKCS1v1_5Signature.verify(
-                        modulus_len,
-                        signature_bytes[0..modulus_len].*,
-                        message,
-                        public_key,
-                        Sha256,
-                    ) catch return error.InvalidCrlSignature;
-                },
-                else => return error.UnsupportedSignatureAlgorithm,
-            }
-        },
+        .rsa_pkcs1_sha256 => try verifyRsaPkcs1(
+            Sha256,
+            issuer,
+            message,
+            signature_bytes,
+        ),
+        .rsa_pkcs1_sha384 => try verifyRsaPkcs1(
+            Sha384,
+            issuer,
+            message,
+            signature_bytes,
+        ),
+        .rsa_pkcs1_sha512 => try verifyRsaPkcs1(
+            Sha512,
+            issuer,
+            message,
+            signature_bytes,
+        ),
+        .rsa_pss_sha256 => try verifyRsaPss(
+            Sha256,
+            issuer,
+            message,
+            signature_bytes,
+        ),
+        .rsa_pss_sha384 => try verifyRsaPss(
+            Sha384,
+            issuer,
+            message,
+            signature_bytes,
+        ),
+        .rsa_pss_sha512 => try verifyRsaPss(
+            Sha512,
+            issuer,
+            message,
+            signature_bytes,
+        ),
         .ed25519 => {
             if (issuer.pub_key_algo != .curveEd25519 or
                 issuer.pubKey().len != Ed25519.PublicKey.encoded_length)
@@ -344,6 +518,77 @@ fn verifySignature(
             signature.verify(message, public_key) catch
                 return error.InvalidCrlSignature;
         },
+    }
+}
+
+fn verifyRsaPkcs1(
+    comptime Hash: type,
+    issuer: Certificate.Parsed,
+    message: []const u8,
+    signature_bytes: []const u8,
+) Error!void {
+    if (issuer.pub_key_algo != .rsaEncryption) {
+        return error.UnsupportedSignatureAlgorithm;
+    }
+    const parts = Certificate.rsa.PublicKey.parseDer(
+        issuer.pubKey(),
+    ) catch return error.InvalidIssuer;
+    switch (parts.modulus.len) {
+        inline 128, 256, 384, 512 => |modulus_len| {
+            if (signature_bytes.len != modulus_len) {
+                return error.InvalidCrlSignature;
+            }
+            const public_key = Certificate.rsa.PublicKey.fromBytes(
+                parts.exponent,
+                parts.modulus,
+            ) catch return error.InvalidIssuer;
+            Certificate.rsa.PKCS1v1_5Signature.verify(
+                modulus_len,
+                signature_bytes[0..modulus_len].*,
+                message,
+                public_key,
+                Hash,
+            ) catch return error.InvalidCrlSignature;
+        },
+        else => return error.UnsupportedSignatureAlgorithm,
+    }
+}
+
+fn verifyRsaPss(
+    comptime Hash: type,
+    issuer: Certificate.Parsed,
+    message: []const u8,
+    signature_bytes: []const u8,
+) Error!void {
+    switch (issuer.pub_key_algo) {
+        .rsaEncryption, .rsassa_pss => {},
+        else => return error.UnsupportedSignatureAlgorithm,
+    }
+    const parts = Certificate.rsa.PublicKey.parseDer(
+        issuer.pubKey(),
+    ) catch return error.InvalidIssuer;
+    switch (parts.modulus.len) {
+        inline 128, 256, 384, 512 => |modulus_len| {
+            if (signature_bytes.len != modulus_len) {
+                return error.InvalidCrlSignature;
+            }
+            const public_key = Certificate.rsa.PublicKey.fromBytes(
+                parts.exponent,
+                parts.modulus,
+            ) catch return error.InvalidIssuer;
+            const signature = Certificate.rsa.PSSSignature.fromBytes(
+                modulus_len,
+                signature_bytes,
+            );
+            Certificate.rsa.PSSSignature.verify(
+                modulus_len,
+                signature,
+                message,
+                public_key,
+                Hash,
+            ) catch return error.InvalidCrlSignature;
+        },
+        else => return error.UnsupportedSignatureAlgorithm,
     }
 }
 
@@ -717,6 +962,62 @@ test "CRL verifies P384 SHA384 fixtures and rejects signature tampering" {
     try std.testing.expectError(
         error.InvalidCrlSignature,
         parseAndVerify(tampered, ca, 1_790_420_000),
+    );
+}
+
+test "CRL verifies OpenSSL RSA PKCS1 SHA-384 and SHA-512 fixtures" {
+    const ca = @embedFile("testdata/rsa-pss-crl-ca.der");
+    const crls = [_][]const u8{
+        @embedFile("testdata/rsa-pkcs1-sha384.crl.der"),
+        @embedFile("testdata/rsa-pkcs1-sha512.crl.der"),
+    };
+    for (crls) |crl_bytes| {
+        const list = try parseAndVerify(crl_bytes, ca, 1_800_000_000);
+        try std.testing.expectEqual(@as(usize, 0), list.revoked_entries.len);
+    }
+}
+
+test "CRL verifies OpenSSL RSA-PSS SHA-256 SHA-384 and SHA-512 fixtures" {
+    const ca = @embedFile("testdata/rsa-pss-crl-ca.der");
+    const crls = [_][]const u8{
+        @embedFile("testdata/rsa-pss-sha256.crl.der"),
+        @embedFile("testdata/rsa-pss-sha384.crl.der"),
+        @embedFile("testdata/rsa-pss-sha512.crl.der"),
+    };
+    for (crls) |crl_bytes| {
+        const list = try parseAndVerify(crl_bytes, ca, 1_800_000_000);
+        try std.testing.expectEqual(@as(usize, 0), list.revoked_entries.len);
+        try std.testing.expectEqual(@as(u64, 1_767_225_600), list.this_update);
+        try std.testing.expectEqual(@as(u64, 2_082_758_400), list.next_update);
+    }
+
+    const tampered = try std.testing.allocator.dupe(u8, crls[2]);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.InvalidCrlSignature,
+        parseAndVerify(tampered, ca, 1_800_000_000),
+    );
+
+    const wrong_salt = try std.testing.allocator.dupe(u8, crls[0]);
+    defer std.testing.allocator.free(wrong_salt);
+    const encoded_salt_length = [_]u8{ 0xa2, 0x03, 0x02, 0x01, 0x20 };
+    var search_from: usize = 0;
+    var replacements: usize = 0;
+    while (std.mem.indexOfPos(
+        u8,
+        wrong_salt,
+        search_from,
+        &encoded_salt_length,
+    )) |offset| {
+        wrong_salt[offset + encoded_salt_length.len - 1] = 31;
+        search_from = offset + encoded_salt_length.len;
+        replacements += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), replacements);
+    try std.testing.expectError(
+        error.UnsupportedSignatureAlgorithm,
+        parseAndVerify(wrong_salt, ca, 1_800_000_000),
     );
 }
 
