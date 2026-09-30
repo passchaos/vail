@@ -4,6 +4,7 @@ const std = @import("std");
 const auth = @import("auth.zig");
 const client_hello = @import("client_hello.zig");
 const key_exchange = @import("key_exchange.zig");
+const record_size_limit = @import("record_size_limit.zig");
 const tls12 = @import("tls12.zig");
 const transcript = @import("transcript.zig");
 
@@ -22,6 +23,7 @@ const ext_status_request: u16 = 0x0005;
 const ext_ec_point_formats: u16 = 0x000b;
 const ext_application_layer_protocol_negotiation: u16 = 0x0010;
 const ext_extended_master_secret: u16 = 0x0017;
+const ext_record_size_limit: u16 = record_size_limit.extension_type;
 const ext_session_ticket: u16 = 0x0023;
 const ext_renegotiation_info: u16 = 0xff01;
 const named_curve_type: u8 = 3;
@@ -69,6 +71,8 @@ pub const Policy = struct {
     /// DER-encoded OCSPResponse stapled only when the client offered the
     /// TLS 1.2 status_request extension.
     ocsp_response: ?[]const u8 = null,
+    /// Limit this endpoint accepts for TLS 1.2 plaintext fragments.
+    record_size_limit: ?u16 = null,
 };
 
 pub const Selection = struct {
@@ -78,6 +82,8 @@ pub const Selection = struct {
     extended_master_secret: bool,
     session_ticket_acknowledged: bool = false,
     status_request_acknowledged: bool = false,
+    local_record_size_limit: ?u16 = null,
+    peer_record_size_limit: ?u16 = null,
 };
 
 pub const ServerFlight = struct {
@@ -94,6 +100,8 @@ pub const ParsedServerHello = struct {
     secure_renegotiation: bool,
     session_ticket_acknowledged: bool,
     status_request_acknowledged: bool,
+    local_record_size_limit: ?u16,
+    peer_record_size_limit: ?u16,
 };
 
 pub const ParsedServerKeyExchange = struct {
@@ -181,6 +189,10 @@ pub fn parseServerHello(
     policy: Policy,
     offered_server_name: bool,
 ) Error!ParsedServerHello {
+    if (policy.record_size_limit) |limit| {
+        _ = record_size_limit.validateTls12(limit) catch
+            return error.InvalidServerHello;
+    }
     var pos: usize = 0;
     if (try readByte(message, &pos) != handshake_type_server_hello or
         try readU24At(message, &pos) != message.len - pos)
@@ -213,6 +225,8 @@ pub fn parseServerHello(
     var seen_renegotiation = false;
     var seen_session_ticket = false;
     var seen_status_request = false;
+    var seen_record_size_limit = false;
+    var peer_record_size_limit: ?u16 = null;
     var selected_alpn: ?[]const u8 = null;
     while (ext_pos < extensions.len) {
         const extension_type = try readInt(u16, extensions, &ext_pos);
@@ -271,6 +285,20 @@ pub fn parseServerHello(
                 seen_status_request = true;
                 if (payload.len != 0) return error.InvalidServerHello;
             },
+            ext_record_size_limit => {
+                if (seen_record_size_limit) {
+                    return error.DuplicateServerExtension;
+                }
+                seen_record_size_limit = true;
+                if (policy.record_size_limit == null) {
+                    return error.InvalidServerHello;
+                }
+                peer_record_size_limit = record_size_limit.parse(payload) catch
+                    return error.InvalidServerHello;
+                _ = record_size_limit.validateTls12(
+                    peer_record_size_limit.?,
+                ) catch return error.InvalidServerHello;
+            },
             else => return error.UnsupportedServerExtension,
         }
     }
@@ -289,6 +317,8 @@ pub fn parseServerHello(
         .secure_renegotiation = seen_renegotiation,
         .session_ticket_acknowledged = seen_session_ticket,
         .status_request_acknowledged = seen_status_request,
+        .local_record_size_limit = policy.record_size_limit,
+        .peer_record_size_limit = peer_record_size_limit,
     };
 }
 
@@ -431,6 +461,10 @@ pub fn select(
     signer: auth.Signer,
     policy: Policy,
 ) Error!Selection {
+    if (policy.record_size_limit) |limit| {
+        _ = record_size_limit.validateTls12(limit) catch
+            return error.InvalidClientHello;
+    }
     if (policy.ocsp_response) |response| {
         if (response.len == 0 or response.len > std.math.maxInt(u24)) {
             return error.InvalidCertificateStatus;
@@ -478,6 +512,11 @@ pub fn select(
             client.offers_extended_master_secret,
         .status_request_acknowledged = client.requests_ocsp and
             policy.ocsp_response != null,
+        .local_record_size_limit = if (client.record_size_limit != null)
+            policy.record_size_limit
+        else
+            null,
+        .peer_record_size_limit = client.record_size_limit,
     };
 }
 
@@ -628,6 +667,16 @@ fn writeServerHello(
             &.{},
         );
     }
+    if (selection.local_record_size_limit) |limit| {
+        const payload = record_size_limit.encode(limit) catch
+            return error.InvalidServerHello;
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_record_size_limit,
+            &payload,
+        );
+    }
     if (client.offers_secure_renegotiation or
         client.hasCipherSuite(0x00ff))
     {
@@ -698,6 +747,10 @@ pub fn writeResumedServerHello(
     server_random: [32]u8,
     session: *const tls12.Session,
 ) Error!Selection {
+    if (policy.record_size_limit) |limit| {
+        _ = record_size_limit.validateTls12(limit) catch
+            return error.InvalidClientHello;
+    }
     if (!std.mem.eql(u8, client.session_id, session.id()) or
         !client.hasCipherSuite(@intFromEnum(session.suite)) or
         !client.offers_extended_master_secret or
@@ -726,6 +779,11 @@ pub fn writeResumedServerHello(
             client.session_ticket != null and
             client.offers_extended_master_secret,
         .status_request_acknowledged = false,
+        .local_record_size_limit = if (client.record_size_limit != null)
+            policy.record_size_limit
+        else
+            null,
+        .peer_record_size_limit = client.record_size_limit,
     };
     try writeServerHello(
         out,
@@ -1214,6 +1272,7 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
         .supported_versions = &.{0x0303},
         .offer_extended_master_secret = true,
         .request_ocsp = true,
+        .record_size_limit = 512,
     });
     const parsed = try client_hello.parse(hello.items);
     var flight: std.ArrayList(u8) = .empty;
@@ -1225,7 +1284,10 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
         allocator,
         hello.items,
         parsed,
-        .{ .ocsp_response = "test-ocsp-response" },
+        .{
+            .ocsp_response = "test-ocsp-response",
+            .record_size_limit = 256,
+        },
         [_]u8{0x33} ** 32,
         &server_public,
         &.{&certificate},
@@ -1237,6 +1299,14 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
     );
     try std.testing.expect(result.selection.extended_master_secret);
     try std.testing.expect(result.selection.status_request_acknowledged);
+    try std.testing.expectEqual(
+        @as(?u16, 256),
+        result.selection.local_record_size_limit,
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 512),
+        result.selection.peer_record_size_limit,
+    );
     try std.testing.expectEqual(
         result.transcript_state.digest(),
         transcript.hashFor(.sha256, &.{ hello.items, flight.items }),
@@ -1250,12 +1320,19 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
     const messages = try splitServerFlight(flight.items);
     const parsed_server = try parseServerHello(
         messages.server_hello,
-        .{ .require_secure_renegotiation = false },
+        .{
+            .require_secure_renegotiation = false,
+            .record_size_limit = 512,
+        },
         true,
     );
     try std.testing.expectError(
         error.MissingSecureRenegotiation,
-        parseServerHello(messages.server_hello, .{}, true),
+        parseServerHello(
+            messages.server_hello,
+            .{ .record_size_limit = 512 },
+            true,
+        ),
     );
     try std.testing.expectEqual(
         tls12.Suite.ecdhe_rsa_aes_128_gcm_sha256,
@@ -1263,6 +1340,14 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
     );
     try std.testing.expect(parsed_server.extended_master_secret);
     try std.testing.expect(parsed_server.status_request_acknowledged);
+    try std.testing.expectEqual(
+        @as(?u16, 512),
+        parsed_server.local_record_size_limit,
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 256),
+        parsed_server.peer_record_size_limit,
+    );
     try std.testing.expectEqualStrings(
         "test-ocsp-response",
         try parseCertificateStatus(messages.certificate_status.?),

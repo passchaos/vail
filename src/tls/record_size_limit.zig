@@ -18,6 +18,12 @@ pub fn validate(value: u16) Error!u16 {
     return value;
 }
 
+pub fn validateTls12(value: u16) Error!u16 {
+    const valid = try validate(value);
+    if (valid > 1 << 14) return error.InvalidRecordSizeLimit;
+    return valid;
+}
+
 pub fn parse(payload: []const u8) Error!u16 {
     if (payload.len != 2) return error.InvalidRecordSizeLimit;
     return validate(std.mem.readInt(u16, payload[0..2], .big));
@@ -49,5 +55,10 @@ test "RFC 8449 record size limit validates exact wire bounds" {
     try std.testing.expectError(
         error.InvalidRecordSizeLimit,
         parse(&.{ 0x40, 0x02 }),
+    );
+    try std.testing.expectEqual(@as(u16, 1 << 14), try validateTls12(1 << 14));
+    try std.testing.expectError(
+        error.InvalidRecordSizeLimit,
+        validateTls12(max),
     );
 }
