@@ -90,6 +90,11 @@ pub fn ClientConnection(
             {
                 return error.InvalidUnifiedClientHello;
             }
+            if (config.tls13.record_size_limit !=
+                config.tls12.policy.record_size_limit)
+            {
+                return error.InvalidUnifiedClientHello;
+            }
             const output_start = output.items.len;
             errdefer output.shrinkRetainingCapacity(output_start);
             var tls13_config = config.tls13;
@@ -336,6 +341,7 @@ test "versioned ClientHello carries a TLS 1.2 session ticket" {
             .additional_cipher_suites = &.{ 0xc02f, 0x00ff },
             .supported_versions = &.{ 0x0304, 0x0303 },
             .offer_extended_master_secret = true,
+            .record_size_limit = 1024,
             .alpn_protocols = &.{"h2"},
             .server_verifier = .{},
         },
@@ -344,7 +350,10 @@ test "versioned ClientHello carries a TLS 1.2 session ticket" {
             .random = [_]u8{0x63} ** 32,
             .server_name = "example.com",
             .client_private_key = &tls12_key,
-            .policy = .{ .alpn_protocols = &.{"h2"} },
+            .policy = .{
+                .alpn_protocols = &.{"h2"},
+                .record_size_limit = 1024,
+            },
             .server_verifier = .{},
             .ticket_resumption = &cached,
             .now_seconds = 101,
@@ -362,4 +371,5 @@ test "versioned ClientHello carries a TLS 1.2 session ticket" {
         &client12.deriveTicketSessionId([_]u8{0x63} ** 32),
         hello.session_id,
     );
+    try std.testing.expectEqual(@as(?u16, 1024), hello.record_size_limit);
 }

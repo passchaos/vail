@@ -461,6 +461,10 @@ pub fn select(
     signer: auth.Signer,
     policy: Policy,
 ) Error!Selection {
+    if (client.record_size_limit) |limit| {
+        _ = record_size_limit.validateTls12(limit) catch
+            return error.InvalidClientHello;
+    }
     if (policy.record_size_limit) |limit| {
         _ = record_size_limit.validateTls12(limit) catch
             return error.InvalidClientHello;
@@ -747,6 +751,10 @@ pub fn writeResumedServerHello(
     server_random: [32]u8,
     session: *const tls12.Session,
 ) Error!Selection {
+    if (client.record_size_limit) |limit| {
+        _ = record_size_limit.validateTls12(limit) catch
+            return error.InvalidClientHello;
+    }
     if (policy.record_size_limit) |limit| {
         _ = record_size_limit.validateTls12(limit) catch
             return error.InvalidClientHello;

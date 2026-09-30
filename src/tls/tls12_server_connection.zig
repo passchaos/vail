@@ -157,6 +157,8 @@ pub const Established = struct {
     session_id_len: u8,
     alpn_storage: [tls12.max_session_alpn_len]u8,
     alpn_len: u8,
+    local_record_size_limit: ?u16,
+    peer_record_size_limit: ?u16,
     records: stream.RecordDeframer = .{},
     plaintext: [tls12.max_plaintext_len]u8 = undefined,
     local_closed: bool = false,
@@ -363,6 +365,15 @@ pub fn ServerConnection(
                 .consumed = framed_result.consumed,
                 .event = null,
             };
+            if (self.stage != .client_finished) {
+                if (self.pending) |*pending| {
+                    if (pending.selection.local_record_size_limit) |limit| {
+                        if (framed.fragment.len > limit) {
+                            return error.RecordSizeLimitExceeded;
+                        }
+                    }
+                }
+            }
             return switch (self.stage) {
                 .client_hello => self.receiveClientHello(
                     framed_result.consumed,
@@ -501,6 +512,8 @@ pub fn ServerConnection(
                 self.config.allocator,
                 22,
                 flight.items,
+                result.selection.peer_record_size_limit orelse
+                    tls12.max_plaintext_len,
             );
             var transcript_bytes: std.ArrayList(u8) = .empty;
             errdefer transcript_bytes.deinit(self.config.allocator);
@@ -609,9 +622,15 @@ pub fn ServerConnection(
                 self.config.server_random,
             );
             errdefer keys.deinit();
-            var server_traffic = tls12.TrafficState.init(keys.server);
+            var server_traffic = try tls12.TrafficState.initWithPlaintextLimit(
+                keys.server,
+                selection.peer_record_size_limit,
+            );
             errdefer server_traffic.deinit();
-            var client_traffic = tls12.TrafficState.init(keys.client);
+            var client_traffic = try tls12.TrafficState.initWithPlaintextLimit(
+                keys.client,
+                selection.local_record_size_limit,
+            );
             errdefer client_traffic.deinit();
             var new_session_ticket: std.ArrayList(u8) = .empty;
             defer new_session_ticket.deinit(self.config.allocator);
@@ -660,18 +679,22 @@ pub fn ServerConnection(
 
             const output_start = output.items.len;
             errdefer output.items.len = output_start;
-            try appendPlaintextRecord(
+            try appendPlaintextRecords(
                 output,
                 self.config.allocator,
                 22,
                 server_hello.items,
+                selection.peer_record_size_limit orelse
+                    tls12.max_plaintext_len,
             );
             if (new_session_ticket.items.len != 0) {
-                try appendPlaintextRecord(
+                try appendPlaintextRecords(
                     output,
                     self.config.allocator,
                     22,
                     new_session_ticket.items,
+                    selection.peer_record_size_limit orelse
+                        tls12.max_plaintext_len,
                 );
             }
             try appendPlaintextRecord(
@@ -823,8 +846,14 @@ pub fn ServerConnection(
             );
             errdefer keys.deinit();
             pending.master_secret = master_secret;
-            pending.client_traffic = tls12.TrafficState.init(keys.client);
-            pending.server_traffic = tls12.TrafficState.init(keys.server);
+            pending.client_traffic = try tls12.TrafficState.initWithPlaintextLimit(
+                keys.client,
+                pending.selection.local_record_size_limit,
+            );
+            pending.server_traffic = try tls12.TrafficState.initWithPlaintextLimit(
+                keys.server,
+                pending.selection.peer_record_size_limit,
+            );
             self.messages.reset();
             self.stage = if (pending.peer_certificate_chain != null)
                 .client_certificate_verify
@@ -951,11 +980,13 @@ pub fn ServerConnection(
             const output_start = output.items.len;
             errdefer output.items.len = output_start;
             if (new_session_ticket.items.len != 0) {
-                try appendPlaintextRecord(
+                try appendPlaintextRecords(
                     output,
                     self.config.allocator,
                     22,
                     new_session_ticket.items,
+                    pending.selection.peer_record_size_limit orelse
+                        tls12.max_plaintext_len,
                 );
             }
             try appendPlaintextRecord(
@@ -1026,6 +1057,8 @@ pub fn ServerConnection(
                 .session_id_len = pending.session_id_len,
                 .alpn_storage = copyAlpn(selected_alpn),
                 .alpn_len = @intCast(selected_alpn.len),
+                .local_record_size_limit = pending.selection.local_record_size_limit,
+                .peer_record_size_limit = pending.selection.peer_record_size_limit,
             };
             pending.client_traffic = null;
             pending.server_traffic = null;
@@ -1072,10 +1105,12 @@ fn appendPlaintextRecords(
     allocator: std.mem.Allocator,
     content_type: u8,
     payload: []const u8,
+    max_fragment_plaintext: usize,
 ) std.mem.Allocator.Error!void {
+    std.debug.assert(max_fragment_plaintext != 0);
     var offset: usize = 0;
     while (offset < payload.len) {
-        const len = @min(record13.max_plaintext_len, payload.len - offset);
+        const len = @min(max_fragment_plaintext, payload.len - offset);
         try appendPlaintextRecord(
             output,
             allocator,

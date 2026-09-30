@@ -47,7 +47,9 @@ pub fn closeNotify() Alert {
 pub fn fatalForError(err: anyerror) Alert {
     const description: Description = switch (err) {
         error.AuthenticationFailed => .bad_record_mac,
-        error.RecordTooLarge => .record_overflow,
+        error.RecordTooLarge,
+        error.RecordSizeLimitExceeded,
+        => .record_overflow,
         error.NoTls13,
         error.InvalidLegacyVersion,
         => .protocol_version,

@@ -8,6 +8,7 @@ const std = @import("std");
 const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
 const prepared_chacha = @import("../crypto/chacha20_poly1305.zig");
 const record_fragment = @import("record_fragment.zig");
+const record_size_limit = @import("record_size_limit.zig");
 const tls_secret = @import("secret.zig");
 const traffic_secrets = @import("traffic_secrets.zig");
 
@@ -48,6 +49,8 @@ pub const Error = error{
     InvalidSessionLifetime,
     SessionExpired,
     SessionContextMismatch,
+    InvalidRecordSizeLimit,
+    RecordSizeLimitExceeded,
 };
 
 pub const max_session_id_len: usize = 32;
@@ -580,28 +583,14 @@ pub const Keys = struct {
         encoded: []const u8,
         plaintext: []u8,
     ) Error!Opened {
-        if (encoded.len < header_len or
-            !validContentType(encoded[0]) or
-            !std.mem.eql(u8, encoded[1..3], &record_version))
-        {
-            return error.InvalidRecord;
-        }
-        const fragment_len = std.mem.readInt(u16, encoded[3..5], .big);
-        if (fragment_len != encoded.len - header_len) {
-            return error.InvalidRecord;
+        const ciphertext_len = try self.plaintextLength(encoded);
+        if (plaintext.len < ciphertext_len) {
+            return error.InvalidPlaintextLength;
         }
         const explicit_len = if (self.suite.usesExplicitNonce())
             explicit_nonce_len
         else
             0;
-        if (fragment_len < explicit_len + tag_len) {
-            return error.InvalidRecord;
-        }
-        const ciphertext_len = fragment_len - explicit_len - tag_len;
-        if (ciphertext_len > max_plaintext_len) return error.InvalidRecord;
-        if (plaintext.len < ciphertext_len) {
-            return error.InvalidPlaintextLength;
-        }
         const ciphertext = encoded[header_len + explicit_len ..][0..ciphertext_len];
         const tag = encoded[header_len + explicit_len + ciphertext_len ..][0..tag_len].*;
         const additional_data = recordAdditionalData(
@@ -639,6 +628,29 @@ pub const Keys = struct {
         }
         return .{ .content_type = encoded[0], .len = ciphertext_len };
     }
+
+    fn plaintextLength(self: *const Keys, encoded: []const u8) Error!usize {
+        if (encoded.len < header_len or
+            !validContentType(encoded[0]) or
+            !std.mem.eql(u8, encoded[1..3], &record_version))
+        {
+            return error.InvalidRecord;
+        }
+        const fragment_len = std.mem.readInt(u16, encoded[3..5], .big);
+        if (fragment_len != encoded.len - header_len) {
+            return error.InvalidRecord;
+        }
+        const explicit_len = if (self.suite.usesExplicitNonce())
+            explicit_nonce_len
+        else
+            0;
+        if (fragment_len < explicit_len + tag_len) {
+            return error.InvalidRecord;
+        }
+        const ciphertext_len = fragment_len - explicit_len - tag_len;
+        if (ciphertext_len > max_plaintext_len) return error.InvalidRecord;
+        return ciphertext_len;
+    }
 };
 
 pub const Opened = struct {
@@ -650,9 +662,21 @@ pub const TrafficState = struct {
     keys: Keys,
     next_sequence_number: u64 = 0,
     exhausted: bool = false,
+    plaintext_limit: ?u16 = null,
 
     pub fn init(keys: Keys) TrafficState {
         return .{ .keys = keys };
+    }
+
+    pub fn initWithPlaintextLimit(
+        keys: Keys,
+        limit: ?u16,
+    ) Error!TrafficState {
+        if (limit) |value| {
+            _ = record_size_limit.validateTls12(value) catch
+                return error.InvalidRecordSizeLimit;
+        }
+        return .{ .keys = keys, .plaintext_limit = limit };
     }
 
     pub fn deinit(self: *TrafficState) void {
@@ -698,6 +722,9 @@ pub const TrafficState = struct {
         plaintext: []const u8,
         output: []u8,
     ) Error!usize {
+        if (self.plaintext_limit) |limit| {
+            if (plaintext.len > limit) return error.RecordSizeLimitExceeded;
+        }
         const sequence = try self.currentSequence(true);
         const len = try self.keys.seal(
             sequence,
@@ -718,9 +745,13 @@ pub const TrafficState = struct {
         max_fragment_plaintext: usize,
         output: []u8,
     ) Error!SealFragmentResult {
+        const effective_limit = if (self.plaintext_limit) |limit|
+            @min(max_fragment_plaintext, @as(usize, limit))
+        else
+            max_fragment_plaintext;
         const fragment = try record_fragment.selectPlaintext(
             plaintext,
-            max_fragment_plaintext,
+            effective_limit,
             max_plaintext_len,
         );
         const written = try self.seal(content_type, fragment, output);
@@ -735,6 +766,11 @@ pub const TrafficState = struct {
         encoded: []const u8,
         plaintext: []u8,
     ) Error!Opened {
+        if (self.plaintext_limit) |limit| {
+            if (try self.keys.plaintextLength(encoded) > limit) {
+                return error.RecordSizeLimitExceeded;
+            }
+        }
         const sequence = try self.currentSequence(false);
         const result = try self.keys.open(sequence, encoded, plaintext);
         self.advance();
@@ -1054,6 +1090,57 @@ test "TLS 1.2 traffic state seals bounded fragments without losing sequence" {
     try std.testing.expectEqual(payload.len, offset);
     try std.testing.expectEqual(@as(?u64, record_count), sender.sequenceNumber());
     try std.testing.expectEqual(@as(?u64, record_count), receiver.sequenceNumber());
+}
+
+test "TLS 1.2 traffic state enforces record size limit before nonce use" {
+    const suite = Suite.ecdhe_rsa_aes_128_gcm_sha256;
+    var limited_sender = try TrafficState.initWithPlaintextLimit(
+        try Keys.init(suite, &([_]u8{0xb1} ** 16), &([_]u8{0xb2} ** 4)),
+        64,
+    );
+    defer limited_sender.deinit();
+    var unbounded_sender = TrafficState.init(try Keys.init(
+        suite,
+        &([_]u8{0xb1} ** 16),
+        &([_]u8{0xb2} ** 4),
+    ));
+    defer unbounded_sender.deinit();
+    var limited_receiver = try TrafficState.initWithPlaintextLimit(
+        try Keys.init(suite, &([_]u8{0xb1} ** 16), &([_]u8{0xb2} ** 4)),
+        64,
+    );
+    defer limited_receiver.deinit();
+
+    const oversized = [_]u8{0x42} ** 65;
+    var encoded: [max_record_len]u8 = undefined;
+    try std.testing.expectError(
+        error.RecordSizeLimitExceeded,
+        limited_sender.seal(23, &oversized, &encoded),
+    );
+    try std.testing.expectEqual(@as(?u64, 0), limited_sender.sequenceNumber());
+
+    const fragment = try limited_sender.sealFragment(
+        23,
+        &oversized,
+        oversized.len,
+        &encoded,
+    );
+    try std.testing.expectEqual(@as(usize, 64), fragment.plaintext_consumed);
+
+    const encoded_len = try unbounded_sender.seal(23, &oversized, &encoded);
+    var plaintext: [max_plaintext_len]u8 = undefined;
+    try std.testing.expectError(
+        error.RecordSizeLimitExceeded,
+        limited_receiver.open(encoded[0..encoded_len], &plaintext),
+    );
+    try std.testing.expectEqual(@as(?u64, 0), limited_receiver.sequenceNumber());
+    try std.testing.expectError(
+        error.InvalidRecordSizeLimit,
+        TrafficState.initWithPlaintextLimit(
+            try Keys.init(suite, &([_]u8{0xb1} ** 16), &([_]u8{0xb2} ** 4)),
+            record_size_limit.max,
+        ),
+    );
 }
 
 test "TLS 1.2 traffic states extract directional keys and nonce bases" {

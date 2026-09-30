@@ -17,6 +17,7 @@ const client_hello = @import("client_hello.zig");
 const key_exchange = @import("key_exchange.zig");
 const key_log = @import("key_log.zig");
 const record13 = @import("record.zig");
+const record_size_limit = @import("record_size_limit.zig");
 const stream = @import("stream.zig");
 const tls12 = @import("tls12.zig");
 const tls12_ticket = @import("tls12_ticket.zig");
@@ -120,6 +121,8 @@ const Pending = struct {
     new_session_ticket: ?[]u8 = null,
     new_session_ticket_lifetime_hint_seconds: u32 = 0,
     resumed: bool = false,
+    local_record_size_limit: ?u16 = null,
+    peer_record_size_limit: ?u16 = null,
 
     fn deinit(self: *Pending) void {
         if (self.client_private_key) |*private_key| {
@@ -167,6 +170,8 @@ pub const Established = struct {
     /// a resumed server elects not to renew it.
     session_ticket: ?[]u8 = null,
     session_ticket_lifetime_hint_seconds: u32 = 0,
+    local_record_size_limit: ?u16,
+    peer_record_size_limit: ?u16,
     records: stream.RecordDeframer = .{},
     plaintext: [tls12.max_plaintext_len]u8 = undefined,
     local_closed: bool = false,
@@ -474,6 +479,7 @@ pub fn ClientConnection(
                 .alpn_protocols = config.policy.alpn_protocols,
                 .request_ocsp = config.request_ocsp,
                 .offer_extended_master_secret = true,
+                .record_size_limit = config.policy.record_size_limit,
                 .certificate_compression_algorithms = config.certificate_compression_algorithms,
                 .session_ticket = if (ticket_resumption) |*cached|
                     cached.ticket()
@@ -535,7 +541,8 @@ pub fn ClientConnection(
             if (!std.mem.eql(u8, parsed.random, &config.random) or
                 !parsed.supportsVersion(0x0303) or
                 !parsed.offers_extended_master_secret or
-                !parsed.offers_secure_renegotiation)
+                !parsed.offers_secure_renegotiation or
+                parsed.record_size_limit != config.policy.record_size_limit)
             {
                 return error.UnsupportedProfile;
             }
@@ -683,6 +690,13 @@ pub fn ClientConnection(
                 .consumed = framed_result.consumed,
                 .event = null,
             };
+            if (self.stage != .server_finished) {
+                if (self.policy.record_size_limit) |limit| {
+                    if (framed.fragment.len > limit) {
+                        return error.RecordSizeLimitExceeded;
+                    }
+                }
+            }
             return switch (self.stage) {
                 .server_flight => self.receiveServerFlight(
                     framed_result.consumed,
@@ -918,12 +932,14 @@ pub fn ClientConnection(
                     );
                 }
                 state.update(client_messages.items[certificate_start..]);
-                try appendPlaintextRecords(
+                try appendPlaintextRecordsLimited(
                     &client_records,
                     self.allocator,
                     22,
                     0x0303,
                     client_messages.items[certificate_start..],
+                    server_hello.peer_record_size_limit orelse
+                        tls12.max_plaintext_len,
                 );
             }
 
@@ -934,12 +950,14 @@ pub fn ClientConnection(
                 client_public,
             );
             state.update(client_messages.items[client_key_exchange_start..]);
-            try appendPlaintextRecords(
+            try appendPlaintextRecordsLimited(
                 &client_records,
                 self.allocator,
                 22,
                 0x0303,
                 client_messages.items[client_key_exchange_start..],
+                server_hello.peer_record_size_limit orelse
+                    tls12.max_plaintext_len,
             );
             const extended_master_session_hash = state.digest();
 
@@ -966,12 +984,14 @@ pub fn ClientConnection(
                     signed_transcript.items,
                 );
                 state.update(client_messages.items[verify_start..]);
-                try appendPlaintextRecords(
+                try appendPlaintextRecordsLimited(
                     &client_records,
                     self.allocator,
                     22,
                     0x0303,
                     client_messages.items[verify_start..],
+                    server_hello.peer_record_size_limit orelse
+                        tls12.max_plaintext_len,
                 );
             }
 
@@ -996,9 +1016,15 @@ pub fn ClientConnection(
                 server_hello.random,
             );
             defer keys.deinit();
-            var client_traffic = tls12.TrafficState.init(keys.client);
+            var client_traffic = try tls12.TrafficState.initWithPlaintextLimit(
+                keys.client,
+                server_hello.peer_record_size_limit,
+            );
             errdefer client_traffic.deinit();
-            var server_traffic = tls12.TrafficState.init(keys.server);
+            var server_traffic = try tls12.TrafficState.initWithPlaintextLimit(
+                keys.server,
+                server_hello.local_record_size_limit,
+            );
             errdefer server_traffic.deinit();
 
             const client_verify = try tls12.finishedVerifyData(
@@ -1060,6 +1086,8 @@ pub fn ClientConnection(
             pending.server_traffic = server_traffic;
             pending.peer_certificate_chain = peer_chain;
             pending.selected_alpn = selected_alpn;
+            pending.local_record_size_limit = server_hello.local_record_size_limit;
+            pending.peer_record_size_limit = server_hello.peer_record_size_limit;
             // Local copies are wiped while the pending state retains its own.
             client_traffic.deinit();
             server_traffic.deinit();
@@ -1148,10 +1176,18 @@ pub fn ClientConnection(
             pending.server_random = server_hello.random;
             pending.transcript_state = state;
             pending.master_secret = session.master_secret;
-            pending.client_traffic = tls12.TrafficState.init(keys.client);
-            pending.server_traffic = tls12.TrafficState.init(keys.server);
+            pending.client_traffic = try tls12.TrafficState.initWithPlaintextLimit(
+                keys.client,
+                server_hello.peer_record_size_limit,
+            );
+            pending.server_traffic = try tls12.TrafficState.initWithPlaintextLimit(
+                keys.server,
+                server_hello.local_record_size_limit,
+            );
             pending.peer_certificate_chain = empty_chain;
             pending.selected_alpn = selected_alpn;
+            pending.local_record_size_limit = server_hello.local_record_size_limit;
+            pending.peer_record_size_limit = server_hello.peer_record_size_limit;
             pending.negotiated_session_id = copySessionId(
                 server_hello.session_id,
             );
@@ -1352,6 +1388,8 @@ pub fn ClientConnection(
                 .session_id_len = pending.negotiated_session_id_len,
                 .session_ticket = pending.new_session_ticket,
                 .session_ticket_lifetime_hint_seconds = pending.new_session_ticket_lifetime_hint_seconds,
+                .local_record_size_limit = pending.local_record_size_limit,
+                .peer_record_size_limit = pending.peer_record_size_limit,
             };
             pending.server_traffic = null;
             pending.client_traffic = null;
@@ -1387,6 +1425,10 @@ fn validatePolicy(policy: handshake.Policy) Error!void {
         {
             return error.UnsupportedProfile;
         }
+    }
+    if (policy.record_size_limit) |limit| {
+        _ = record_size_limit.validateTls12(limit) catch
+            return error.UnsupportedProfile;
     }
 }
 
@@ -1495,9 +1537,28 @@ fn appendPlaintextRecords(
     legacy_version: u16,
     payload: []const u8,
 ) std.mem.Allocator.Error!void {
+    return appendPlaintextRecordsLimited(
+        output,
+        allocator,
+        content_type,
+        legacy_version,
+        payload,
+        record13.max_plaintext_len,
+    );
+}
+
+fn appendPlaintextRecordsLimited(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    content_type: u8,
+    legacy_version: u16,
+    payload: []const u8,
+    max_fragment_plaintext: usize,
+) std.mem.Allocator.Error!void {
+    std.debug.assert(max_fragment_plaintext != 0);
     var offset: usize = 0;
     while (offset < payload.len) {
-        const len = @min(record13.max_plaintext_len, payload.len - offset);
+        const len = @min(max_fragment_plaintext, payload.len - offset);
         try appendPlaintextRecord(
             output,
             allocator,
@@ -1563,6 +1624,7 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
         .alpn_protocols = &.{"h2"},
         .new_session_id = &session_id,
         .ocsp_response = "tls12-test-ocsp",
+        .record_size_limit = 256,
     };
     var client_wire: std.ArrayList(u8) = .empty;
     defer client_wire.deinit(allocator);
@@ -1690,6 +1752,22 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
     );
     try std.testing.expectEqual(@as(usize, 1), established_client.?.peer_certificate_chain.len);
     try std.testing.expect(established_client.?.session_ticket != null);
+    try std.testing.expectEqual(
+        @as(?u16, 256),
+        established_client.?.local_record_size_limit,
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 256),
+        established_client.?.peer_record_size_limit,
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 256),
+        established_server.?.local_record_size_limit,
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 256),
+        established_server.?.peer_record_size_limit,
+    );
 
     var client_ticket = try established_client.?.createTicketSession(
         "localhost",
@@ -1758,6 +1836,32 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
         client_fragment_received.event.?.application_data,
     );
 
+    var oversized_record: [512]u8 = undefined;
+    try std.testing.expectError(
+        error.RecordSizeLimitExceeded,
+        established_client.?.sealApplicationData(
+            &([_]u8{0xaa} ** 257),
+            &oversized_record,
+        ),
+    );
+    const limited_fragment = try established_client.?
+        .sealApplicationDataFragment(
+        &([_]u8{0xbb} ** 257),
+        257,
+        &oversized_record,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 256),
+        limited_fragment.plaintext_consumed,
+    );
+    const limited_received = try established_server.?.receive(
+        oversized_record[0..limited_fragment.output_written],
+    );
+    try std.testing.expectEqual(
+        @as(usize, 256),
+        limited_received.event.?.application_data.len,
+    );
+
     var client_session = try established_client.?.createSession(
         "localhost",
         100,
@@ -1783,10 +1887,10 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
     try std.testing.expectEqual(traffic_secrets.Version.tls12, client_secrets.version);
     // Sequence zero protected each side's Finished before these two
     // application records, so the next record uses sequence three.
-    try std.testing.expectEqual(@as(u64, 3), client_secrets.tx.sequence_number);
+    try std.testing.expectEqual(@as(u64, 4), client_secrets.tx.sequence_number);
     try std.testing.expectEqual(@as(u64, 3), client_secrets.rx.sequence_number);
     try std.testing.expectEqual(@as(u64, 3), server_secrets.tx.sequence_number);
-    try std.testing.expectEqual(@as(u64, 3), server_secrets.rx.sequence_number);
+    try std.testing.expectEqual(@as(u64, 4), server_secrets.rx.sequence_number);
     try std.testing.expectEqualSlices(
         u8,
         client_secrets.tx.key(),
