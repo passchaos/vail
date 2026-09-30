@@ -72,7 +72,11 @@ pub const Options = struct {
 pub const ClientAuthOptions = struct {
     request_context: []const u8 = &.{},
     certificate_authorities: []const []const u8 = &.{},
-    certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{ .zlib, .brotli },
+    certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{
+        .zlib,
+        .brotli,
+        .zstd,
+    },
     max_decompressed_certificate_len: usize = 64 * 1024,
 };
 

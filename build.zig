@@ -152,7 +152,7 @@ pub fn build(b: *std.Build) void {
     );
     const certificate_compression_bench_step = b.step(
         "bench-certificate-compression",
-        "Benchmark RFC 8879 zlib certificate compression",
+        "Benchmark RFC 8879 zlib, Brotli, and Zstandard certificate compression",
     );
     certificate_compression_bench_step.dependOn(
         &run_certificate_compression_bench.step,
@@ -373,6 +373,26 @@ pub fn build(b: *std.Build) void {
     );
     interop_rustls_brotli_step.dependOn(&check_rustls_brotli.step);
 
+    const check_rustls_zstd = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_zstd.step.dependOn(&build_rustls_min.step);
+    check_rustls_zstd.addArg(
+        "$1 zstd > /tmp/vail-zstd-rustls-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 4s bench/rustls_min_client/target/release/vail-rustls-min-client zstd > /tmp/vail-zstd-rustls-client.log 2>&1 || true; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'client finished verified' /tmp/vail-zstd-rustls-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'client finished verified' /tmp/vail-zstd-rustls-server.log && " ++
+            "grep -q 'certificate compression=zstd' /tmp/vail-zstd-rustls-server.log && " ++
+            "grep -q 'rustls connected' /tmp/vail-zstd-rustls-client.log",
+    );
+    check_rustls_zstd.addArg("sh");
+    check_rustls_zstd.addArtifactArg(min_tls13_server);
+    const interop_rustls_zstd_step = b.step(
+        "interop-rustls-zstd-server",
+        "Exercise Vort Zstandard certificates with a rustls client",
+    );
+    interop_rustls_zstd_step.dependOn(&check_rustls_zstd.step);
+
     const check_rustls_ech = b.addSystemCommand(&.{ "sh", "-c" });
     check_rustls_ech.step.dependOn(&build_rustls_min.step);
     check_rustls_ech.addArg(
@@ -589,6 +609,30 @@ pub fn build(b: *std.Build) void {
     );
     interop_vail_rustls_server_step.dependOn(
         &check_vail_rustls_server.step,
+    );
+
+    const check_vail_rustls_zstd_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_rustls_zstd_server.step.dependOn(&build_rustls_server.step);
+    check_vail_rustls_zstd_server.addArg(
+        "work=$(mktemp -d /tmp/vail-rustls-zstd-server.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "bench/rustls_min_server/target/release/vail-rustls-min-server \"$work/cert.pem\" \"$work/key.pem\" zstd >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 4s $1 zstd >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'rustls server completed' \"$work/server.log\" && " ++
+            "grep -q 'server authenticated and finished verified' \"$work/client.log\" && " ++
+            "grep -q 'certificate compression=zstd' \"$work/client.log\" && " ++
+            "grep -q 'server application data verified' \"$work/client.log\"",
+    );
+    check_vail_rustls_zstd_server.addArg("sh");
+    check_vail_rustls_zstd_server.addArtifactArg(min_tls13_client);
+    const interop_vail_rustls_zstd_server_step = b.step(
+        "interop-rustls-zstd-client",
+        "Exercise Vail's Zstandard certificate client against rustls",
+    );
+    interop_vail_rustls_zstd_server_step.dependOn(
+        &check_vail_rustls_zstd_server.step,
     );
 
     const min_quic_tls_client = b.addExecutable(.{

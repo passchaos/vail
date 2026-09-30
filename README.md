@@ -58,12 +58,11 @@ The current foundation provides:
   decoding without an external PKI or crypto library;
 - CertificateRequest codec and mTLS policy types;
 - RFC 8879 TLS 1.3 certificate compression in both directions using Zig std's
-  zlib implementation and Vort's pure-Zig Brotli codec, with reusable
-  server/client precompression, transcript-correct CompressedCertificate
-  processing, exact decompressed lengths, zlib checksum verification, and
-  configurable decompression limits. Zlib remains first in the default offer
-  because it is faster on the current certificate benchmark; Zstd remains
-  disabled until Vort's documented format-subset gap is closed;
+  zlib implementation and Vort's pure-Zig Brotli and Zstandard codecs, with
+  reusable server/client precompression, transcript-correct
+  CompressedCertificate processing, exact decompressed lengths, checksum
+  verification, and configurable decompression limits. The default offer keeps
+  zlib first for preparation speed, followed by Brotli and Zstandard;
 - X.509 bounded path construction over unordered intermediates, alternate
   issuers and cross-signs, with hostname, validity, custom-bundle, and
   system-CA verification; explicit depth/candidate/certificate budgets prevent
@@ -238,11 +237,14 @@ record protection.
 `zig build -Doptimize=ReleaseFast bench-x509-path` measures bounded unordered
 and cross-signed certificate-path construction plus issuer/delegated OCSP.
 `zig build -Doptimize=ReleaseFast bench-certificate-compression` compares the
-RFC 8879 zlib and Brotli wire-size ratios, amortized preparation costs, and
-per-handshake decompression costs.
+RFC 8879 zlib, Brotli, and Zstandard wire-size ratios, amortized preparation
+costs, and per-handshake decompression costs.
 `zig build -Doptimize=ReleaseFast interop-rustls-brotli-server` verifies Vort
 Brotli output with a rustls decoder; `interop-rustls-min-client` verifies the
 Vort decoder against rustls's independent Brotli encoder.
+`interop-rustls-zstd-server` and `interop-rustls-zstd-client` perform the same
+two directions for RFC 8879 Zstandard using rustls's public custom compression
+interfaces and libzstd only as the independent test oracle.
 `zig build -Doptimize=ReleaseFast bench-rsa-pss` measures the built-in
 constant-time RSA-2048 PSS and PKCS#1 v1.5 signing paths.
 `zig build -Doptimize=ReleaseFast bench-hpke` measures RFC 9180 sender/receiver

@@ -1,9 +1,10 @@
 //! RFC 8879 TLS 1.3 certificate compression.
 //!
-//! The built-in zlib implementation is provided by Zig's standard library.
-//! Servers prepare compressed certificate bodies once and reuse the immutable
-//! result across handshakes. Clients enforce the advertised algorithm and an
-//! explicit uncompressed-size limit before allocating or decompressing.
+//! Zlib is provided by Zig's standard library; Brotli and Zstandard use the
+//! sibling pure-Zig Vort package. Servers prepare compressed certificate bodies
+//! once and reuse the immutable result across handshakes. Clients enforce the
+//! advertised algorithm and an explicit uncompressed-size limit before
+//! allocating or decompressing.
 
 const std = @import("std");
 const vort = @import("vort");
@@ -18,7 +19,7 @@ pub const Algorithm = enum(u16) {
     _,
 
     pub fn supported(self: Algorithm) bool {
-        return self == .zlib or self == .brotli;
+        return self == .zlib or self == .brotli or self == .zstd;
     }
 };
 
@@ -186,6 +187,44 @@ pub const Prepared = struct {
         };
     }
 
+    pub fn initZstd(
+        allocator: std.mem.Allocator,
+        certificate_message: []const u8,
+        level: CompressionLevel,
+    ) Error!Prepared {
+        const body = try certificateBody(certificate_message);
+        const output = vort.zstdEncodeFrameWithLevelAndOptionsAlloc(
+            allocator,
+            body,
+            switch (level) {
+                .interactive => 1,
+                .amortized => 3,
+            },
+            .{
+                .include_content_size = true,
+                .content_checksum = true,
+            },
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.CompressionFailed,
+        };
+        errdefer allocator.free(output);
+        if (output.len == 0 or output.len > std.math.maxInt(u24)) {
+            return error.CompressionFailed;
+        }
+        var uncompressed_sha256: [
+            std.crypto.hash.sha2.Sha256.digest_length
+        ]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(body, &uncompressed_sha256, .{});
+        return .{
+            .allocator = allocator,
+            .algorithm = .zstd,
+            .uncompressed_length = @intCast(body.len),
+            .uncompressed_sha256 = uncompressed_sha256,
+            .compressed = output,
+        };
+    }
+
     pub fn view(self: *const Prepared) PreparedView {
         return .{
             .algorithm = self.algorithm,
@@ -236,7 +275,7 @@ pub fn parse(message: []const u8) Error!Parsed {
 
 /// Return an owned ordinary Certificate handshake message. The transcript must
 /// contain the original CompressedCertificate message, not this reconstruction.
-pub fn decompressCertificate(
+pub noinline fn decompressCertificate(
     allocator: std.mem.Allocator,
     message: []const u8,
     offered: []const Algorithm,
@@ -266,6 +305,15 @@ pub fn decompressCertificate(
     result[2] = @truncate(uncompressed_length >> 8);
     result[3] = @truncate(uncompressed_length);
 
+    if (parsed.algorithm == .zstd) {
+        @branchHint(.unlikely);
+        try decompressZstd(
+            parsed.compressed,
+            result[4..],
+            uncompressed_length,
+        );
+        return result;
+    }
     switch (parsed.algorithm) {
         .zlib => try decompressZlib(parsed.compressed, result[4..], allocator),
         .brotli => {
@@ -281,6 +329,21 @@ pub fn decompressCertificate(
         else => unreachable,
     }
     return result;
+}
+
+noinline fn decompressZstd(
+    compressed: []const u8,
+    output: []u8,
+    expected_length: usize,
+) Error!void {
+    const written = vort.zstdDecodeFrameIntoExactSize(
+        compressed,
+        output,
+        expected_length,
+    ) catch return error.InvalidCompressedCertificate;
+    if (written != expected_length) {
+        return error.InvalidCompressedCertificate;
+    }
 }
 
 fn decompressZlib(
@@ -461,13 +524,14 @@ test "zlib certificate compression round trips and enforces bounds" {
 
     var unsupported = try allocator.dupe(u8, encoded.items);
     defer allocator.free(unsupported);
-    std.mem.writeInt(u16, unsupported[4..6], @intFromEnum(Algorithm.zstd), .big);
+    const unknown: Algorithm = @enumFromInt(0x1234);
+    std.mem.writeInt(u16, unsupported[4..6], @intFromEnum(unknown), .big);
     try std.testing.expectError(
         error.UnsupportedCompressionAlgorithm,
         decompressCertificate(
             allocator,
             unsupported,
-            &.{.zstd},
+            &.{unknown},
             certificate.len,
         ),
     );
@@ -561,6 +625,117 @@ test "Brotli certificate compression round trips and decodes libbrotli" {
             external_message[0 .. external_message.len - 1],
             &.{.brotli},
             400,
+        ),
+    );
+}
+
+test "Zstandard certificate compression round trips and decodes libzstd" {
+    const allocator = std.testing.allocator;
+    const body = [_]u8{0x42} ** 8192;
+    var certificate: [4 + body.len]u8 = undefined;
+    certificate[0] = 0x0b;
+    certificate[1] = @truncate(body.len >> 16);
+    certificate[2] = @truncate(body.len >> 8);
+    certificate[3] = @truncate(body.len);
+    @memcpy(certificate[4..], &body);
+
+    var prepared = try Prepared.initZstd(
+        allocator,
+        &certificate,
+        .amortized,
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(Algorithm.zstd, prepared.algorithm);
+    try std.testing.expect(prepared.compressed.len < body.len);
+    try std.testing.expect(prepared.view().savesBytes(certificate.len));
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try prepared.view().write(&encoded, allocator);
+    const decompressed = try decompressCertificate(
+        allocator,
+        encoded.items,
+        &.{.zstd},
+        certificate.len,
+    );
+    defer allocator.free(decompressed);
+    try std.testing.expectEqualSlices(u8, &certificate, decompressed);
+    try validateAlgorithms(&.{.zstd});
+
+    var corrupted = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(corrupted);
+    corrupted[corrupted.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.InvalidCompressedCertificate,
+        decompressCertificate(
+            allocator,
+            corrupted,
+            &.{.zstd},
+            certificate.len,
+        ),
+    );
+
+    var wrong_size = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(wrong_size);
+    const wrong_uncompressed_len = body.len - 1;
+    wrong_size[6] = @truncate(wrong_uncompressed_len >> 16);
+    wrong_size[7] = @truncate(wrong_uncompressed_len >> 8);
+    wrong_size[8] = @truncate(wrong_uncompressed_len);
+    try std.testing.expectError(
+        error.InvalidCompressedCertificate,
+        decompressCertificate(
+            allocator,
+            wrong_size,
+            &.{.zstd},
+            certificate.len,
+        ),
+    );
+
+    // Independent libzstd frame for the five-byte payload "hello".
+    const external_compressed = try hexBytes(
+        "28b52ffd240529000068656c6c6fa36d9f88",
+    );
+    var external_message: [12 + external_compressed.len]u8 = undefined;
+    external_message[0] = handshake_type_compressed_certificate;
+    const message_body_len = external_message.len - 4;
+    external_message[1] = @truncate(message_body_len >> 16);
+    external_message[2] = @truncate(message_body_len >> 8);
+    external_message[3] = @truncate(message_body_len);
+    std.mem.writeInt(u16, external_message[4..6], @intFromEnum(Algorithm.zstd), .big);
+    external_message[6..9].* = .{ 0, 0, 5 };
+    external_message[9] = @truncate(external_compressed.len >> 16);
+    external_message[10] = @truncate(external_compressed.len >> 8);
+    external_message[11] = @truncate(external_compressed.len);
+    @memcpy(external_message[12..], &external_compressed);
+    const external_plain = try decompressCertificate(
+        allocator,
+        &external_message,
+        &.{.zstd},
+        5,
+    );
+    defer allocator.free(external_plain);
+    const expected_external = [_]u8{ 0x0b, 0, 0, 5 } ++ "hello".*;
+    try std.testing.expectEqualSlices(
+        u8,
+        &expected_external,
+        external_plain,
+    );
+
+    try std.testing.expectError(
+        error.InvalidCompressedCertificate,
+        decompressCertificate(
+            allocator,
+            external_message[0 .. external_message.len - 1],
+            &.{.zstd},
+            5,
+        ),
+    );
+    try std.testing.expectError(
+        error.SelectedUnofferedCompressionAlgorithm,
+        decompressCertificate(
+            allocator,
+            &external_message,
+            &.{ .zlib, .brotli },
+            5,
         ),
     );
 }

@@ -87,7 +87,11 @@ pub const Config = struct {
     offer_extended_master_secret: bool = false,
     alpn_protocols: []const []const u8 = &.{},
     request_ocsp: bool = false,
-    certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{ .zlib, .brotli },
+    certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{
+        .zlib,
+        .brotli,
+        .zstd,
+    },
     max_decompressed_certificate_len: usize = 64 * 1024,
     server_verifier: auth.ClientVerifier,
     server_certificate_type: auth.CertificateType = .x509,
@@ -1374,7 +1378,7 @@ test "client and server states establish over one-byte transport reads" {
         server_ocsp_response,
     );
     var prepared_certificate =
-        try certificate_compression.Prepared.initZlib(
+        try certificate_compression.Prepared.initZstd(
             allocator,
             certificate_message.items,
             .amortized,
@@ -1414,7 +1418,7 @@ test "client and server states establish over one-byte transport reads" {
         "mtls",
     );
     var prepared_client_certificate =
-        try certificate_compression.Prepared.initZlib(
+        try certificate_compression.Prepared.initZstd(
             allocator,
             client_certificate_message.items,
             .amortized,
@@ -1438,6 +1442,7 @@ test "client and server states establish over one-byte transport reads" {
         .cipher_suites = &.{.aes_128_gcm_sha256},
         .alpn_protocols = &.{"h2"},
         .request_ocsp = true,
+        .certificate_compression_algorithms = &.{.zstd},
         .server_verifier = .{ .verify_trust = struct {
             fn verify(
                 context: ?*anyopaque,
@@ -1488,7 +1493,10 @@ test "client and server states establish over one-byte transport reads" {
             .ed25519 = .{ .key_pair = fallback_signing_key },
         },
         .identity_resolver = identity_set.resolver(),
-        .client_auth = .{ .request_context = "mtls" },
+        .client_auth = .{
+            .request_context = "mtls",
+            .certificate_compression_algorithms = &.{.zstd},
+        },
         .client_auth_policy = .{
             .verifier = .{
                 .pinned_ed25519_public_key = client_certificate,
@@ -1564,7 +1572,7 @@ test "client and server states establish over one-byte transport reads" {
         established_client.peer_certificate_chain.len,
     );
     try std.testing.expectEqual(
-        certificate_compression.Algorithm.zlib,
+        certificate_compression.Algorithm.zstd,
         established_client.certificate_compression.?,
     );
 
@@ -1584,7 +1592,7 @@ test "client and server states establish over one-byte transport reads" {
         established_server.peer_certificate_chain.?[0],
     );
     try std.testing.expectEqual(
-        certificate_compression.Algorithm.zlib,
+        certificate_compression.Algorithm.zstd,
         established_server.client_certificate_compression.?,
     );
 

@@ -1,14 +1,42 @@
-use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use rustls::compress::{CertCompressor, CompressionFailed, CompressionLevel};
+use rustls::{CertificateCompressionAlgorithm, ServerConfig, ServerConnection, StreamOwned};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
+
+#[derive(Debug)]
+struct ZstdCompressor;
+
+static ZSTD_COMPRESSOR: ZstdCompressor = ZstdCompressor;
+
+impl CertCompressor for ZstdCompressor {
+    fn compress(
+        &self,
+        input: Vec<u8>,
+        level: CompressionLevel,
+    ) -> Result<Vec<u8>, CompressionFailed> {
+        zstd::stream::encode_all(
+            input.as_slice(),
+            match level {
+                CompressionLevel::Interactive => 1,
+                CompressionLevel::Amortized => 9,
+            },
+        )
+        .map_err(|_| CompressionFailed)
+    }
+
+    fn algorithm(&self) -> CertificateCompressionAlgorithm {
+        CertificateCompressionAlgorithm::Zstd
+    }
+}
 
 fn main() {
     let mut args = std::env::args();
     let _exe = args.next();
     let cert_path = args.next().expect("certificate path");
     let key_path = args.next().expect("private-key path");
+    let zstd_enabled = args.next().as_deref() == Some("zstd");
 
     let mut cert_reader = BufReader::new(File::open(cert_path).unwrap());
     let certificates = rustls_pemfile::certs(&mut cert_reader)
@@ -24,6 +52,9 @@ fn main() {
         .with_single_cert(certificates, key)
         .unwrap();
     config.alpn_protocols.push(b"h2".to_vec());
+    if zstd_enabled {
+        config.cert_compressors = vec![&ZSTD_COMPRESSOR];
+    }
 
     let listener = TcpListener::bind("127.0.0.1:24445").unwrap();
     let (socket, _) = listener.accept().unwrap();

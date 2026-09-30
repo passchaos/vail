@@ -5,7 +5,14 @@ const linux = std.os.linux;
 const Client = vail.tls.client_connection.ClientConnection(64 * 1024, 256);
 
 pub fn main(init: std.process.Init) !void {
-    _ = init;
+    var args = try init.minimal.args.iterateAllocator(init.gpa);
+    defer args.deinit();
+    _ = args.next();
+    const use_zstd = if (args.next()) |argument|
+        std.mem.eql(u8, argument, "zstd")
+    else
+        false;
+    if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
     var addr = std.mem.zeroes(linux.sockaddr.in);
@@ -31,7 +38,10 @@ pub fn main(init: std.process.Init) !void {
         .retry_key_material = &retry_material,
         .cipher_suites = &.{.aes_128_gcm_sha256},
         .alpn_protocols = &.{"h2"},
-        .certificate_compression_algorithms = &.{.brotli},
+        .certificate_compression_algorithms = if (use_zstd)
+            &.{.zstd}
+        else
+            &.{.brotli},
         .server_verifier = .{ .verify_trust = acceptTestCertificate },
     }, &client_hello_record);
     defer client.deinit();

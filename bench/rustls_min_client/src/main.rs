@@ -1,7 +1,9 @@
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::EchConfig;
+use rustls::compress::{CertDecompressor, DecompressionFailed};
 use rustls::{
-    ClientConfig, ClientConnection, DigitallySignedStruct, Error, RootCertStore, SignatureScheme,
+    CertificateCompressionAlgorithm, ClientConfig, ClientConnection, DigitallySignedStruct, Error,
+    RootCertStore, SignatureScheme,
 };
 use rustls_pki_types::{CertificateDer, EchConfigListBytes, ServerName, UnixTime};
 use std::net::TcpStream;
@@ -10,6 +12,26 @@ use std::time::Duration;
 
 #[derive(Debug)]
 struct NoVerifier;
+
+#[derive(Debug)]
+struct ZstdDecompressor;
+
+static ZSTD_DECOMPRESSOR: ZstdDecompressor = ZstdDecompressor;
+
+impl CertDecompressor for ZstdDecompressor {
+    fn decompress(&self, input: &[u8], output: &mut [u8]) -> Result<(), DecompressionFailed> {
+        let decoded = zstd::stream::decode_all(input).map_err(|_| DecompressionFailed)?;
+        if decoded.len() != output.len() {
+            return Err(DecompressionFailed);
+        }
+        output.copy_from_slice(&decoded);
+        Ok(())
+    }
+
+    fn algorithm(&self) -> CertificateCompressionAlgorithm {
+        CertificateCompressionAlgorithm::Zstd
+    }
+}
 
 const ECH_CONFIG_LIST: &[u8] = &[
     0x00, 0x41, 0xfe, 0x0d, 0x00, 0x3d, 0x01, 0x00, 0x20, 0x00, 0x20, 0xa6, 0x9a, 0x41, 0x48, 0x5d,
@@ -60,7 +82,9 @@ impl ServerCertVerifier for NoVerifier {
 }
 
 fn main() {
-    let ech_enabled = std::env::args().nth(1).as_deref() == Some("ech");
+    let mode = std::env::args().nth(1);
+    let ech_enabled = mode.as_deref() == Some("ech");
+    let zstd_enabled = mode.as_deref() == Some("zstd");
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let builder = ClientConfig::builder_with_provider(provider);
     let builder = if ech_enabled {
@@ -80,6 +104,9 @@ fn main() {
         .dangerous()
         .set_certificate_verifier(Arc::new(NoVerifier));
     config.alpn_protocols.push(b"h2".to_vec());
+    if zstd_enabled {
+        config.cert_decompressors = vec![&ZSTD_DECOMPRESSOR];
+    }
 
     let name = ServerName::try_from("localhost").unwrap();
     let mut conn = ClientConnection::new(Arc::new(config), name).unwrap();

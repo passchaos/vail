@@ -23,6 +23,7 @@ pub fn main(init: std.process.Init) !void {
 
     try benchmarkAlgorithm(init.io, allocator, certificate.items, .zlib);
     try benchmarkAlgorithm(init.io, allocator, certificate.items, .brotli);
+    try benchmarkAlgorithm(init.io, allocator, certificate.items, .zstd);
 }
 
 fn benchmarkAlgorithm(
@@ -88,6 +89,11 @@ fn prepare(
             .amortized,
         ),
         .brotli => vail.tls.certificate_compression.Prepared.initBrotli(
+            allocator,
+            certificate,
+            .amortized,
+        ),
+        .zstd => vail.tls.certificate_compression.Prepared.initZstd(
             allocator,
             certificate,
             .amortized,

@@ -8,3 +8,4 @@ publish = false
 aws-lc-rs = { version = "1.18", default-features = false, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "brotli", "zlib"] }
 rustls-pemfile = "2"
+zstd = "0.13"
