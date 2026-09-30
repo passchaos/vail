@@ -20,6 +20,12 @@ pub const Setting = struct {
     settings: []const u8,
 };
 
+pub const Session = struct {
+    codepoint: Codepoint,
+    local: []const u8,
+    peer: []const u8,
+};
+
 pub const Error = std.mem.Allocator.Error || error{
     InvalidApplicationSettings,
 };

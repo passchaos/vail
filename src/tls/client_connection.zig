@@ -121,6 +121,8 @@ pub const ClientPsk = struct {
     obfuscated_ticket_age: u32,
     suite: cipher_suite.Suite = .aes_128_gcm_sha256,
     max_early_data_size: ?u32 = null,
+    alpn: []const u8 = &.{},
+    application_settings: ?application_settings.Session = null,
 
     pub fn fromCached(
         cached: *const ticket.Cached,
@@ -132,6 +134,15 @@ pub const ClientPsk = struct {
             .obfuscated_ticket_age = try cached.obfuscatedTicketAge(now_ms),
             .suite = cached.suite,
             .max_early_data_size = cached.max_early_data_size,
+            .alpn = cached.alpn,
+            .application_settings = if (cached.application_settings_codepoint) |codepoint|
+                .{
+                    .codepoint = codepoint,
+                    .local = cached.local_application_settings.?,
+                    .peer = cached.peer_application_settings.?,
+                }
+            else
+                null,
         };
     }
 };
@@ -182,6 +193,14 @@ pub fn ClientConnection(
                     server_name,
                     self.selected_alpn orelse "",
                     received_at_ms,
+                    if (self.application_settings_codepoint) |codepoint|
+                        .{
+                            .codepoint = codepoint,
+                            .local = self.local_application_settings.?,
+                            .peer = self.peer_application_settings.?,
+                        }
+                    else
+                        null,
                 );
             }
 
@@ -272,11 +291,27 @@ pub fn ClientConnection(
             obfuscated_ticket_age: u32,
             suite: cipher_suite.Suite,
             max_early_data_size: ?u32,
+            alpn: []u8,
+            application_settings_codepoint: ?application_settings.Codepoint,
+            local_application_settings: ?[]u8,
+            peer_application_settings: ?[]u8,
 
             fn init(
                 allocator: std.mem.Allocator,
                 value: ClientPsk,
             ) std.mem.Allocator.Error!StoredPsk {
+                const alpn = try allocator.dupe(u8, value.alpn);
+                errdefer allocator.free(alpn);
+                const local_settings = if (value.application_settings) |settings|
+                    try allocator.dupe(u8, settings.local)
+                else
+                    null;
+                errdefer if (local_settings) |settings| allocator.free(settings);
+                const peer_settings = if (value.application_settings) |settings|
+                    try allocator.dupe(u8, settings.peer)
+                else
+                    null;
+                errdefer if (peer_settings) |settings| allocator.free(settings);
                 return .{
                     .allocator = allocator,
                     .identity = try allocator.dupe(u8, value.identity),
@@ -284,12 +319,26 @@ pub fn ClientConnection(
                     .obfuscated_ticket_age = value.obfuscated_ticket_age,
                     .suite = value.suite,
                     .max_early_data_size = value.max_early_data_size,
+                    .alpn = alpn,
+                    .application_settings_codepoint = if (value.application_settings) |settings|
+                        settings.codepoint
+                    else
+                        null,
+                    .local_application_settings = local_settings,
+                    .peer_application_settings = peer_settings,
                 };
             }
 
             fn deinit(self: *StoredPsk) void {
                 self.secret.deinit();
                 self.allocator.free(self.identity);
+                self.allocator.free(self.alpn);
+                if (self.local_application_settings) |settings| {
+                    self.allocator.free(settings);
+                }
+                if (self.peer_application_settings) |settings| {
+                    self.allocator.free(settings);
+                }
                 self.* = undefined;
             }
         };
@@ -436,14 +485,18 @@ pub fn ClientConnection(
                     if (suite.hash() == value.secret.hash) compatible = true;
                 }
                 if (!compatible) return error.InvalidPskSuite;
+                const settings_match = applicationSettingsMatchForEarlyData(
+                    config.application_settings,
+                    config.application_settings_codepoint,
+                    value,
+                );
                 try psk.appendClientOfferForSecret(
                     &hello,
                     config.allocator,
                     value.identity,
                     value.obfuscated_ticket_age,
                     value.secret,
-                    value.max_early_data_size != null and
-                        config.application_settings.len == 0,
+                    value.max_early_data_size != null and settings_match,
                     null,
                 );
             } else if (config.request_resumption or config.ticket_request != null)
@@ -533,7 +586,11 @@ pub fn ClientConnection(
             var early_write: ?traffic.State = null;
             if (resumption) |value| {
                 if (value.max_early_data_size != null and
-                    config.application_settings.len == 0)
+                    applicationSettingsMatchForEarlyData(
+                        config.application_settings,
+                        config.application_settings_codepoint,
+                        value,
+                    ))
                 {
                     if (value.suite.hash() != value.secret.hash) {
                         return error.InvalidPskSuite;
@@ -1449,6 +1506,30 @@ fn unexpectedEchRejection(rejection_value: anytype) !void {
     return error.UnexpectedEchRejection;
 }
 
+fn applicationSettingsMatchForEarlyData(
+    configured: []const application_settings.Setting,
+    codepoint: application_settings.Codepoint,
+    cached: anytype,
+) bool {
+    const cached_codepoint = cached.application_settings_codepoint orelse
+        return configured.len == 0;
+    if (configured.len == 0 or cached_codepoint != codepoint or
+        cached.local_application_settings == null or
+        cached.peer_application_settings == null or cached.alpn.len == 0)
+    {
+        return false;
+    }
+    const local = application_settings.findSetting(
+        configured,
+        cached.alpn,
+    ) orelse return false;
+    return std.mem.eql(
+        u8,
+        local,
+        cached.local_application_settings.?,
+    );
+}
+
 fn ed25519SubjectPublicKeyInfo(public_key: [32]u8) [44]u8 {
     var spki = [_]u8{
         0x30, 0x2a,
@@ -2005,6 +2086,15 @@ test "client and server states establish over one-byte transport reads" {
     defer cached.deinit();
     const cached_offer = try ClientPsk.fromCached(&cached, 11_000);
     try std.testing.expectEqual(@as(u32, 1_019), cached_offer.obfuscated_ticket_age);
+    try std.testing.expectEqualStrings("h2", cached_offer.alpn);
+    try std.testing.expectEqualStrings(
+        "client-h2-settings",
+        cached_offer.application_settings.?.local,
+    );
+    try std.testing.expectEqualStrings(
+        "server-h2-settings",
+        cached_offer.application_settings.?.peer,
+    );
     var opened_ticket = try keyring.openSecret(
         cached.identity,
         "example.com",

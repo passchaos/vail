@@ -5,6 +5,7 @@
 
 const std = @import("std");
 
+const application_settings = @import("application_settings.zig");
 const key_schedule = @import("key_schedule.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const secret = @import("secret.zig");
@@ -35,12 +36,21 @@ pub const Cached = struct {
     received_at_ms: u64,
     lifetime_seconds: u32,
     max_early_data_size: ?u32,
+    application_settings_codepoint: ?application_settings.Codepoint,
+    local_application_settings: ?[]u8,
+    peer_application_settings: ?[]u8,
 
     pub fn deinit(self: *Cached) void {
         self.psk.deinit();
         self.allocator.free(self.identity);
         self.allocator.free(self.server_name);
         self.allocator.free(self.alpn);
+        if (self.local_application_settings) |settings| {
+            self.allocator.free(settings);
+        }
+        if (self.peer_application_settings) |settings| {
+            self.allocator.free(settings);
+        }
         self.* = undefined;
     }
 
@@ -68,6 +78,7 @@ pub fn cache(
     server_name: []const u8,
     alpn: []const u8,
     received_at_ms: u64,
+    negotiated_application_settings: ?application_settings.Session,
 ) (Error || key_schedule.Error)!Cached {
     if (master_secret.hash != suite.hash() or
         transcript_after_client_finished.hash != suite.hash())
@@ -91,6 +102,16 @@ pub fn cache(
     errdefer allocator.free(owned_server_name);
     const owned_alpn = try allocator.dupe(u8, alpn);
     errdefer allocator.free(owned_alpn);
+    const local_application_settings = if (negotiated_application_settings) |settings|
+        try allocator.dupe(u8, settings.local)
+    else
+        null;
+    errdefer if (local_application_settings) |settings| allocator.free(settings);
+    const peer_application_settings = if (negotiated_application_settings) |settings|
+        try allocator.dupe(u8, settings.peer)
+    else
+        null;
+    errdefer if (peer_application_settings) |settings| allocator.free(settings);
     return .{
         .allocator = allocator,
         .identity = identity,
@@ -102,6 +123,12 @@ pub fn cache(
         .received_at_ms = received_at_ms,
         .lifetime_seconds = parsed.lifetime_seconds,
         .max_early_data_size = parsed.max_early_data_size,
+        .application_settings_codepoint = if (negotiated_application_settings) |settings|
+            settings.codepoint
+        else
+            null,
+        .local_application_settings = local_application_settings,
+        .peer_application_settings = peer_application_settings,
     };
 }
 
@@ -338,12 +365,29 @@ test "authenticated NewSessionTicket becomes an owned client cache entry" {
         "example.com",
         "h2",
         10_000,
+        .{
+            .codepoint = .legacy,
+            .local = "client-settings",
+            .peer = "server-settings",
+        },
     );
     defer cached.deinit();
     try std.testing.expectEqual(secret.Hash.sha384, cached.psk.hash);
     try std.testing.expectEqualStrings("opaque-ticket", cached.identity);
     try std.testing.expectEqualStrings("example.com", cached.server_name);
     try std.testing.expectEqualStrings("h2", cached.alpn);
+    try std.testing.expectEqual(
+        application_settings.Codepoint.legacy,
+        cached.application_settings_codepoint.?,
+    );
+    try std.testing.expectEqualStrings(
+        "client-settings",
+        cached.local_application_settings.?,
+    );
+    try std.testing.expectEqualStrings(
+        "server-settings",
+        cached.peer_application_settings.?,
+    );
     try std.testing.expectEqual(
         @as(u32, 1_017),
         try cached.obfuscatedTicketAge(11_000),
