@@ -250,7 +250,7 @@ pub inline fn decrypt(
     );
 }
 
-fn authenticate(
+inline fn authenticate(
     tag: *[tag_length]u8,
     associated_data: []const u8,
     ciphertext: []const u8,
@@ -260,8 +260,43 @@ fn authenticate(
         if (ciphertext.len != 0) {
             var mac = WidePoly1305.init(poly_key);
             defer mac.deinit();
-            mac.updatePadded(associated_data);
-            mac.updatePadded(ciphertext);
+            if (associated_data.len < 64) {
+                const aad_padded_len = std.mem.alignForward(
+                    usize,
+                    associated_data.len,
+                    Poly1305.block_length,
+                );
+                const aad_block_count = aad_padded_len /
+                    Poly1305.block_length;
+                const ciphertext_block_count = ciphertext.len /
+                    Poly1305.block_length +
+                    @intFromBool(
+                        ciphertext.len % Poly1305.block_length != 0,
+                    );
+                if (aad_padded_len < 64 and
+                    ciphertext.len >= 64 - aad_padded_len and
+                    aad_block_count + ciphertext_block_count % 4 >= 4)
+                {
+                    // Hash one full vector batch across the mandatory AAD
+                    // padding boundary instead of serially multiplying the
+                    // short header blocks.
+                    var prefix = [_]u8{0} ** 64;
+                    @memcpy(prefix[0..associated_data.len], associated_data);
+                    const ciphertext_prefix_len = 64 - aad_padded_len;
+                    @memcpy(
+                        prefix[aad_padded_len..],
+                        ciphertext[0..ciphertext_prefix_len],
+                    );
+                    mac.updateBlocks(&prefix);
+                    mac.updatePadded(ciphertext[ciphertext_prefix_len..]);
+                } else {
+                    mac.updatePadded(associated_data);
+                    mac.updatePadded(ciphertext);
+                }
+            } else {
+                mac.updatePadded(associated_data);
+                mac.updatePadded(ciphertext);
+            }
             var lengths: [16]u8 = undefined;
             std.mem.writeInt(u64, lengths[0..8], associated_data.len, .little);
             std.mem.writeInt(u64, lengths[8..16], ciphertext.len, .little);
@@ -291,6 +326,7 @@ const WidePoly1305 = struct {
     const limb_mask: u64 = (1 << limb_bits) - 1;
     const hibit: u64 = 1 << 24;
     const Limbs = [5]u64;
+    const BatchLane = @Vector(4, u32);
 
     r: [4]Limbs,
     h: Limbs = @splat(0),
@@ -308,9 +344,9 @@ const WidePoly1305 = struct {
         };
         var powers: [4]Limbs = undefined;
         powers[0] = r1;
-        for (1..powers.len) |index| {
-            powers[index] = multiply(powers[index - 1], r1);
-        }
+        powers[1] = multiply(r1, r1);
+        powers[2] = multiply(powers[1], r1);
+        powers[3] = multiply(powers[1], powers[1]);
         return .{
             .r = powers,
             .pad = .{
@@ -327,7 +363,7 @@ const WidePoly1305 = struct {
         self.* = undefined;
     }
 
-    fn updatePadded(self: *WidePoly1305, input: []const u8) void {
+    inline fn updatePadded(self: *WidePoly1305, input: []const u8) void {
         const full_len = input.len & ~@as(usize, 15);
         self.updateBlocks(input[0..full_len]);
         if (full_len != input.len) {
@@ -337,11 +373,11 @@ const WidePoly1305 = struct {
         }
     }
 
-    fn updateBlocks(self: *WidePoly1305, input: []const u8) void {
+    inline fn updateBlocks(self: *WidePoly1305, input: []const u8) void {
         std.debug.assert(input.len % 16 == 0);
         var offset: usize = 0;
         while (offset + 64 <= input.len) : (offset += 64) {
-            self.processBatch(4, input[offset..][0..64]);
+            self.processBatch(input[offset..][0..64]);
         }
         while (offset < input.len) : (offset += 16) {
             const message = parseBlock(input[offset..][0..16]);
@@ -351,46 +387,74 @@ const WidePoly1305 = struct {
         }
     }
 
-    fn processBatch(
+    inline fn processBatch(
         self: *WidePoly1305,
-        comptime count: comptime_int,
-        input: *const [16 * count]u8,
+        input: *const [64]u8,
     ) void {
-        const U32xN = @Vector(count, u32);
-        var a: [5]U32xN = undefined;
-        var r: [5]U32xN = undefined;
-        inline for (0..count) |lane| {
-            var message = parseBlock(input[lane * 16 ..][0..16]);
-            if (lane == 0) {
-                inline for (0..5) |limb| message[limb] += self.h[limb];
-            }
-            const power = self.r[count - 1 - lane];
+        const words: @Vector(16, u32) = @bitCast(input.*);
+        const w0: BatchLane = @shuffle(
+            u32,
+            words,
+            undefined,
+            [_]i32{ 0, 4, 8, 12 },
+        );
+        const w1: BatchLane = @shuffle(
+            u32,
+            words,
+            undefined,
+            [_]i32{ 1, 5, 9, 13 },
+        );
+        const w2: BatchLane = @shuffle(
+            u32,
+            words,
+            undefined,
+            [_]i32{ 2, 6, 10, 14 },
+        );
+        const w3: BatchLane = @shuffle(
+            u32,
+            words,
+            undefined,
+            [_]i32{ 3, 7, 11, 15 },
+        );
+        const mask: BatchLane = @splat(@as(u32, @intCast(limb_mask)));
+        var a = [5]BatchLane{
+            w0 & mask,
+            ((w0 >> @splat(26)) | (w1 << @splat(6))) & mask,
+            ((w1 >> @splat(20)) | (w2 << @splat(12))) & mask,
+            ((w2 >> @splat(14)) | (w3 << @splat(18))) & mask,
+            (w3 >> @splat(8)) | @as(BatchLane, @splat(hibit)),
+        };
+        inline for (0..5) |limb| {
+            a[limb][0] +%= @intCast(self.h[limb]);
+        }
+
+        var r: [5]BatchLane = undefined;
+        inline for (0..4) |lane| {
+            const power = self.r[3 - lane];
             inline for (0..5) |limb| {
-                a[limb][lane] = @intCast(message[limb]);
                 r[limb][lane] = @intCast(power[limb]);
             }
         }
-        const five: U32xN = @splat(5);
+        const five: BatchLane = @splat(5);
         const s1 = r[1] *% five;
         const s2 = r[2] *% five;
         const s3 = r[3] *% five;
         const s4 = r[4] *% five;
 
-        var d0 = @reduce(.Add, mulWide(count, a[0], r[0]) +% mulWide(count, a[1], s4) +% mulWide(count, a[2], s3) +% mulWide(count, a[3], s2) +% mulWide(count, a[4], s1));
-        var d1 = @reduce(.Add, mulWide(count, a[0], r[1]) +% mulWide(count, a[1], r[0]) +% mulWide(count, a[2], s4) +% mulWide(count, a[3], s3) +% mulWide(count, a[4], s2));
-        var d2 = @reduce(.Add, mulWide(count, a[0], r[2]) +% mulWide(count, a[1], r[1]) +% mulWide(count, a[2], r[0]) +% mulWide(count, a[3], s4) +% mulWide(count, a[4], s3));
-        var d3 = @reduce(.Add, mulWide(count, a[0], r[3]) +% mulWide(count, a[1], r[2]) +% mulWide(count, a[2], r[1]) +% mulWide(count, a[3], r[0]) +% mulWide(count, a[4], s4));
-        var d4 = @reduce(.Add, mulWide(count, a[0], r[4]) +% mulWide(count, a[1], r[3]) +% mulWide(count, a[2], r[2]) +% mulWide(count, a[3], r[1]) +% mulWide(count, a[4], r[0]));
+        var d0 = @reduce(.Add, mulWide(a[0], r[0]) +% mulWide(a[1], s4) +% mulWide(a[2], s3) +% mulWide(a[3], s2) +% mulWide(a[4], s1));
+        var d1 = @reduce(.Add, mulWide(a[0], r[1]) +% mulWide(a[1], r[0]) +% mulWide(a[2], s4) +% mulWide(a[3], s3) +% mulWide(a[4], s2));
+        var d2 = @reduce(.Add, mulWide(a[0], r[2]) +% mulWide(a[1], r[1]) +% mulWide(a[2], r[0]) +% mulWide(a[3], s4) +% mulWide(a[4], s3));
+        var d3 = @reduce(.Add, mulWide(a[0], r[3]) +% mulWide(a[1], r[2]) +% mulWide(a[2], r[1]) +% mulWide(a[3], r[0]) +% mulWide(a[4], s4));
+        var d4 = @reduce(.Add, mulWide(a[0], r[4]) +% mulWide(a[1], r[3]) +% mulWide(a[2], r[2]) +% mulWide(a[3], r[1]) +% mulWide(a[4], r[0]));
         self.h = reduce(&d0, &d1, &d2, &d3, &d4);
     }
 
     inline fn mulWide(
-        comptime count: comptime_int,
-        a: @Vector(count, u32),
-        b: @Vector(count, u32),
-    ) @Vector(count, u64) {
-        return @as(@Vector(count, u64), @intCast(a)) *%
-            @as(@Vector(count, u64), @intCast(b));
+        a: BatchLane,
+        b: BatchLane,
+    ) @Vector(4, u64) {
+        return @as(@Vector(4, u64), @intCast(a)) *%
+            @as(@Vector(4, u64), @intCast(b));
     }
 
     fn final(self: *WidePoly1305, output: *[16]u8) void {
@@ -750,6 +814,52 @@ test "prepared ChaCha20-Poly1305 matches Zig std across boundaries" {
         nonce,
     );
     try std.testing.expectEqualSlices(u8, input[0..1200], &in_place);
+}
+
+test "prepared ChaCha20-Poly1305 batches across padded AAD boundaries" {
+    const key = [_]u8{0x91} ** key_length;
+    const nonce = [_]u8{0x37} ** nonce_length;
+    var context = Context.init(key);
+    defer context.deinit();
+    var aad: [65]u8 = undefined;
+    var input: [257]u8 = undefined;
+    for (&aad, 0..) |*byte, index| byte.* = @truncate(index *% 29 +% 3);
+    for (&input, 0..) |*byte, index| byte.* = @truncate(index *% 73 +% 11);
+    var expected: [input.len]u8 = undefined;
+    var actual: [input.len]u8 = undefined;
+    var opened: [input.len]u8 = undefined;
+
+    for ([_]usize{ 0, 1, 15, 16, 17, 31, 32, 47, 48, 49, 63, 64, 65 }) |aad_len| {
+        for ([_]usize{ 47, 48, 49, 63, 64, 65, 127, 128, 129, 256, 257 }) |len| {
+            var expected_tag: [tag_length]u8 = undefined;
+            var actual_tag: [tag_length]u8 = undefined;
+            StdChaCha20Poly1305.encrypt(
+                expected[0..len],
+                &expected_tag,
+                input[0..len],
+                aad[0..aad_len],
+                nonce,
+                key,
+            );
+            context.encrypt(
+                actual[0..len],
+                &actual_tag,
+                input[0..len],
+                aad[0..aad_len],
+                nonce,
+            );
+            try std.testing.expectEqualSlices(u8, expected[0..len], actual[0..len]);
+            try std.testing.expectEqual(expected_tag, actual_tag);
+            try context.decrypt(
+                opened[0..len],
+                actual[0..len],
+                actual_tag,
+                aad[0..aad_len],
+                nonce,
+            );
+            try std.testing.expectEqualSlices(u8, input[0..len], opened[0..len]);
+        }
+    }
 }
 
 test "RFC 8439 ChaCha20-Poly1305 AEAD vector" {
