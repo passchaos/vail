@@ -30,7 +30,8 @@ The current foundation provides:
 - deployed draft ALPS (`application_settings`) with both AWS-LC codepoints,
   ALPN-bound protocol offers, mutually authenticated opaque settings, the
   transcript-required client EncryptedExtensions message, ECH privacy, and
-  conservative 0-RTT rejection until settings are stored with resumption PSKs;
+  ALPN-bound client/server settings persisted in authenticated session caches
+  and bounded stateless tickets so 0-RTT is enabled only on exact matches;
 - incremental TLS 1.3 client/server stream states with record and handshake
   reassembly, internally owned classical/hybrid key exchange, authenticated
   transition to application traffic, HelloRetryRequest with RFC 8446

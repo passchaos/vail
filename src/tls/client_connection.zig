@@ -184,7 +184,7 @@ pub fn ClientConnection(
                 server_name: []const u8,
                 received_at_ms: u64,
             ) (ticket.Error || key_schedule.Error)!ticket.Cached {
-                return ticket.cache(
+                return ticket.cacheWithApplicationSettings(
                     self.allocator,
                     message,
                     self.application.suite,
@@ -1171,10 +1171,6 @@ pub fn ClientConnection(
                     try record_size_limit.maxCiphertextFragment(limit),
                 );
             }
-            if (self.resumption) |*resumption| {
-                resumption.deinit();
-            }
-            self.resumption = null;
             self.stage = .server_flight;
         }
 
@@ -1275,10 +1271,23 @@ pub fn ClientConnection(
                     .max_decompressed_certificate_len = self.max_decompressed_certificate_len,
                     .client_identity = self.client_identity,
                     .application_settings = self.application_settings,
+                    .resumed_application_settings = if (pending.resumed)
+                        if (self.resumption.?.application_settings_codepoint) |codepoint|
+                            .{
+                                .codepoint = codepoint,
+                                .local = self.resumption.?.local_application_settings.?,
+                                .peer = self.resumption.?.peer_application_settings.?,
+                            }
+                        else
+                            null
+                    else
+                        null,
                 },
             );
             var verified_owned = true;
             defer if (verified_owned) verified.deinit();
+            if (self.resumption) |*resumption| resumption.deinit();
+            self.resumption = null;
 
             if (verified.selected_alpn) |selected| {
                 const offered = try client_hello.parse(
@@ -1663,7 +1672,7 @@ test "client requests future TLS 1.3 resumption without offering a PSK" {
     try std.testing.expect(parsed.pre_shared_key == null);
 }
 
-test "ALPS offer disables zero RTT without cached settings" {
+test "ALPS offer disables zero RTT without matching cached settings" {
     const allocator = std.testing.allocator;
     const Client = ClientConnection(4096, 256);
     var key_material = key_exchange.ClientKeyMaterial{
@@ -1674,6 +1683,12 @@ test "ALPS offer disables zero RTT without cached settings" {
         .secret = secret.Secret.fromSha256([_]u8{0x29} ** 32),
         .obfuscated_ticket_age = 7,
         .max_early_data_size = 1024,
+        .alpn = "h2",
+        .application_settings = .{
+            .codepoint = .legacy,
+            .local = "cached-settings",
+            .peer = "cached-server-settings",
+        },
     };
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(allocator);
@@ -2068,6 +2083,7 @@ test "client and server states establish over one-byte transport reads" {
             .age_add = 19,
             .issued_at_ms = 10_000,
             .lifetime_seconds = 60,
+            .allow_early_data = true,
         },
         &ticket_record,
     );
@@ -2095,14 +2111,23 @@ test "client and server states establish over one-byte transport reads" {
         "server-h2-settings",
         cached_offer.application_settings.?.peer,
     );
-    var opened_ticket = try keyring.openSecret(
+    var opened_ticket = try keyring.openSecretWithApplicationSettings(
+        allocator,
         cached.identity,
         "example.com",
         "h2",
         11_000,
     );
-    defer opened_ticket.secret.deinit();
+    defer opened_ticket.deinit();
     try std.testing.expect(cached.psk.eql(&opened_ticket.secret));
+    try std.testing.expectEqualStrings(
+        "server-h2-settings",
+        opened_ticket.local_application_settings.?,
+    );
+    try std.testing.expectEqualStrings(
+        "client-h2-settings",
+        opened_ticket.peer_application_settings.?,
+    );
 
     const second_ticket_len = try established_server
         .sealRequestedNewSessionTicket(
@@ -3721,7 +3746,8 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
         .secret = [_]u8{0xc8} ** ticket_module.key_len,
     });
     defer keyring.deinit();
-    const identity = try keyring.sealSecret(
+    const identity = try keyring.sealSecretWithApplicationSettingsAlloc(
+        allocator,
         [_]u8{0xc9} ** ticket_module.nonce_len,
         "example.com",
         "h2",
@@ -3733,7 +3759,13 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
             .cipher_suite_wire = cipher_suite.Suite.aes_128_gcm_sha256.wireValue(),
             .max_early_data_size = 1024,
         },
+        .{
+            .codepoint = .legacy,
+            .local = "server-0rtt-settings",
+            .peer = "client-0rtt-settings",
+        },
     );
+    defer allocator.free(identity);
     const ech_secret = [_]u8{0xd3} ** 32;
     var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
         .fromSecretKey(&ech_secret);
@@ -3753,11 +3785,17 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
         .x25519 = [_]u8{0xca} ** key_exchange.secret_len,
     };
     var offered_psk = ClientPsk{
-        .identity = &identity,
+        .identity = identity,
         .secret = psk_secret,
         .obfuscated_ticket_age = 1_023,
         .suite = .aes_128_gcm_sha256,
         .max_early_data_size = 1024,
+        .alpn = "h2",
+        .application_settings = .{
+            .codepoint = .legacy,
+            .local = "client-0rtt-settings",
+            .peer = "server-0rtt-settings",
+        },
     };
     var client_wire: std.ArrayList(u8) = .empty;
     defer client_wire.deinit(allocator);
@@ -3768,6 +3806,10 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
         .key_material = &client_material,
         .cipher_suites = &.{.aes_128_gcm_sha256},
         .alpn_protocols = &.{"h2"},
+        .application_settings = &.{.{
+            .protocol = "h2",
+            .settings = "client-0rtt-settings",
+        }},
         .server_verifier = .{},
         .resumption = offered_psk,
         .key_log = client_key_log.logger(),
@@ -3794,7 +3836,7 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
     try std.testing.expectEqual(identity.len, grease_offer.identity.len);
     try std.testing.expect(!std.mem.eql(
         u8,
-        &identity,
+        identity,
         grease_offer.identity,
     ));
     var early_record: [256]u8 = undefined;
@@ -3821,6 +3863,10 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
             .cipher_suites = &.{.aes_128_gcm_sha256},
             .groups = &.{key_exchange.named_group_x25519},
             .alpn_protocols = &.{"h2"},
+            .application_settings = &.{.{
+                .protocol = "h2",
+                .settings = "server-0rtt-settings",
+            }},
         },
         .server_random = [_]u8{0xce} ** 32,
         .key_material = &server_material,
@@ -3902,6 +3948,10 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
     defer established_client.deinit();
     try std.testing.expect(established_client.early_data_accepted);
     try std.testing.expect(established_client.ech_accepted);
+    try std.testing.expectEqualStrings(
+        "server-0rtt-settings",
+        established_client.peer_application_settings.?,
+    );
 
     const end_of_early_data = try server.receive(
         client_wire.items,
@@ -3919,6 +3969,10 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
     defer established_server.deinit();
     try std.testing.expect(established_server.early_data_accepted);
     try std.testing.expect(established_server.ech_accepted);
+    try std.testing.expectEqualStrings(
+        "client-0rtt-settings",
+        established_server.peer_application_settings.?,
+    );
     try client_key_log.expectMatchesWithEarlyData(
         &server_key_log,
         [_]u8{0xcb} ** 32,
@@ -3930,11 +3984,17 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
         .x25519 = [_]u8{0xcf} ** key_exchange.secret_len,
     };
     var replay_psk = ClientPsk{
-        .identity = &identity,
+        .identity = identity,
         .secret = psk_secret,
         .obfuscated_ticket_age = 1_024,
         .suite = .aes_128_gcm_sha256,
         .max_early_data_size = 1024,
+        .alpn = "h2",
+        .application_settings = .{
+            .codepoint = .legacy,
+            .local = "client-0rtt-settings",
+            .peer = "server-0rtt-settings",
+        },
     };
     var replay_wire: std.ArrayList(u8) = .empty;
     defer replay_wire.deinit(allocator);
@@ -3945,6 +4005,10 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
         .key_material = &replay_material,
         .cipher_suites = &.{.aes_128_gcm_sha256},
         .alpn_protocols = &.{"h2"},
+        .application_settings = &.{.{
+            .protocol = "h2",
+            .settings = "client-0rtt-settings",
+        }},
         .server_verifier = .{},
         .resumption = replay_psk,
         .ech = .{
@@ -3973,6 +4037,10 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
             .cipher_suites = &.{.aes_128_gcm_sha256},
             .groups = &.{key_exchange.named_group_x25519},
             .alpn_protocols = &.{"h2"},
+            .application_settings = &.{.{
+                .protocol = "h2",
+                .settings = "server-0rtt-settings",
+            }},
         },
         .server_random = [_]u8{0xd2} ** 32,
         .key_material = &replay_server_material,

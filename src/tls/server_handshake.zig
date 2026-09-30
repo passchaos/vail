@@ -54,6 +54,7 @@ pub const Result = struct {
     peer_record_size_limit: ?u16,
     requested_ticket_count: u8,
     application_settings: ?application_settings.Payload,
+    client_application_settings_required: bool,
 };
 
 pub const Options = struct {
@@ -78,6 +79,7 @@ pub const Options = struct {
     client_auth: ?ClientAuthOptions = null,
     record_size_limit: ?u16 = null,
     max_requested_tickets: u8 = 0,
+    early_application_settings_validated: bool = false,
 };
 
 pub const ClientAuthOptions = struct {
@@ -111,6 +113,7 @@ pub const ManagedOptions = struct {
     client_auth: ?ClientAuthOptions = null,
     record_size_limit: ?u16 = null,
     max_requested_tickets: u8 = 0,
+    early_application_settings_validated: bool = false,
 };
 
 /// Select the offered share, complete key exchange, and construct the server
@@ -164,6 +167,7 @@ pub fn writeServerHandshakeFlightManaged(
         .client_auth = options.client_auth,
         .record_size_limit = options.record_size_limit,
         .max_requested_tickets = options.max_requested_tickets,
+        .early_application_settings_validated = options.early_application_settings_validated,
     }, selection);
 }
 
@@ -198,7 +202,9 @@ fn writeServerHandshakeFlightSelected(
     if (options.accept_early_data and options.psk == null) {
         return error.InvalidPskSelection;
     }
-    if (options.accept_early_data and selection.application_settings != null) {
+    if (options.accept_early_data and selection.application_settings != null and
+        !options.early_application_settings_validated)
+    {
         return error.InvalidApplicationSettings;
     }
     if (options.ech_inner_random != null and
@@ -303,7 +309,10 @@ fn writeServerHandshakeFlightSelected(
         .ech_retry_configs = options.ech_retry_configs,
         .record_size_limit = local_record_size_limit,
         .ticket_request_hint = ticket_request_hint,
-        .application_settings = selection.application_settings,
+        .application_settings = if (options.accept_early_data)
+            null
+        else
+            selection.application_settings,
     });
     try appendEncryptedHandshake(
         out,
@@ -427,6 +436,8 @@ fn writeServerHandshakeFlightSelected(
         .peer_record_size_limit = options.parsed_client_hello.record_size_limit,
         .requested_ticket_count = requested_ticket_count,
         .application_settings = selection.application_settings,
+        .client_application_settings_required = selection.application_settings != null and
+            !options.accept_early_data,
     };
 }
 

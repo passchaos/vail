@@ -831,6 +831,22 @@ test "stateless ticket round trip preserves bounded ALPS state" {
             10_001,
         ),
     );
+    const oversized_settings = [_]u8{0} ** (max_application_settings_len + 1);
+    try std.testing.expectError(
+        error.InvalidTicket,
+        keyring.sealSecretWithApplicationSettingsAlloc(
+            allocator,
+            [_]u8{0x95} ** nonce_len,
+            "example.com",
+            "h2",
+            input,
+            .{
+                .codepoint = .legacy,
+                .local = &oversized_settings,
+                .peer = "client-settings",
+            },
+        ),
+    );
 
     var legacy = try keyring.sealSecret(
         [_]u8{0x94} ** nonce_len,

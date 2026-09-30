@@ -76,6 +76,8 @@ pub const Result = struct {
     ech_rejected: bool,
     requested_ticket_count: u8,
     application_settings: ?application_settings.Payload,
+    peer_application_settings: ?[]const u8,
+    client_application_settings_required: bool,
 
     pub fn deinit(self: *Result) void {
         if (self.client_auth) |state| {
@@ -133,6 +135,7 @@ pub const ResumptionPsk = struct {
     suite: cipher_suite.Suite,
     age_policy: ?psk.TicketAgePolicy = null,
     max_early_data_size: ?u32 = null,
+    application_settings: ?application_settings.Session = null,
 };
 
 /// Validate both ClientHellos and the intervening HelloRetryRequest, then
@@ -556,6 +559,10 @@ pub fn writeClientCryptoFlight(
             .max_decompressed_certificate_len = options.max_decompressed_certificate_len,
             .client_identity = options.client_identity,
             .application_settings = options.application_settings,
+            .resumed_application_settings = if (resumed)
+                options.resumption.?.application_settings
+            else
+                null,
         },
     );
     var verified_owned = true;
@@ -804,7 +811,12 @@ pub fn writeServerCryptoFlight(
     {
         return error.InvalidEarlyDataConfiguration;
     }
-    if (early_data_accepted and selection.application_settings != null) {
+    if (early_data_accepted and
+        !application_settings.resumptionMatches(
+            selection.application_settings,
+            options.resumption.?.application_settings,
+        ))
+    {
         return error.InvalidEarlyDataConfiguration;
     }
     if (selected_psk == null) {
@@ -910,7 +922,10 @@ pub fn writeServerCryptoFlight(
             null,
         .ticket_request_hint = if (options.parsed_client_hello.ticket_request != null and
             options.max_requested_tickets != 0) requested_ticket_count else null,
-        .application_settings = selection.application_settings,
+        .application_settings = if (early_data_accepted)
+            null
+        else
+            selection.application_settings,
     });
     try handshake_crypto.appendSlice(allocator, encrypted_extensions.items);
     transcript_state.update(encrypted_extensions.items);
@@ -1037,6 +1052,15 @@ pub fn writeServerCryptoFlight(
         .ech_rejected = ech_rejected,
         .requested_ticket_count = requested_ticket_count,
         .application_settings = selection.application_settings,
+        .peer_application_settings = if (early_data_accepted)
+            if (options.resumption.?.application_settings) |settings|
+                settings.peer
+            else
+                null
+        else
+            null,
+        .client_application_settings_required = selection.application_settings != null and
+            !early_data_accepted,
     };
 }
 
@@ -1052,7 +1076,8 @@ pub fn verifyClientCryptoFlight(
     var transcript_state = server.transcript_state_after_server_finished;
     var peer_application_settings: ?[]u8 = null;
     errdefer if (peer_application_settings) |settings| allocator.free(settings);
-    if (server.application_settings) |negotiated| {
+    if (server.client_application_settings_required) {
+        const negotiated = server.application_settings orelse unreachable;
         const client_extensions = try takeHandshakeMessage(
             client_handshake_crypto,
             &offset,
@@ -1065,6 +1090,8 @@ pub fn verifyClientCryptoFlight(
         }
         peer_application_settings = try allocator.dupe(u8, received.settings);
         transcript_state.update(client_extensions);
+    } else if (server.peer_application_settings) |settings| {
+        peer_application_settings = try allocator.dupe(u8, settings);
     }
     if (server.client_auth) |auth_state| {
         const certificate = try takeHandshakeMessage(
@@ -2352,17 +2379,34 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
     const allocator = std.testing.allocator;
     var resumption_secret = secret.Secret.fromSha256([_]u8{0xa1} ** 32);
     defer resumption_secret.deinit();
-    const resumption = ResumptionPsk{
+    const client_resumption = ResumptionPsk{
         .identity = "quic-ticket",
         .secret = resumption_secret,
         .suite = .aes_128_gcm_sha256,
         .max_early_data_size = 4096,
+        .application_settings = .{
+            .codepoint = .legacy,
+            .local = "quic-client-settings",
+            .peer = "quic-server-settings",
+        },
         .age_policy = .{
             .age_add = 7,
             .issued_at_ms = 1_000,
             .lifetime_seconds = 60,
             .now_ms = 1_010,
         },
+    };
+    const server_resumption = ResumptionPsk{
+        .identity = client_resumption.identity,
+        .secret = client_resumption.secret,
+        .suite = client_resumption.suite,
+        .max_early_data_size = client_resumption.max_early_data_size,
+        .application_settings = .{
+            .codepoint = .legacy,
+            .local = "quic-server-settings",
+            .peer = "quic-client-settings",
+        },
+        .age_policy = client_resumption.age_policy,
     };
     const signing_key = try std.crypto.sign.Ed25519.KeyPair
         .generateDeterministic(
@@ -2384,13 +2428,14 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
         .alpn_protocols = &.{"h3"},
         .quic_transport_parameters = &.{ 1, 2, 3 },
         .server_certificate_types = &.{.raw_public_key},
+        .application_settings_protocols = &.{"h3"},
     });
     try psk.appendClientOfferForSecret(
         &hello,
         allocator,
-        resumption.identity,
+        client_resumption.identity,
         17,
-        resumption.secret,
+        client_resumption.secret,
         true,
         null,
     );
@@ -2412,13 +2457,17 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
                 .alpn_protocols = &.{"h3"},
                 .quic_transport_parameters = &.{ 4, 5, 6 },
                 .server_certificate_type = .raw_public_key,
+                .application_settings = &.{.{
+                    .protocol = "h3",
+                    .settings = "quic-server-settings",
+                }},
             },
             .server_random = [_]u8{0xa6} ** 32,
             .server_key_share = &([_]u8{0xa7} ** 32),
             .shared_secret = &shared_secret,
             .certificate_chain = &.{&public_key_spki},
             .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
-            .resumption = resumption,
+            .resumption = server_resumption,
             .accept_early_data = true,
         },
     );
@@ -2427,7 +2476,7 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
     try std.testing.expectEqual(@as(?u32, 4096), server_result.early_data_limit);
     var client_early_keys = try clientEarlyPacketKeys(
         hello.items,
-        resumption,
+        client_resumption,
         traffic.labels_v1,
     );
     defer client_early_keys.deinit();
@@ -2461,6 +2510,11 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
     );
     try std.testing.expect(resumed_flight.certificate == null);
     try std.testing.expect(resumed_flight.certificate_verify == null);
+    const resumed_extensions = try server_hello.parseEncryptedExtensions(
+        resumed_flight.encrypted_extensions,
+    );
+    try std.testing.expect(resumed_extensions.early_data_accepted);
+    try std.testing.expect(resumed_extensions.application_settings == null);
 
     var client_crypto: std.ArrayList(u8) = .empty;
     defer client_crypto.deinit(allocator);
@@ -2475,13 +2529,25 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
             .server_verifier = .{},
             .server_name = "quic.example",
             .server_certificate_type = .raw_public_key,
-            .resumption = resumption,
+            .application_settings = &.{.{
+                .protocol = "h3",
+                .settings = "quic-client-settings",
+            }},
+            .resumption = client_resumption,
         },
     );
     defer client_result.deinit();
     try std.testing.expect(client_result.resumed);
     try std.testing.expect(client_result.verified.early_data_accepted);
     try std.testing.expectEqual(@as(usize, 0), client_result.verified.peer_certificate_chain.len);
+    try std.testing.expectEqualStrings(
+        "quic-client-settings",
+        client_result.verified.local_application_settings.?,
+    );
+    try std.testing.expectEqualStrings(
+        "quic-server-settings",
+        client_result.verified.peer_application_settings.?,
+    );
     try std.testing.expectEqual(@as(usize, 36), client_crypto.items.len);
     try std.testing.expectEqual(handshake_type_finished, client_crypto.items[0]);
     var verified_client = try verifyClientCryptoFlight(
@@ -2490,6 +2556,127 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
         client_crypto.items,
     );
     defer verified_client.deinit();
+    try std.testing.expectEqualStrings(
+        "quic-client-settings",
+        verified_client.peer_application_settings.?,
+    );
+
+    var changed_client_crypto: std.ArrayList(u8) = .empty;
+    defer changed_client_crypto.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidServerFlight,
+        writeClientCryptoFlight(
+            &changed_client_crypto,
+            allocator,
+            .{
+                .client_hello_bytes = hello.items,
+                .server_hello_bytes = initial_crypto.items,
+                .server_handshake_crypto = server_crypto.items,
+                .shared_secret = &shared_secret,
+                .server_verifier = .{},
+                .server_name = "quic.example",
+                .server_certificate_type = .raw_public_key,
+                .application_settings = &.{.{
+                    .protocol = "h3",
+                    .settings = "changed-client-settings",
+                }},
+                .resumption = client_resumption,
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), changed_client_crypto.items.len);
+
+    const mismatched_server_resumption = ResumptionPsk{
+        .identity = server_resumption.identity,
+        .secret = server_resumption.secret,
+        .suite = server_resumption.suite,
+        .max_early_data_size = server_resumption.max_early_data_size,
+        .application_settings = .{
+            .codepoint = .legacy,
+            .local = "changed-server-settings",
+            .peer = "quic-client-settings",
+        },
+        .age_policy = server_resumption.age_policy,
+    };
+    var mismatched_initial: std.ArrayList(u8) = .empty;
+    defer mismatched_initial.deinit(allocator);
+    var mismatched_server_crypto: std.ArrayList(u8) = .empty;
+    defer mismatched_server_crypto.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidEarlyDataConfiguration,
+        writeServerCryptoFlight(
+            &mismatched_initial,
+            &mismatched_server_crypto,
+            allocator,
+            .{
+                .client_hello_bytes = hello.items,
+                .parsed_client_hello = parsed,
+                .policy = .{
+                    .cipher_suites = &.{.aes_128_gcm_sha256},
+                    .alpn_protocols = &.{"h3"},
+                    .quic_transport_parameters = &.{ 4, 5, 6 },
+                    .server_certificate_type = .raw_public_key,
+                    .application_settings = &.{.{
+                        .protocol = "h3",
+                        .settings = "quic-server-settings",
+                    }},
+                },
+                .server_random = [_]u8{0xac} ** 32,
+                .server_key_share = &([_]u8{0xad} ** 32),
+                .shared_secret = &shared_secret,
+                .certificate_chain = &.{&public_key_spki},
+                .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+                .resumption = mismatched_server_resumption,
+                .accept_early_data = true,
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), mismatched_initial.items.len);
+    try std.testing.expectEqual(@as(usize, 0), mismatched_server_crypto.items.len);
+
+    const wrong_codepoint_resumption = ResumptionPsk{
+        .identity = server_resumption.identity,
+        .secret = server_resumption.secret,
+        .suite = server_resumption.suite,
+        .max_early_data_size = server_resumption.max_early_data_size,
+        .application_settings = .{
+            .codepoint = .current,
+            .local = "quic-server-settings",
+            .peer = "quic-client-settings",
+        },
+        .age_policy = server_resumption.age_policy,
+    };
+    try std.testing.expectError(
+        error.InvalidEarlyDataConfiguration,
+        writeServerCryptoFlight(
+            &mismatched_initial,
+            &mismatched_server_crypto,
+            allocator,
+            .{
+                .client_hello_bytes = hello.items,
+                .parsed_client_hello = parsed,
+                .policy = .{
+                    .cipher_suites = &.{.aes_128_gcm_sha256},
+                    .alpn_protocols = &.{"h3"},
+                    .quic_transport_parameters = &.{ 4, 5, 6 },
+                    .server_certificate_type = .raw_public_key,
+                    .application_settings = &.{.{
+                        .protocol = "h3",
+                        .settings = "quic-server-settings",
+                    }},
+                },
+                .server_random = [_]u8{0xae} ** 32,
+                .server_key_share = &([_]u8{0xaf} ** 32),
+                .shared_secret = &shared_secret,
+                .certificate_chain = &.{&public_key_spki},
+                .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+                .resumption = wrong_codepoint_resumption,
+                .accept_early_data = true,
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), mismatched_initial.items.len);
+    try std.testing.expectEqual(@as(usize, 0), mismatched_server_crypto.items.len);
 
     var rejecting_initial: std.ArrayList(u8) = .empty;
     defer rejecting_initial.deinit(allocator);
@@ -2507,13 +2694,17 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
                 .alpn_protocols = &.{"h3"},
                 .quic_transport_parameters = &.{ 4, 5, 6 },
                 .server_certificate_type = .raw_public_key,
+                .application_settings = &.{.{
+                    .protocol = "h3",
+                    .settings = "quic-server-settings",
+                }},
             },
             .server_random = [_]u8{0xaa} ** 32,
             .server_key_share = &([_]u8{0xab} ** 32),
             .shared_secret = &shared_secret,
             .certificate_chain = &.{&public_key_spki},
             .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
-            .resumption = resumption,
+            .resumption = server_resumption,
         },
     );
     defer rejecting_server.deinit();
@@ -2533,13 +2724,30 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
             .server_verifier = .{},
             .server_name = "quic.example",
             .server_certificate_type = .raw_public_key,
-            .resumption = resumption,
+            .application_settings = &.{.{
+                .protocol = "h3",
+                .settings = "quic-client-settings",
+            }},
+            .resumption = client_resumption,
         },
     );
     defer rejecting_client.deinit();
     try std.testing.expect(rejecting_client.resumed);
     try std.testing.expect(!rejecting_client.verified.early_data_accepted);
-    try std.testing.expectEqual(@as(usize, 36), rejecting_client_crypto.items.len);
+    try std.testing.expectEqual(
+        application_settings.handshake_type_encrypted_extensions,
+        rejecting_client_crypto.items[0],
+    );
+    var rejecting_verified_client = try verifyClientCryptoFlight(
+        allocator,
+        &rejecting_server,
+        rejecting_client_crypto.items,
+    );
+    defer rejecting_verified_client.deinit();
+    try std.testing.expectEqualStrings(
+        "quic-client-settings",
+        rejecting_verified_client.peer_application_settings.?,
+    );
 
     const tampered_hello = try allocator.dupe(u8, hello.items);
     defer allocator.free(tampered_hello);
@@ -2568,7 +2776,7 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
                 .shared_secret = &shared_secret,
                 .certificate_chain = &.{&public_key_spki},
                 .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
-                .resumption = resumption,
+                .resumption = server_resumption,
             },
         ),
     );
@@ -2599,7 +2807,7 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
             .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
             .resumption = .{
                 .identity = "different-ticket",
-                .secret = resumption.secret,
+                .secret = client_resumption.secret,
                 .suite = .aes_128_gcm_sha256,
                 .max_early_data_size = 4096,
             },
@@ -2623,7 +2831,11 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
             },
             .server_name = "quic.example",
             .server_certificate_type = .raw_public_key,
-            .resumption = resumption,
+            .application_settings = &.{.{
+                .protocol = "h3",
+                .settings = "quic-client-settings",
+            }},
+            .resumption = client_resumption,
         },
     );
     defer fallback_client.deinit();

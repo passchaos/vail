@@ -61,6 +61,7 @@ pub const Options = struct {
     max_decompressed_certificate_len: usize = 64 * 1024,
     client_identity: ?client_auth.ClientIdentity = null,
     application_settings: []const application_settings.Setting = &.{},
+    resumed_application_settings: ?application_settings.Session = null,
 };
 
 pub const Result = struct {
@@ -111,6 +112,13 @@ pub const Result = struct {
         }
         self.* = undefined;
     }
+};
+
+const NegotiatedApplicationSettings = struct {
+    codepoint: application_settings.Codepoint,
+    local: []const u8,
+    peer: []const u8,
+    send_client_extensions: bool,
 };
 
 /// Verify the authenticated server flight and append the exact client flight.
@@ -188,12 +196,40 @@ pub fn verifyServerAndWriteClientFlight(
     }
     application_settings.validateSettings(options.application_settings) catch
         return error.InvalidServerFlight;
-    if (encrypted_extensions.early_data_accepted and
-        parsed_client_hello.application_settings_protocols != null)
-    {
-        return error.InvalidServerFlight;
-    }
-    const negotiated_application_settings = if (encrypted_extensions.application_settings) |server_settings| blk: {
+    const negotiated_application_settings: ?NegotiatedApplicationSettings = if (encrypted_extensions.early_data_accepted) blk: {
+        if (encrypted_extensions.application_settings != null) {
+            return error.InvalidServerFlight;
+        }
+        if (parsed_client_hello.application_settings_protocols == null) {
+            if (options.resumed_application_settings != null) {
+                return error.InvalidServerFlight;
+            }
+            break :blk null;
+        }
+        const selected_alpn = encrypted_extensions.alpn_protocol orelse
+            return error.InvalidServerFlight;
+        const cached = options.resumed_application_settings orelse
+            return error.InvalidServerFlight;
+        const local_settings = application_settings.findSetting(
+            options.application_settings,
+            selected_alpn,
+        ) orelse return error.InvalidServerFlight;
+        if (!options.psk_resumed or
+            !parsed_client_hello.supportsApplicationSettings(selected_alpn) or
+            parsed_client_hello.application_settings_codepoint == null or
+            parsed_client_hello.application_settings_codepoint.? !=
+                cached.codepoint or
+            !std.mem.eql(u8, local_settings, cached.local))
+        {
+            return error.InvalidServerFlight;
+        }
+        break :blk .{
+            .codepoint = cached.codepoint,
+            .local = local_settings,
+            .peer = cached.peer,
+            .send_client_extensions = false,
+        };
+    } else if (encrypted_extensions.application_settings) |server_settings| blk: {
         const selected_alpn = encrypted_extensions.alpn_protocol orelse
             return error.InvalidServerFlight;
         if (!parsed_client_hello.supportsApplicationSettings(selected_alpn) or
@@ -211,6 +247,7 @@ pub fn verifyServerAndWriteClientFlight(
             .codepoint = server_settings.codepoint,
             .local = local_settings,
             .peer = server_settings.settings,
+            .send_client_extensions = true,
         };
     } else null;
 
@@ -344,14 +381,16 @@ pub fn verifyServerAndWriteClientFlight(
     }
 
     if (negotiated_application_settings) |settings| {
-        const client_extensions_start = out.items.len;
-        try application_settings.writeClientEncryptedExtensions(
-            out,
-            allocator,
-            settings.codepoint,
-            settings.local,
-        );
-        state.update(out.items[client_extensions_start..]);
+        if (settings.send_client_extensions) {
+            const client_extensions_start = out.items.len;
+            try application_settings.writeClientEncryptedExtensions(
+                out,
+                allocator,
+                settings.codepoint,
+                settings.local,
+            );
+            state.update(out.items[client_extensions_start..]);
+        }
     }
 
     var selected_client_certificate_compression: ?certificate_compression.Algorithm = null;

@@ -142,6 +142,17 @@ pub fn validateSettings(settings: []const Setting) Error!void {
     }
 }
 
+pub fn resumptionMatches(
+    current: ?Payload,
+    cached: ?Session,
+) bool {
+    if (current == null or cached == null) {
+        return current == null and cached == null;
+    }
+    return current.?.codepoint == cached.?.codepoint and
+        std.mem.eql(u8, current.?.settings, cached.?.local);
+}
+
 pub const Payload = struct {
     codepoint: Codepoint,
     settings: []const u8,

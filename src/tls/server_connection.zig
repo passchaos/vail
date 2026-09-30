@@ -203,6 +203,7 @@ pub const ServerPsk = struct {
     secret: secret.Secret,
     age_policy: ?psk.TicketAgePolicy = null,
     max_early_data_size: ?u32 = null,
+    application_settings: ?application_settings.Session = null,
 };
 
 pub const EarlyDataPolicy = struct {
@@ -304,29 +305,53 @@ pub fn ServerConnection(
                     options.ticket_nonce,
                 );
                 defer resumption_psk.deinit();
-                const identity = try options.keyring.sealSecret(
-                    options.sealing_nonce,
-                    options.server_id,
-                    options.alpn,
-                    .{
-                        .secret = resumption_psk,
-                        .age_add = options.age_add,
-                        .issued_at_ms = options.issued_at_ms,
-                        .lifetime_seconds = options.lifetime_seconds,
-                        .cipher_suite_wire = self.application.suite.wireValue(),
-                        .max_early_data_size = if (options.allow_early_data)
-                            ticket.quic_early_data_size
-                        else
-                            null,
-                    },
-                );
+                const opened = ticket_keyring.OpenedSecret{
+                    .secret = resumption_psk,
+                    .age_add = options.age_add,
+                    .issued_at_ms = options.issued_at_ms,
+                    .lifetime_seconds = options.lifetime_seconds,
+                    .cipher_suite_wire = self.application.suite.wireValue(),
+                    .max_early_data_size = if (options.allow_early_data)
+                        ticket.quic_early_data_size
+                    else
+                        null,
+                };
+                var fixed_identity: [ticket_keyring.sealed_len]u8 = undefined;
+                var allocated_identity: ?[]u8 = null;
+                defer if (allocated_identity) |identity| allocator.free(identity);
+                const identity: []const u8 = if (options.allow_early_data and
+                    self.application_settings_codepoint != null)
+                blk: {
+                    allocated_identity = try options.keyring
+                        .sealSecretWithApplicationSettingsAlloc(
+                        allocator,
+                        options.sealing_nonce,
+                        options.server_id,
+                        options.alpn,
+                        opened,
+                        .{
+                            .codepoint = self.application_settings_codepoint.?,
+                            .local = self.local_application_settings.?,
+                            .peer = self.peer_application_settings.?,
+                        },
+                    );
+                    break :blk allocated_identity.?;
+                } else blk: {
+                    fixed_identity = try options.keyring.sealSecret(
+                        options.sealing_nonce,
+                        options.server_id,
+                        options.alpn,
+                        opened,
+                    );
+                    break :blk &fixed_identity;
+                };
                 var message: std.ArrayList(u8) = .empty;
                 defer message.deinit(allocator);
                 try ticket.write(&message, allocator, .{
                     .lifetime_seconds = options.lifetime_seconds,
                     .age_add = options.age_add,
                     .nonce = options.ticket_nonce,
-                    .ticket = &identity,
+                    .ticket = identity,
                     .allow_early_data = options.allow_early_data,
                 });
                 return self.application.sealPostHandshake(
@@ -444,9 +469,17 @@ pub fn ServerConnection(
             max_early_data_size: ?u32,
             issued_at_ms: ?u64,
             lifetime_seconds: ?u32,
+            application_settings: ?application_settings.Session = null,
+            settings_allocator: ?std.mem.Allocator = null,
 
             fn deinit(self: *SelectedResumption) void {
                 self.psk_secret.deinit();
+                if (self.settings_allocator) |allocator| {
+                    if (self.application_settings) |settings| {
+                        allocator.free(settings.local);
+                        allocator.free(settings.peer);
+                    }
+                }
                 self.* = undefined;
             }
         };
@@ -833,14 +866,15 @@ pub fn ServerConnection(
                 binder_prefix,
             );
             defer if (selected_psk) |*selected| selected.deinit();
-            const early_limit = if (selection.application_settings == null) if (selected_psk) |selected|
+            const early_limit = if (selected_psk) |selected|
                 try self.acceptedEarlyDataLimit(
                     message,
                     selected,
+                    selection.application_settings,
                     binder_prefix != null,
                 )
             else
-                null else null;
+                null;
             var early_records: ?traffic.State = null;
             if (selected_psk != null and
                 (try client_hello.parse(message)).early_data)
@@ -917,6 +951,8 @@ pub fn ServerConnection(
                     .client_auth = self.config.client_auth,
                     .record_size_limit = self.config.record_size_limit,
                     .max_requested_tickets = self.config.max_requested_tickets,
+                    .early_application_settings_validated = early_limit != null and
+                        selection.application_settings != null,
                 },
             );
             errdefer {
@@ -942,6 +978,16 @@ pub fn ServerConnection(
                 result.server_handshake_traffic_secret.bytes(),
             );
             result.server_handshake_traffic_secret.deinit();
+            const resumed_peer_application_settings = if (early_limit != null)
+                if (selected_psk.?.application_settings) |settings|
+                    try self.config.allocator.dupe(u8, settings.peer)
+                else
+                    null
+            else
+                null;
+            errdefer if (resumed_peer_application_settings) |settings| {
+                self.config.allocator.free(settings);
+            };
             self.pending = .{
                 .allocator = self.config.allocator,
                 .suite = result.selection.suite,
@@ -958,7 +1004,8 @@ pub fn ServerConnection(
                 .peer_record_size_limit = result.peer_record_size_limit,
                 .requested_ticket_count = result.requested_ticket_count,
                 .application_settings = result.application_settings,
-                .expect_client_encrypted_extensions = result.application_settings != null,
+                .peer_application_settings = resumed_peer_application_settings,
+                .expect_client_encrypted_extensions = result.client_application_settings_required,
                 .client_records = client_records,
                 .early_records = early_records,
                 .early_data_accepted = early_limit != null,
@@ -1017,16 +1064,18 @@ pub fn ServerConnection(
                             age.lifetime_seconds
                         else
                             null,
+                        .application_settings = fixed.application_settings,
                     };
                 },
                 .tickets => |tickets| blk: {
-                    var opened = tickets.keyring.openSecret(
+                    var opened = tickets.keyring.openSecretWithApplicationSettings(
+                        self.config.allocator,
                         offer.identity,
                         tickets.server_id,
                         selection.alpn_protocol orelse "",
                         tickets.now_ms,
                     ) catch break :blk null;
-                    defer opened.secret.deinit();
+                    defer opened.deinit();
                     if (opened.cipher_suite_wire !=
                         selection.suite.wireValue() or
                         opened.secret.hash != selection.suite.hash())
@@ -1046,11 +1095,34 @@ pub fn ServerConnection(
                         .lifetime_seconds = opened.lifetime_seconds,
                         .now_ms = tickets.now_ms,
                     });
+                    const selected_application_settings = if (opened.application_settings_codepoint) |codepoint| application_settings.Session{
+                        .codepoint = codepoint,
+                        .local = try self.config.allocator.dupe(
+                            u8,
+                            opened.local_application_settings.?,
+                        ),
+                        .peer = undefined,
+                    } else null;
+                    errdefer if (selected_application_settings) |settings| {
+                        self.config.allocator.free(settings.local);
+                    };
+                    var owned_application_settings = selected_application_settings;
+                    if (owned_application_settings) |*settings| {
+                        settings.peer = try self.config.allocator.dupe(
+                            u8,
+                            opened.peer_application_settings.?,
+                        );
+                    }
                     break :blk .{
                         .psk_secret = opened.secret,
                         .max_early_data_size = opened.max_early_data_size,
                         .issued_at_ms = opened.issued_at_ms,
                         .lifetime_seconds = opened.lifetime_seconds,
+                        .application_settings = owned_application_settings,
+                        .settings_allocator = if (owned_application_settings != null)
+                            self.config.allocator
+                        else
+                            null,
                     };
                 },
             };
@@ -1060,6 +1132,7 @@ pub fn ServerConnection(
             self: *Self,
             client_hello_bytes: []const u8,
             selected: SelectedResumption,
+            current_application_settings: ?application_settings.Payload,
             after_retry: bool,
         ) Error!?usize {
             if (after_retry or
@@ -1068,6 +1141,10 @@ pub fn ServerConnection(
                 return null;
             }
             const configured = self.config.early_data orelse return null;
+            if (!resumptionApplicationSettingsMatch(
+                current_application_settings,
+                selected.application_settings,
+            )) return null;
             const ticket_limit = selected.max_early_data_size orelse
                 return null;
             const issued_at_ms = selected.issued_at_ms orelse return null;
@@ -1527,6 +1604,46 @@ fn matchesServerNamePattern(pattern: []const u8, server_name: []const u8) bool {
     if (pattern.len == 0 or server_name.len == 0) return false;
     if (std.ascii.eqlIgnoreCase(pattern, server_name)) return true;
     return matchesWildcardServerName(pattern, server_name);
+}
+
+fn resumptionApplicationSettingsMatch(
+    current: ?application_settings.Payload,
+    cached: ?application_settings.Session,
+) bool {
+    return application_settings.resumptionMatches(current, cached);
+}
+
+test "ALPS resumption requires the cached server settings and codepoint" {
+    const current = application_settings.Payload{
+        .codepoint = .legacy,
+        .settings = "current-server-settings",
+    };
+    try std.testing.expect(resumptionApplicationSettingsMatch(
+        current,
+        .{
+            .codepoint = .legacy,
+            .local = "current-server-settings",
+            .peer = "cached-client-settings",
+        },
+    ));
+    try std.testing.expect(!resumptionApplicationSettingsMatch(
+        current,
+        .{
+            .codepoint = .current,
+            .local = "current-server-settings",
+            .peer = "cached-client-settings",
+        },
+    ));
+    try std.testing.expect(!resumptionApplicationSettingsMatch(
+        current,
+        .{
+            .codepoint = .legacy,
+            .local = "changed-server-settings",
+            .peer = "cached-client-settings",
+        },
+    ));
+    try std.testing.expect(!resumptionApplicationSettingsMatch(current, null));
+    try std.testing.expect(resumptionApplicationSettingsMatch(null, null));
 }
 
 fn matchesWildcardServerName(pattern: []const u8, server_name: []const u8) bool {

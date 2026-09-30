@@ -78,6 +78,29 @@ pub fn cache(
     server_name: []const u8,
     alpn: []const u8,
     received_at_ms: u64,
+) (Error || key_schedule.Error)!Cached {
+    return cacheWithApplicationSettings(
+        allocator,
+        message,
+        suite,
+        master_secret,
+        transcript_after_client_finished,
+        server_name,
+        alpn,
+        received_at_ms,
+        null,
+    );
+}
+
+pub fn cacheWithApplicationSettings(
+    allocator: std.mem.Allocator,
+    message: []const u8,
+    suite: cipher_suite.Suite,
+    master_secret: secret.Secret,
+    transcript_after_client_finished: transcript.Digest,
+    server_name: []const u8,
+    alpn: []const u8,
+    received_at_ms: u64,
     negotiated_application_settings: ?application_settings.Session,
 ) (Error || key_schedule.Error)!Cached {
     if (master_secret.hash != suite.hash() or
@@ -356,7 +379,7 @@ test "authenticated NewSessionTicket becomes an owned client cache entry" {
     const master = secret.Secret.fromSha384([_]u8{0x44} ** 48);
     var state = transcript.State.init(.sha384);
     state.update("complete-handshake");
-    var cached = try cache(
+    var cached = try cacheWithApplicationSettings(
         allocator,
         encoded.items,
         .aes_256_gcm_sha384,
