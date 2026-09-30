@@ -10,6 +10,7 @@
 const std = @import("std");
 
 const alert = @import("../tls/alert.zig");
+const application_settings = @import("../tls/application_settings.zig");
 const auth = @import("../tls/auth.zig");
 const certificate_compression = @import("../tls/certificate_compression.zig");
 const cipher_suite = @import("../tls/cipher_suite.zig");
@@ -74,6 +75,7 @@ pub const Result = struct {
     ech_accepted: bool,
     ech_rejected: bool,
     requested_ticket_count: u8,
+    application_settings: ?application_settings.Payload,
 
     pub fn deinit(self: *Result) void {
         if (self.client_auth) |state| {
@@ -246,9 +248,14 @@ pub const ClientFlightResult = struct {
     peer_certificate_chain: [][]const u8,
     client_certificate_compression: ?certificate_compression.Algorithm,
     transcript_after_client_finished: transcript.Digest,
+    application_settings_codepoint: ?application_settings.Codepoint,
+    peer_application_settings: ?[]u8,
 
     pub fn deinit(self: *ClientFlightResult) void {
         freeCertificateChain(self.allocator, self.peer_certificate_chain);
+        if (self.peer_application_settings) |settings| {
+            self.allocator.free(settings);
+        }
         self.* = undefined;
     }
 };
@@ -267,6 +274,7 @@ pub const ClientOptions = struct {
     max_decompressed_certificate_len: usize = 64 * 1024,
     server_certificate_type: auth.CertificateType = .x509,
     client_identity: ?client_auth.ClientIdentity = null,
+    application_settings: []const application_settings.Setting = &.{},
     resumption: ?ResumptionPsk = null,
     retry: ?RetryState = null,
     labels: traffic.Labels = traffic.labels_v1,
@@ -547,6 +555,7 @@ pub fn writeClientCryptoFlight(
             .certificate_compression_algorithms = options.certificate_compression_algorithms,
             .max_decompressed_certificate_len = options.max_decompressed_certificate_len,
             .client_identity = options.client_identity,
+            .application_settings = options.application_settings,
         },
     );
     var verified_owned = true;
@@ -795,6 +804,9 @@ pub fn writeServerCryptoFlight(
     {
         return error.InvalidEarlyDataConfiguration;
     }
+    if (early_data_accepted and selection.application_settings != null) {
+        return error.InvalidEarlyDataConfiguration;
+    }
     if (selected_psk == null) {
         if (!try options.parsed_client_hello.supportsSignatureScheme(
             options.signer.scheme(),
@@ -898,6 +910,7 @@ pub fn writeServerCryptoFlight(
             null,
         .ticket_request_hint = if (options.parsed_client_hello.ticket_request != null and
             options.max_requested_tickets != 0) requested_ticket_count else null,
+        .application_settings = selection.application_settings,
     });
     try handshake_crypto.appendSlice(allocator, encrypted_extensions.items);
     transcript_state.update(encrypted_extensions.items);
@@ -1023,6 +1036,7 @@ pub fn writeServerCryptoFlight(
         .ech_accepted = ech_accepted,
         .ech_rejected = ech_rejected,
         .requested_ticket_count = requested_ticket_count,
+        .application_settings = selection.application_settings,
     };
 }
 
@@ -1034,8 +1048,25 @@ pub fn verifyClientCryptoFlight(
     server: *const Result,
     client_handshake_crypto: []const u8,
 ) Error!ClientFlightResult {
+    var offset: usize = 0;
+    var transcript_state = server.transcript_state_after_server_finished;
+    var peer_application_settings: ?[]u8 = null;
+    errdefer if (peer_application_settings) |settings| allocator.free(settings);
+    if (server.application_settings) |negotiated| {
+        const client_extensions = try takeHandshakeMessage(
+            client_handshake_crypto,
+            &offset,
+        );
+        const received = application_settings.parseClientEncryptedExtensions(
+            client_extensions,
+        ) catch return error.InvalidClientFlight;
+        if (received.codepoint != negotiated.codepoint) {
+            return error.InvalidClientFlight;
+        }
+        peer_application_settings = try allocator.dupe(u8, received.settings);
+        transcript_state.update(client_extensions);
+    }
     if (server.client_auth) |auth_state| {
-        var offset: usize = 0;
         const certificate = try takeHandshakeMessage(
             client_handshake_crypto,
             &offset,
@@ -1064,7 +1095,7 @@ pub fn verifyClientCryptoFlight(
             allocator,
             auth_state.policy,
             auth_state.request_context,
-            server.transcript_state_after_server_finished,
+            transcript_state,
             server.client_handshake_traffic_secret,
             certificate,
             certificate_verify,
@@ -1082,17 +1113,20 @@ pub fn verifyClientCryptoFlight(
             .peer_certificate_chain = peer_certificate_chain,
             .client_certificate_compression = verification.certificate_compression,
             .transcript_after_client_finished = verification.transcript_after_client_finished,
+            .application_settings_codepoint = if (server.application_settings) |settings|
+                settings.codepoint
+            else
+                null,
+            .peer_application_settings = peer_application_settings,
         };
     }
 
-    var offset: usize = 0;
     const finished = try takeHandshakeMessage(client_handshake_crypto, &offset);
     if (offset != client_handshake_crypto.len) {
         return error.InvalidClientFlight;
     }
-    var state = server.transcript_state_after_server_finished;
     try verifyClientFinished(
-        &state,
+        &transcript_state,
         server.client_handshake_traffic_secret,
         finished,
     );
@@ -1100,7 +1134,12 @@ pub fn verifyClientCryptoFlight(
         .allocator = allocator,
         .peer_certificate_chain = try allocator.alloc([]const u8, 0),
         .client_certificate_compression = null,
-        .transcript_after_client_finished = state.digest(),
+        .transcript_after_client_finished = transcript_state.digest(),
+        .application_settings_codepoint = if (server.application_settings) |settings|
+            settings.codepoint
+        else
+            null,
+        .peer_application_settings = peer_application_settings,
     };
 }
 
@@ -1349,6 +1388,7 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
         .server_certificate_types = &.{.raw_public_key},
         .client_certificate_types = &.{.raw_public_key},
         .encrypted_client_hello = &.{ech.inner_type},
+        .application_settings_protocols = &.{"h3"},
     });
     const parsed_client = try client_hello.parse(client_hello_bytes.items);
 
@@ -1368,6 +1408,10 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
                 .quic_transport_parameters = &server_parameters,
                 .server_certificate_type = .raw_public_key,
                 .client_certificate_type = .raw_public_key,
+                .application_settings = &.{.{
+                    .protocol = "h3",
+                    .settings = "quic-server-settings",
+                }},
             },
             .server_random = [_]u8{0x75} ** 32,
             .server_key_share = &.{ 0x76, 0x77, 0x78 },
@@ -1405,10 +1449,18 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
             .server_name = "quic.example",
             .server_certificate_type = .raw_public_key,
             .client_identity = client_identity,
+            .application_settings = &.{.{
+                .protocol = "h3",
+                .settings = "quic-client-settings",
+            }},
         },
     );
     defer client_result.deinit();
     try std.testing.expect(client_result.ech_accepted);
+    try std.testing.expectEqualStrings(
+        "quic-server-settings",
+        client_result.verified.peer_application_settings.?,
+    );
 
     try std.testing.expectEqualStrings("h3", client_result.selected_alpn);
     try std.testing.expectEqualSlices(
@@ -1457,10 +1509,38 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
         &client_public_key_spki,
         client_flight.peer_certificate_chain[0],
     );
+    try std.testing.expectEqualStrings(
+        "quic-client-settings",
+        client_flight.peer_application_settings.?,
+    );
     try std.testing.expectEqualSlices(
         u8,
         client_result.verified.transcript_after_client_finished.bytes(),
         client_flight.transcript_after_client_finished.bytes(),
+    );
+    var client_extensions_len: usize = 0;
+    _ = try takeHandshakeMessage(
+        client_crypto.items,
+        &client_extensions_len,
+    );
+    try std.testing.expectError(
+        error.InvalidClientFlight,
+        verifyClientCryptoFlight(
+            allocator,
+            &server_result,
+            client_crypto.items[client_extensions_len..],
+        ),
+    );
+    const wrong_codepoint = try allocator.dupe(u8, client_crypto.items);
+    defer allocator.free(wrong_codepoint);
+    wrong_codepoint[6..8].* = .{ 0x44, 0xcd };
+    try std.testing.expectError(
+        error.InvalidClientFlight,
+        verifyClientCryptoFlight(
+            allocator,
+            &server_result,
+            wrong_codepoint,
+        ),
     );
 
     const forged_server_hello = try allocator.dupe(u8, initial_crypto.items);
@@ -1481,6 +1561,10 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
             .server_name = "quic.example",
             .server_certificate_type = .raw_public_key,
             .client_identity = client_identity,
+            .application_settings = &.{.{
+                .protocol = "h3",
+                .settings = "quic-client-settings",
+            }},
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), forged_output.items.len);
@@ -1602,6 +1686,10 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
             .server_name = "quic.example",
             .server_certificate_type = .raw_public_key,
             .client_identity = client_identity,
+            .application_settings = &.{.{
+                .protocol = "h3",
+                .settings = "quic-client-settings",
+            }},
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), rejected_output.items.len);

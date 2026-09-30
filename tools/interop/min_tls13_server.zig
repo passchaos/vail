@@ -62,6 +62,11 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "ticket-request")
     else
         false;
+    const use_alps = if (mode) |argument|
+        std.mem.eql(u8, argument, "alps") or
+            std.mem.eql(u8, argument, "alps-new")
+    else
+        false;
     if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
@@ -191,6 +196,13 @@ pub fn main(init: std.process.Init) !void {
                 &zstd_certificates
             else
                 &zlib_certificates,
+            .application_settings = if (use_alps)
+                &.{.{
+                    .protocol = "h2",
+                    .settings = "vail-server-settings",
+                }}
+            else
+                &.{},
         },
         .server_random = [_]u8{0x73} ** 32,
         .key_material = &key_material,
@@ -256,6 +268,15 @@ pub fn main(init: std.process.Init) !void {
             "ticket request count={d}\n",
             .{established.requestedTicketsRemaining()},
         );
+    }
+    if (use_alps) {
+        if (!std.mem.eql(
+            u8,
+            established.peer_application_settings orelse
+                return error.MissingApplicationSettings,
+            "aws-client-settings",
+        )) return error.InvalidApplicationSettings;
+        std.debug.print("AWS-LC ALPS settings verified\n", .{});
     }
     if (established.ech_accepted) {
         std.debug.print("ech accepted\n", .{});

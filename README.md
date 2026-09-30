@@ -27,6 +27,10 @@ The current foundation provides:
 - TLS 1.3 ClientHello parsing, encrypted server-handshake flight construction,
   ServerHello/EncryptedExtensions, Certificate, CertificateVerify, Finished, and
   AEAD record-protection codecs;
+- deployed draft ALPS (`application_settings`) with both AWS-LC codepoints,
+  ALPN-bound protocol offers, mutually authenticated opaque settings, the
+  transcript-required client EncryptedExtensions message, ECH privacy, and
+  conservative 0-RTT rejection until settings are stored with resumption PSKs;
 - incremental TLS 1.3 client/server stream states with record and handshake
   reassembly, internally owned classical/hybrid key exchange, authenticated
   transition to application traffic, HelloRetryRequest with RFC 8446
@@ -337,6 +341,9 @@ requires both peers to report a resumed handshake.
 `interop-rustls-ticket-request-server` and
 `interop-rustls-ticket-request-client` exercise RFC 9149 request and response
 hints in both directions against rustls.
+`interop-aws-lc-alps-client` and `interop-aws-lc-alps-new-client` exchange both
+client and server ALPS settings against an independent test-only AWS-LC TLS
+endpoint using the deployed old and new codepoints respectively.
 `zig build interop-openssl-min-client` exercises the reverse direction: Vail's
 incremental client state authenticates an OpenSSL server and its Finished,
 sends its encrypted Finished, and verifies encrypted application data. The

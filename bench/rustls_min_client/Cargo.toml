@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 aws-lc-rs = { version = "1.18", default-features = false, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
+aws-lc-sys = { version = "0.45", features = ["ssl"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "brotli", "zlib"] }
 rustls-pki-types = "1"
 rustls-pemfile = "2"

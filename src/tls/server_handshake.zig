@@ -6,6 +6,7 @@
 //! Certificate, CertificateVerify, and Finished records.
 
 const std = @import("std");
+const application_settings = @import("application_settings.zig");
 const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
 const client_auth = @import("client_auth.zig");
@@ -29,6 +30,7 @@ pub const Error = std.mem.Allocator.Error || server_flight.Error ||
     client_hello.Error ||
     key_schedule.Error || record.Error || traffic.Error || auth.Error ||
     certificate_compression.Error ||
+    application_settings.Error ||
     record_size_limit.Error ||
     key_exchange.Error ||
     client_auth.Error || ech.Error || error{
@@ -51,6 +53,7 @@ pub const Result = struct {
     local_record_size_limit: ?u16,
     peer_record_size_limit: ?u16,
     requested_ticket_count: u8,
+    application_settings: ?application_settings.Payload,
 };
 
 pub const Options = struct {
@@ -195,6 +198,9 @@ fn writeServerHandshakeFlightSelected(
     if (options.accept_early_data and options.psk == null) {
         return error.InvalidPskSelection;
     }
+    if (options.accept_early_data and selection.application_settings != null) {
+        return error.InvalidApplicationSettings;
+    }
     if (options.ech_inner_random != null and
         options.ech_retry_configs != null)
     {
@@ -297,6 +303,7 @@ fn writeServerHandshakeFlightSelected(
         .ech_retry_configs = options.ech_retry_configs,
         .record_size_limit = local_record_size_limit,
         .ticket_request_hint = ticket_request_hint,
+        .application_settings = selection.application_settings,
     });
     try appendEncryptedHandshake(
         out,
@@ -419,6 +426,7 @@ fn writeServerHandshakeFlightSelected(
         .local_record_size_limit = local_record_size_limit,
         .peer_record_size_limit = options.parsed_client_hello.record_size_limit,
         .requested_ticket_count = requested_ticket_count,
+        .application_settings = selection.application_settings,
     };
 }
 

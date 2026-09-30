@@ -6,6 +6,7 @@
 //! calculations without depending on TCP or QUIC framing.
 
 const std = @import("std");
+const application_settings = @import("application_settings.zig");
 const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
@@ -20,6 +21,7 @@ const transcript = @import("transcript.zig");
 pub const handshake_type_end_of_early_data: u8 = 0x05;
 
 pub const Error = std.mem.Allocator.Error || auth.Error ||
+    application_settings.Error ||
     certificate_compression.Error || client_auth.Error || client_hello.Error ||
     key_schedule.Error || secret.Error ||
     server_hello.Error || error{
@@ -58,6 +60,7 @@ pub const Options = struct {
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     max_decompressed_certificate_len: usize = 64 * 1024,
     client_identity: ?client_auth.ClientIdentity = null,
+    application_settings: []const application_settings.Setting = &.{},
 };
 
 pub const Result = struct {
@@ -87,6 +90,9 @@ pub const Result = struct {
     peer_record_size_limit: ?u16,
     /// RFC 9149 count the server expects to issue on this connection.
     expected_ticket_count: ?u8,
+    application_settings_codepoint: ?application_settings.Codepoint,
+    local_application_settings: ?[]u8,
+    peer_application_settings: ?[]u8,
     ech_retry_configs: ?[]const u8,
 
     pub fn deinit(self: *Result) void {
@@ -97,6 +103,12 @@ pub const Result = struct {
             self.allocator.free(certificate);
         }
         self.allocator.free(self.peer_certificate_chain);
+        if (self.local_application_settings) |settings| {
+            self.allocator.free(settings);
+        }
+        if (self.peer_application_settings) |settings| {
+            self.allocator.free(settings);
+        }
         self.* = undefined;
     }
 };
@@ -174,6 +186,33 @@ pub fn verifyServerAndWriteClientFlight(
     {
         return error.InvalidServerFlight;
     }
+    application_settings.validateSettings(options.application_settings) catch
+        return error.InvalidServerFlight;
+    if (encrypted_extensions.early_data_accepted and
+        parsed_client_hello.application_settings_protocols != null)
+    {
+        return error.InvalidServerFlight;
+    }
+    const negotiated_application_settings = if (encrypted_extensions.application_settings) |server_settings| blk: {
+        const selected_alpn = encrypted_extensions.alpn_protocol orelse
+            return error.InvalidServerFlight;
+        if (!parsed_client_hello.supportsApplicationSettings(selected_alpn) or
+            parsed_client_hello.application_settings_codepoint == null or
+            parsed_client_hello.application_settings_codepoint.? !=
+                server_settings.codepoint)
+        {
+            return error.InvalidServerFlight;
+        }
+        const local_settings = application_settings.findSetting(
+            options.application_settings,
+            selected_alpn,
+        ) orelse return error.InvalidServerFlight;
+        break :blk .{
+            .codepoint = server_settings.codepoint,
+            .local = local_settings,
+            .peer = server_settings.settings,
+        };
+    } else null;
 
     var state = options.transcript_prefix orelse blk: {
         var initial = transcript.State.init(
@@ -273,6 +312,17 @@ pub fn verifyServerAndWriteClientFlight(
     state.update(flight.finished);
     const transcript_after_server_finished = state.digest();
 
+    const local_application_settings = if (negotiated_application_settings) |settings|
+        try allocator.dupe(u8, settings.local)
+    else
+        null;
+    errdefer if (local_application_settings) |settings| allocator.free(settings);
+    const peer_application_settings = if (negotiated_application_settings) |settings|
+        try allocator.dupe(u8, settings.peer)
+    else
+        null;
+    errdefer if (peer_application_settings) |settings| allocator.free(settings);
+
     var application = try key_schedule.deriveApplicationFor(
         options.handshake_secret,
         transcript_after_server_finished,
@@ -291,6 +341,17 @@ pub fn verifyServerAndWriteClientFlight(
         };
         try out.appendSlice(allocator, &end_of_early_data);
         state.update(&end_of_early_data);
+    }
+
+    if (negotiated_application_settings) |settings| {
+        const client_extensions_start = out.items.len;
+        try application_settings.writeClientEncryptedExtensions(
+            out,
+            allocator,
+            settings.codepoint,
+            settings.local,
+        );
+        state.update(out.items[client_extensions_start..]);
     }
 
     var selected_client_certificate_compression: ?certificate_compression.Algorithm = null;
@@ -376,6 +437,12 @@ pub fn verifyServerAndWriteClientFlight(
         .local_record_size_limit = parsed_client_hello.record_size_limit,
         .peer_record_size_limit = encrypted_extensions.record_size_limit,
         .expected_ticket_count = encrypted_extensions.ticket_request_hint,
+        .application_settings_codepoint = if (negotiated_application_settings) |settings|
+            settings.codepoint
+        else
+            null,
+        .local_application_settings = local_application_settings,
+        .peer_application_settings = peer_application_settings,
         .ech_retry_configs = encrypted_extensions.ech_retry_configs,
     };
 }
@@ -563,6 +630,8 @@ test "authenticated client handshake verifies server and writes identity" {
             .new_session_count = 4,
             .resumption_count = 2,
         },
+        .alpn_protocols = &.{"h2"},
+        .application_settings_protocols = &.{"h2"},
     });
     const client_hello_bytes = client_hello_message.items;
     const suite = @import("cipher_suite.zig").Suite
@@ -599,7 +668,14 @@ test "authenticated client handshake verifies server and writes identity" {
     try server_hello.writeEncryptedExtensions(
         &encrypted_extensions,
         allocator,
-        .{ .ticket_request_hint = 3 },
+        .{
+            .alpn_protocol = "h2",
+            .ticket_request_hint = 3,
+            .application_settings = .{
+                .codepoint = .legacy,
+                .settings = "server-settings",
+            },
+        },
     );
     var request: std.ArrayList(u8) = .empty;
     defer request.deinit(allocator);
@@ -682,12 +758,24 @@ test "authenticated client handshake verifies server and writes identity" {
                 .certificate_chain = &.{&client_public},
                 .signer = .{ .ed25519 = .{ .key_pair = client_key } },
             },
+            .application_settings = &.{.{
+                .protocol = "h2",
+                .settings = "client-settings",
+            }},
         },
     );
     defer result.deinit();
     try std.testing.expectEqual(suite, result.cipher_suite);
     try std.testing.expectEqual(suite.hash(), result.cipher_suite.hash());
     try std.testing.expectEqual(@as(?u8, 3), result.expected_ticket_count);
+    try std.testing.expectEqualStrings(
+        "client-settings",
+        result.local_application_settings.?,
+    );
+    try std.testing.expectEqualStrings(
+        "server-settings",
+        result.peer_application_settings.?,
+    );
     try std.testing.expectEqual(
         @as(usize, 1),
         result.peer_certificate_chain.len,
@@ -700,13 +788,23 @@ test "authenticated client handshake verifies server and writes identity" {
     try std.testing.expect(
         result.peer_certificate_chain[0].ptr != server_public[0..].ptr,
     );
+    const client_extensions_len = try handshakeMessageLength(client_flight.items);
+    const parsed_client_extensions = try application_settings
+        .parseClientEncryptedExtensions(
+        client_flight.items[0..client_extensions_len],
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        "client-settings",
+        parsed_client_extensions.settings,
+    );
     const certificate_len = try handshakeMessageLength(
-        client_flight.items,
+        client_flight.items[client_extensions_len..],
     );
     var parsed_client_certificate =
         try auth.parseClientCertificateWithContext(
             allocator,
-            client_flight.items[0..certificate_len],
+            client_flight.items[client_extensions_len..][0..certificate_len],
             &.{},
         );
     defer parsed_client_certificate.deinit(allocator);

@@ -1481,6 +1481,17 @@ test "stream ClientHello writer round-trips without QUIC extensions" {
             .certificate_authorities = &.{&.{}},
         }),
     );
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        write(&encoded, allocator, .{
+            .random = [_]u8{0x57} ** 32,
+            .x25519_public_key = public_key,
+            .alpn_protocols = &.{"h2"},
+            .application_settings_protocols = &.{"h3"},
+        }),
+    );
 }
 
 test "ClientHello parser extracts a minimal TLS 1.3 offer" {

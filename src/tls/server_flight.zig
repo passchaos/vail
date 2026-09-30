@@ -5,6 +5,7 @@
 //! the negotiation core that OpenSSL/rustls interop will exercise next.
 
 const std = @import("std");
+const application_settings = @import("application_settings.zig");
 const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
@@ -65,6 +66,7 @@ pub const Selection = struct {
     send_server_certificate_type: bool,
     client_certificate_type: auth.CertificateType,
     send_client_certificate_type: bool,
+    application_settings: ?application_settings.Payload = null,
 };
 
 pub const Policy = struct {
@@ -80,10 +82,18 @@ pub const Policy = struct {
     compressed_certificates: []const certificate_compression.PreparedView = &.{},
     server_certificate_type: auth.CertificateType = .x509,
     client_certificate_type: auth.CertificateType = .x509,
+    application_settings: []const application_settings.Setting = &.{},
 };
 
 pub fn select(client: client_hello.Parsed, policy: Policy) Error!Selection {
     if (!client.offersTls13()) return error.NoTls13;
+    application_settings.validateSettings(policy.application_settings) catch
+        return error.InvalidEncryptedExtensions;
+    for (policy.application_settings) |entry| {
+        for (policy.alpn_protocols) |protocol| {
+            if (std.mem.eql(u8, entry.protocol, protocol)) break;
+        } else return error.InvalidEncryptedExtensions;
+    }
     if (policy.quic_transport_parameters != null and
         client.quic_transport_parameters == null)
     {
@@ -95,14 +105,33 @@ pub fn select(client: client_hello.Parsed, policy: Policy) Error!Selection {
     const key_share = try firstSupportedShare(client, policy.groups) orelse
         return error.NoSupportedKeyShare;
     const certificate_types = try selectCertificateTypes(client, policy);
+    const selected_alpn = try selectAlpn(
+        client.alpn_protocols,
+        policy.alpn_protocols,
+    );
+    const selected_application_settings: ?application_settings.Payload =
+        if (selected_alpn) |protocol| blk: {
+            const settings = application_settings.findSetting(
+                policy.application_settings,
+                protocol,
+            ) orelse break :blk null;
+            if (!client.supportsApplicationSettings(protocol)) {
+                break :blk null;
+            }
+            break :blk .{
+                .codepoint = client.application_settings_codepoint.?,
+                .settings = settings,
+            };
+        } else null;
     return .{
         .suite = suite,
         .key_share_group = key_share.group,
-        .alpn_protocol = try selectAlpn(client.alpn_protocols, policy.alpn_protocols),
+        .alpn_protocol = selected_alpn,
         .server_certificate_type = policy.server_certificate_type,
         .send_server_certificate_type = certificate_types.send_server,
         .client_certificate_type = policy.client_certificate_type,
         .send_client_certificate_type = certificate_types.send_client,
+        .application_settings = selected_application_settings,
     };
 }
 
@@ -161,6 +190,7 @@ pub fn writeFirstFlight(
             chosen.client_certificate_type
         else
             null,
+        .application_settings = chosen.application_settings,
     });
     return chosen;
 }

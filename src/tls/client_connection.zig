@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const alert = @import("alert.zig");
+const application_settings = @import("application_settings.zig");
 const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
@@ -106,6 +107,8 @@ pub const Config = struct {
     /// a TLS 1.3 NewSessionTicket for a later connection.
     request_resumption: bool = false,
     ticket_request: ?client_hello.TicketRequest = null,
+    application_settings: []const application_settings.Setting = &.{},
+    application_settings_codepoint: application_settings.Codepoint = .legacy,
     resumption: ?ClientPsk = null,
     ech: ?EchClientConfig = null,
     /// Opt-in NSS-compatible traffic-secret logging for diagnostics.
@@ -159,6 +162,9 @@ pub fn ClientConnection(
             local_record_size_limit: ?u16,
             peer_record_size_limit: ?u16,
             expected_ticket_count: ?u8,
+            application_settings_codepoint: ?application_settings.Codepoint,
+            local_application_settings: ?[]u8,
+            peer_application_settings: ?[]u8,
             ech_accepted: bool,
 
             pub fn cacheNewSessionTicket(
@@ -189,6 +195,12 @@ pub fn ClientConnection(
                 self.application.deinit();
                 self.master_secret.deinit();
                 if (self.selected_alpn) |alpn| self.allocator.free(alpn);
+                if (self.local_application_settings) |settings| {
+                    self.allocator.free(settings);
+                }
+                if (self.peer_application_settings) |settings| {
+                    self.allocator.free(settings);
+                }
                 for (self.peer_certificate_chain) |certificate| {
                     self.allocator.free(certificate);
                 }
@@ -289,6 +301,8 @@ pub fn ClientConnection(
         client_identity: ?client_auth.ClientIdentity,
         request_resumption: bool,
         ticket_request: ?client_hello.TicketRequest,
+        application_settings: []const application_settings.Setting,
+        application_settings_codepoint: application_settings.Codepoint,
         random: [32]u8,
         cipher_suites: []const cipher_suite.Suite,
         additional_cipher_suites: []const u16,
@@ -358,6 +372,18 @@ pub fn ClientConnection(
                 [_]u16{ exchange.namedGroup(), retry.namedGroup() }
             else
                 [_]u16{ exchange.namedGroup(), exchange.namedGroup() };
+            try application_settings.validateSettings(
+                config.application_settings,
+            );
+            var application_settings_protocols: std.ArrayList([]const u8) =
+                .empty;
+            defer application_settings_protocols.deinit(config.allocator);
+            for (config.application_settings) |entry| {
+                try application_settings_protocols.append(
+                    config.allocator,
+                    entry.protocol,
+                );
+            }
             var hello: std.ArrayList(u8) = .empty;
             defer hello.deinit(config.allocator);
             try client_hello.writeWithKeyShare(&hello, config.allocator, .{
@@ -379,6 +405,8 @@ pub fn ClientConnection(
                 .record_size_limit = config.record_size_limit,
                 .certificate_authorities = config.certificate_authorities,
                 .ticket_request = config.ticket_request,
+                .application_settings_protocols = application_settings_protocols.items,
+                .application_settings_codepoint = config.application_settings_codepoint,
                 .certificate_compression_algorithms = config.certificate_compression_algorithms,
                 .session_ticket = config.tls12_session_ticket,
                 .server_certificate_types = if (config.server_certificate_type == .raw_public_key)
@@ -414,7 +442,8 @@ pub fn ClientConnection(
                     value.identity,
                     value.obfuscated_ticket_age,
                     value.secret,
-                    value.max_early_data_size != null,
+                    value.max_early_data_size != null and
+                        config.application_settings.len == 0,
                     null,
                 );
             } else if (config.request_resumption or config.ticket_request != null)
@@ -503,7 +532,9 @@ pub fn ClientConnection(
             try output.appendSlice(config.allocator, wire_hello);
             var early_write: ?traffic.State = null;
             if (resumption) |value| {
-                if (value.max_early_data_size != null) {
+                if (value.max_early_data_size != null and
+                    config.application_settings.len == 0)
+                {
                     if (value.suite.hash() != value.secret.hash) {
                         return error.InvalidPskSuite;
                     }
@@ -538,6 +569,8 @@ pub fn ClientConnection(
                 .client_identity = config.client_identity,
                 .request_resumption = config.request_resumption,
                 .ticket_request = config.ticket_request,
+                .application_settings = config.application_settings,
+                .application_settings_codepoint = config.application_settings_codepoint,
                 .random = config.random,
                 .cipher_suites = config.cipher_suites,
                 .additional_cipher_suites = config.additional_cipher_suites,
@@ -751,6 +784,15 @@ pub fn ClientConnection(
                 initial_exchange.namedGroup(),
                 retry_exchange.namedGroup(),
             };
+            var application_settings_protocols: std.ArrayList([]const u8) =
+                .empty;
+            defer application_settings_protocols.deinit(self.allocator);
+            for (self.application_settings) |entry| {
+                try application_settings_protocols.append(
+                    self.allocator,
+                    entry.protocol,
+                );
+            }
             try client_hello.writeWithKeyShare(
                 &second_hello,
                 self.allocator,
@@ -774,6 +816,8 @@ pub fn ClientConnection(
                     .record_size_limit = self.record_size_limit,
                     .certificate_authorities = self.certificate_authorities,
                     .ticket_request = self.ticket_request,
+                    .application_settings_protocols = application_settings_protocols.items,
+                    .application_settings_codepoint = self.application_settings_codepoint,
                     .certificate_compression_algorithms = self.certificate_compression_algorithms,
                     .session_ticket = parsed_client.session_ticket,
                     .server_certificate_types = if (self.server_certificate_type == .raw_public_key)
@@ -1173,6 +1217,7 @@ pub fn ClientConnection(
                     .certificate_compression_algorithms = self.certificate_compression_algorithms,
                     .max_decompressed_certificate_len = self.max_decompressed_certificate_len,
                     .client_identity = self.client_identity,
+                    .application_settings = self.application_settings,
                 },
             );
             var verified_owned = true;
@@ -1332,8 +1377,13 @@ pub fn ClientConnection(
                 .local_record_size_limit = verified.local_record_size_limit,
                 .peer_record_size_limit = verified.peer_record_size_limit,
                 .expected_ticket_count = verified.expected_ticket_count,
+                .application_settings_codepoint = verified.application_settings_codepoint,
+                .local_application_settings = verified.local_application_settings,
+                .peer_application_settings = verified.peer_application_settings,
                 .ech_accepted = self.ech_accepted,
             };
+            verified.local_application_settings = null;
+            verified.peer_application_settings = null;
             verified_owned = false;
             pending.deinit();
             self.pending = null;
@@ -1532,6 +1582,44 @@ test "client requests future TLS 1.3 resumption without offering a PSK" {
     try std.testing.expect(parsed.pre_shared_key == null);
 }
 
+test "ALPS offer disables zero RTT without cached settings" {
+    const allocator = std.testing.allocator;
+    const Client = ClientConnection(4096, 256);
+    var key_material = key_exchange.ClientKeyMaterial{
+        .x25519 = [_]u8{0x28} ** key_exchange.secret_len,
+    };
+    var offered = ClientPsk{
+        .identity = "ticket",
+        .secret = secret.Secret.fromSha256([_]u8{0x29} ** 32),
+        .obfuscated_ticket_age = 7,
+        .max_early_data_size = 1024,
+    };
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0x2a} ** 32,
+        .key_material = &key_material,
+        .alpn_protocols = &.{"h2"},
+        .application_settings = &.{.{
+            .protocol = "h2",
+            .settings = "fresh-settings",
+        }},
+        .server_verifier = .{},
+        .resumption = offered,
+    }, &output);
+    offered.secret.deinit();
+    defer client.deinit();
+    const hello = try client_hello.parse(output.items[record.header_len..]);
+    try std.testing.expect(!hello.early_data);
+    try std.testing.expect(hello.supportsApplicationSettings("h2"));
+    var early_record: [128]u8 = undefined;
+    try std.testing.expectError(
+        error.UnexpectedApplicationData,
+        client.sealEarlyData("not safe with uncached ALPS", &early_record),
+    );
+}
+
 test "client and server states establish over one-byte transport reads" {
     const allocator = std.testing.allocator;
     var client_key_log: TestKeyLogCapture = .{};
@@ -1632,6 +1720,10 @@ test "client and server states establish over one-byte transport reads" {
             .new_session_count = 3,
             .resumption_count = 1,
         },
+        .application_settings = &.{.{
+            .protocol = "h2",
+            .settings = "client-h2-settings",
+        }},
         .certificate_compression_algorithms = &.{.zstd},
         .key_log = client_key_log.logger(),
         .server_verifier = .{ .verify_trust = struct {
@@ -1676,6 +1768,10 @@ test "client and server states establish over one-byte transport reads" {
             .cipher_suites = &.{.aes_128_gcm_sha256},
             .groups = &.{key_exchange.named_group_x25519},
             .alpn_protocols = &.{"h2"},
+            .application_settings = &.{.{
+                .protocol = "h2",
+                .settings = "server-h2-settings",
+            }},
         },
         .server_random = [_]u8{0xc5} ** 32,
         .key_material = &server_material,
@@ -1781,12 +1877,37 @@ test "client and server states establish over one-byte transport reads" {
         @as(?u8, 2),
         established_client.expected_ticket_count,
     );
-
-    const server_established_result = try server.receive(
-        client_finished.items,
-        &server_flight,
+    try std.testing.expectEqual(
+        application_settings.Codepoint.legacy,
+        established_client.application_settings_codepoint.?,
     );
-    var established_server = server_established_result.event.?.established;
+    try std.testing.expectEqualStrings(
+        "client-h2-settings",
+        established_client.local_application_settings.?,
+    );
+    try std.testing.expectEqualStrings(
+        "server-h2-settings",
+        established_client.peer_application_settings.?,
+    );
+
+    var server_established: ?Server.Established = null;
+    var client_flight_offset: usize = 0;
+    while (client_flight_offset < client_finished.items.len or
+        server_established == null)
+    {
+        const received = try server.receive(
+            client_finished.items[client_flight_offset..],
+            &server_flight,
+        );
+        client_flight_offset += received.consumed;
+        if (received.event) |event| switch (event) {
+            .established => |value| server_established = value,
+            else => {},
+        } else if (received.consumed == 0) {
+            return error.ServerStateStalled;
+        }
+    }
+    var established_server = server_established.?;
     defer established_server.deinit();
     try std.testing.expectEqual(
         @as(usize, client_certificate_chain.len),
@@ -1812,6 +1933,18 @@ test "client and server states establish over one-byte transport reads" {
     try std.testing.expectEqual(
         @as(u8, 2),
         established_server.requestedTicketsRemaining(),
+    );
+    try std.testing.expectEqual(
+        application_settings.Codepoint.legacy,
+        established_server.application_settings_codepoint.?,
+    );
+    try std.testing.expectEqualStrings(
+        "server-h2-settings",
+        established_server.local_application_settings.?,
+    );
+    try std.testing.expectEqualStrings(
+        "client-h2-settings",
+        established_server.peer_application_settings.?,
     );
     try client_key_log.expectMatches(
         &server_key_log,
@@ -2173,6 +2306,10 @@ test "client and server establish with an accepted RFC 9849 ECH offer" {
             .new_session_count = 4,
             .resumption_count = 2,
         },
+        .application_settings = &.{.{
+            .protocol = "h2",
+            .settings = "private-client-settings",
+        }},
         .server_verifier = .{ .pinned_raw_public_key = &server_spki },
         .server_certificate_type = .raw_public_key,
         .ech = .{
@@ -2202,6 +2339,8 @@ test "client and server establish with an accepted RFC 9849 ECH offer" {
         },
         inner.ticket_request.?,
     );
+    try std.testing.expect(outer.application_settings_protocols == null);
+    try std.testing.expect(inner.supportsApplicationSettings("h2"));
 
     var server_material = key_exchange.ServerKeyMaterial{
         .x25519 = [_]u8{0xdf} ** key_exchange.secret_len,
@@ -2222,6 +2361,10 @@ test "client and server establish with an accepted RFC 9849 ECH offer" {
             .cipher_suites = &.{.aes_256_gcm_sha384},
             .groups = &.{key_exchange.named_group_x25519},
             .alpn_protocols = &.{"h2"},
+            .application_settings = &.{.{
+                .protocol = "h2",
+                .settings = "private-server-settings",
+            }},
         },
         .server_random = [_]u8{0xe0} ** 32,
         .key_material = &server_material,
@@ -2300,6 +2443,10 @@ test "client and server establish with an accepted RFC 9849 ECH offer" {
         "h2",
         client_established.selected_alpn.?,
     );
+    try std.testing.expectEqualStrings(
+        "private-server-settings",
+        client_established.peer_application_settings.?,
+    );
 
     const server_established_result = try server.receive(
         client_finished.items,
@@ -2308,6 +2455,10 @@ test "client and server establish with an accepted RFC 9849 ECH offer" {
     var server_established = server_established_result.event.?.established;
     defer server_established.deinit();
     try std.testing.expect(server_established.ech_accepted);
+    try std.testing.expectEqualStrings(
+        "private-client-settings",
+        server_established.peer_application_settings.?,
+    );
 }
 
 test "accepted RFC 9849 ECH survives HelloRetryRequest" {

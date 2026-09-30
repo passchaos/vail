@@ -120,6 +120,22 @@ pub fn findSetting(
     return null;
 }
 
+pub fn validateSettings(settings: []const Setting) Error!void {
+    for (settings, 0..) |entry, index| {
+        if (entry.protocol.len == 0 or
+            entry.protocol.len > std.math.maxInt(u8) or
+            entry.settings.len > std.math.maxInt(u16))
+        {
+            return error.InvalidApplicationSettings;
+        }
+        for (settings[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.protocol, entry.protocol)) {
+                return error.InvalidApplicationSettings;
+            }
+        }
+    }
+}
+
 pub const Payload = struct {
     codepoint: Codepoint,
     settings: []const u8,
@@ -245,6 +261,11 @@ test "ALPS support and client EncryptedExtensions codecs are strict" {
     try std.testing.expectError(
         error.InvalidApplicationSettings,
         parseSupportPayload(&.{ 0, 2, 0, 0 }),
+    );
+    support.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidApplicationSettings,
+        appendSupportPayload(&support, allocator, &.{ "h2", "h2" }),
     );
 
     var encoded: std.ArrayList(u8) = .empty;

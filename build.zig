@@ -449,6 +449,46 @@ pub fn build(b: *std.Build) void {
         &check_rustls_ticket_request.step,
     );
 
+    const check_aws_lc_alps = b.addSystemCommand(&.{ "sh", "-c" });
+    check_aws_lc_alps.step.dependOn(&build_rustls_min.step);
+    check_aws_lc_alps.addArg(
+        "$1 alps > /tmp/vail-alps-aws-lc-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 5s bench/rustls_min_client/target/release/vail-aws-lc-alps-client > /tmp/vail-alps-aws-lc-client.log 2>&1; client_status=$?; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'AWS-LC ALPS settings verified' /tmp/vail-alps-aws-lc-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "test $client_status -eq 0 && " ++
+            "grep -q 'AWS-LC ALPS settings verified' /tmp/vail-alps-aws-lc-server.log && " ++
+            "grep -q 'AWS-LC ALPS connected and settings matched' /tmp/vail-alps-aws-lc-client.log",
+    );
+    check_aws_lc_alps.addArg("sh");
+    check_aws_lc_alps.addArtifactArg(min_tls13_server);
+    const interop_aws_lc_alps_step = b.step(
+        "interop-aws-lc-alps-client",
+        "Exchange ALPS settings between AWS-LC and the Vail server",
+    );
+    interop_aws_lc_alps_step.dependOn(&check_aws_lc_alps.step);
+
+    const check_aws_lc_alps_new = b.addSystemCommand(&.{ "sh", "-c" });
+    check_aws_lc_alps_new.step.dependOn(&build_rustls_min.step);
+    check_aws_lc_alps_new.addArg(
+        "$1 alps-new > /tmp/vail-alps-new-aws-lc-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 5s bench/rustls_min_client/target/release/vail-aws-lc-alps-client new > /tmp/vail-alps-new-aws-lc-client.log 2>&1; client_status=$?; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'AWS-LC ALPS settings verified' /tmp/vail-alps-new-aws-lc-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "test $client_status -eq 0 && " ++
+            "grep -q 'AWS-LC ALPS settings verified' /tmp/vail-alps-new-aws-lc-server.log && " ++
+            "grep -q 'AWS-LC ALPS connected and settings matched' /tmp/vail-alps-new-aws-lc-client.log",
+    );
+    check_aws_lc_alps_new.addArg("sh");
+    check_aws_lc_alps_new.addArtifactArg(min_tls13_server);
+    const interop_aws_lc_alps_new_step = b.step(
+        "interop-aws-lc-alps-new-client",
+        "Exchange ALPS settings with AWS-LC's newer codepoint",
+    );
+    interop_aws_lc_alps_new_step.dependOn(&check_aws_lc_alps_new.step);
+
     const check_rustls_chacha = b.addSystemCommand(&.{ "sh", "-c" });
     check_rustls_chacha.step.dependOn(&build_rustls_min.step);
     check_rustls_chacha.addArg(

@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const alert = @import("alert.zig");
+const application_settings = @import("application_settings.zig");
 const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
 const client_auth = @import("client_auth.zig");
@@ -246,6 +247,9 @@ pub fn ServerConnection(
             local_record_size_limit: ?u16,
             peer_record_size_limit: ?u16,
             remaining_requested_tickets: u8,
+            application_settings_codepoint: ?application_settings.Codepoint,
+            local_application_settings: ?[]u8,
+            peer_application_settings: ?[]u8,
             peer_certificate_chain: ?[][]u8 = null,
             ech_accepted: bool,
 
@@ -267,6 +271,12 @@ pub fn ServerConnection(
                 if (self.peer_certificate_chain) |chain| {
                     for (chain) |certificate| self.allocator.free(certificate);
                     self.allocator.free(chain);
+                }
+                if (self.local_application_settings) |settings| {
+                    self.allocator.free(settings);
+                }
+                if (self.peer_application_settings) |settings| {
+                    self.allocator.free(settings);
                 }
                 self.* = undefined;
             }
@@ -396,6 +406,9 @@ pub fn ServerConnection(
             local_record_size_limit: ?u16,
             peer_record_size_limit: ?u16,
             requested_ticket_count: u8,
+            application_settings: ?application_settings.Payload,
+            peer_application_settings: ?[]u8 = null,
+            expect_client_encrypted_extensions: bool,
             transcript_after_client_finished: ?transcript.Digest = null,
 
             fn deinit(self: *PendingHandshake) void {
@@ -409,6 +422,9 @@ pub fn ServerConnection(
                         self.allocator.free(certificate);
                     }
                     self.allocator.free(chain);
+                }
+                if (self.peer_application_settings) |settings| {
+                    self.allocator.free(settings);
                 }
                 self.* = undefined;
             }
@@ -817,14 +833,14 @@ pub fn ServerConnection(
                 binder_prefix,
             );
             defer if (selected_psk) |*selected| selected.deinit();
-            const early_limit = if (selected_psk) |selected|
+            const early_limit = if (selection.application_settings == null) if (selected_psk) |selected|
                 try self.acceptedEarlyDataLimit(
                     message,
                     selected,
                     binder_prefix != null,
                 )
             else
-                null;
+                null else null;
             var early_records: ?traffic.State = null;
             if (selected_psk != null and
                 (try client_hello.parse(message)).early_data)
@@ -941,6 +957,8 @@ pub fn ServerConnection(
                 .local_record_size_limit = result.local_record_size_limit,
                 .peer_record_size_limit = result.peer_record_size_limit,
                 .requested_ticket_count = result.requested_ticket_count,
+                .application_settings = result.application_settings,
+                .expect_client_encrypted_extensions = result.application_settings != null,
                 .client_records = client_records,
                 .early_records = early_records,
                 .early_data_accepted = early_limit != null,
@@ -1244,6 +1262,33 @@ pub fn ServerConnection(
                             .event = .{ .end_of_early_data = {} },
                         };
                     }
+                    if (pending.expect_client_encrypted_extensions) {
+                        const received = application_settings
+                            .parseClientEncryptedExtensions(message) catch
+                            return error.UnexpectedHandshakeMessage;
+                        const negotiated = pending.application_settings orelse
+                            unreachable;
+                        if (received.codepoint != negotiated.codepoint) {
+                            return error.UnexpectedHandshakeMessage;
+                        }
+                        pending.peer_application_settings = try self.config.allocator.dupe(
+                            u8,
+                            received.settings,
+                        );
+                        pending.expect_client_encrypted_extensions = false;
+                        pending.transcript_state.update(message);
+                        if (pending.receiver.hasPendingHandshakeData()) {
+                            const next = try pending.receiver.push(
+                                "",
+                                &pending.client_records,
+                            );
+                            return self.handleClientProtected(
+                                consumed,
+                                next.event,
+                            );
+                        }
+                        return .{ .consumed = consumed, .event = null };
+                    }
                     if (self.config.client_auth_policy != null) {
                         return self.handleClientAuthHandshake(
                             consumed,
@@ -1391,6 +1436,13 @@ pub fn ServerConnection(
                 pending.peer_record_size_limit,
             );
             errdefer application_connection.deinit();
+            const local_application_settings = if (pending.application_settings) |settings|
+                try self.config.allocator.dupe(u8, settings.settings)
+            else
+                null;
+            errdefer if (local_application_settings) |settings| {
+                self.config.allocator.free(settings);
+            };
             if (self.config.key_log) |logger| {
                 logger.log(
                     key_log.client_traffic_secret_0,
@@ -1433,10 +1485,17 @@ pub fn ServerConnection(
                 .local_record_size_limit = pending.local_record_size_limit,
                 .peer_record_size_limit = pending.peer_record_size_limit,
                 .remaining_requested_tickets = pending.requested_ticket_count,
+                .application_settings_codepoint = if (pending.application_settings) |settings|
+                    settings.codepoint
+                else
+                    null,
+                .local_application_settings = local_application_settings,
+                .peer_application_settings = pending.peer_application_settings,
                 .peer_certificate_chain = pending.authenticated_client_chain,
                 .ech_accepted = self.ech_accepted,
             };
             pending.authenticated_client_chain = null;
+            pending.peer_application_settings = null;
             pending.deinit();
             self.pending = null;
             self.stage = .established;
