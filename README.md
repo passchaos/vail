@@ -88,9 +88,10 @@ The current foundation provides:
   restrictions are enforced for certificate, CRL, OCSP, and TLS
   CertificateVerify signatures; explicit depth/candidate/certificate
   budgets prevent attacker-controlled path explosion, DNS and IPv4/IPv6 Name
-  Constraints intersect across the chosen server path, and literal IP server
-  identities match only exact iPAddress SAN values rather than falling back to
-  CN/dNSName;
+  Constraints intersect across the chosen server- or client-auth path and
+  cover every subordinate certificate except non-final self-issued rollover
+  certificates, and literal IP server identities match only exact iPAddress
+  SAN values rather than falling back to CN/dNSName;
   plus a client-certificate bundle verifier that omits hostname matching and
   enforces the clientAuth endpoint purpose for mTLS server policy.
   Strict subject identity extraction returns either an owned, unambiguous UTF-8

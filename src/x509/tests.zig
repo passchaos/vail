@@ -516,6 +516,80 @@ test "client certificate trust anchors validate before listener setup" {
     );
 }
 
+test "client certificate paths enforce DNS and IP name constraints" {
+    const root = decodeHex(path_vectors.client_constraints_root_hex);
+    const intermediate = decodeHex(
+        path_vectors.client_constraints_intermediate_hex,
+    );
+    const good = decodeHex(path_vectors.client_constraints_good_hex);
+    const bad = decodeHex(path_vectors.client_constraints_bad_hex);
+    const outside_intermediate = decodeHex(
+        path_vectors.client_constraints_outside_intermediate_hex,
+    );
+    const outside_leaf = decodeHex(
+        path_vectors.client_constraints_outside_leaf_hex,
+    );
+    const rollover = decodeHex(path_vectors.client_constraints_rollover_hex);
+    const rollover_leaf = decodeHex(
+        path_vectors.client_constraints_rollover_leaf_hex,
+    );
+    const now = 1_900_000_000;
+
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(std.testing.allocator);
+    try bundle.bytes.appendSlice(std.testing.allocator, &root);
+    try bundle.parseCert(std.testing.allocator, 0, now);
+    const verifier = trust.ClientCertificateBundleVerifier{
+        .bundle = &bundle,
+        .now_seconds = now,
+    };
+
+    try trust.validateClientCertificateAuthority(&root, now);
+    // Name Constraints apply only to the chosen path: the deliberately
+    // out-of-subtree certificate is presented here but is not selected.
+    try (trust.ClientCertificateBundleVerifier{
+        .bundle = &bundle,
+        .now_seconds = now,
+        .path_limits = .{ .max_candidate_checks = 2 },
+    }).verify(.{
+        .server_name = null,
+        .chain = &.{ &good, &outside_intermediate, &intermediate },
+    });
+    try std.testing.expectError(
+        error.CertificatePathSearchLimitExceeded,
+        (trust.ClientCertificateBundleVerifier{
+            .bundle = &bundle,
+            .now_seconds = now,
+            .path_limits = .{ .max_candidate_checks = 1 },
+        }).verify(.{
+            .server_name = null,
+            .chain = &.{ &good, &outside_intermediate, &intermediate },
+        }),
+    );
+    try std.testing.expectError(
+        error.CertificateNameConstraintViolation,
+        verifier.verify(.{
+            .server_name = null,
+            .chain = &.{ &bad, &intermediate },
+        }),
+    );
+    try std.testing.expectError(
+        error.CertificateNameConstraintViolation,
+        verifier.verify(.{
+            .server_name = null,
+            .chain = &.{ &outside_leaf, &outside_intermediate },
+        }),
+    );
+    try (trust.ClientCertificateBundleVerifier{
+        .bundle = &bundle,
+        .now_seconds = now,
+        .path_limits = .{ .max_candidate_checks = 3 },
+    }).verify(.{
+        .server_name = null,
+        .chain = &.{ &rollover_leaf, &rollover },
+    });
+}
+
 test "bundle verifier treats the same certificate key as a trust anchor" {
     const server_der = @embedFile("testdata/server.der");
     var configured_anchor = server_der.*;

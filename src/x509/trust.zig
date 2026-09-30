@@ -176,12 +176,10 @@ pub fn validateClientCertificateAuthority(
 ) !void {
     const certificate = try parseCertificate(certificate_der);
     try verifyValidity(certificate, now_seconds);
-    try validateIssuerUsageAndNameConstraints(
-        certificate_der,
+    try validateIssuerUsageProfile(
+        try certificateUsage(certificate_der),
         0,
         .client_auth,
-        null,
-        null,
     );
 }
 
@@ -305,12 +303,10 @@ const PathSearch = struct {
             const anchor_der = self.bundle.bytes.items[anchor_index..anchor_element.slice.end];
             const anchor = try parseCertificate(anchor_der);
             anchor_attempt: {
-                validateIssuerUsageAndNameConstraints(
-                    anchor_der,
+                self.validateIssuerUsageAndNameConstraints(
+                    try certificateUsage(anchor_der),
                     ca_below,
-                    self.purpose,
-                    self.constrained_identity,
-                    self.chain[0],
+                    used,
                 ) catch |err| {
                     remembered_error = err;
                     break :anchor_attempt;
@@ -411,12 +407,10 @@ const PathSearch = struct {
                     remembered_error = err;
                     continue;
                 };
-                validateIssuerUsageAndNameConstraintsFromUsage(
+                self.validateIssuerUsageAndNameConstraints(
                     issuer_usage,
                     ca_below,
-                    self.purpose,
-                    self.constrained_identity,
-                    self.chain[0],
+                    used,
                 ) catch |err| {
                     remembered_error = err;
                     continue;
@@ -493,6 +487,49 @@ const PathSearch = struct {
         }
     }
 
+    // Keep the uncommon SAN/path walk out of the ordinary issuer-validation
+    // frame; most public CAs do not carry Name Constraints.
+    noinline fn validateIssuerUsageAndNameConstraints(
+        self: *const PathSearch,
+        usage: CertificateUsage,
+        ca_below: usize,
+        constrained_certificates: u32,
+    ) !void {
+        try validateIssuerUsageProfile(usage, ca_below, self.purpose);
+        if (usage.name_constraints) |encoded| {
+            @branchHint(.unlikely);
+            return self.validateSelectedCertificateNameConstraints(
+                encoded,
+                constrained_certificates,
+            );
+        }
+    }
+
+    noinline fn validateSelectedCertificateNameConstraints(
+        self: *const PathSearch,
+        encoded: []const u8,
+        constrained_certificates: u32,
+    ) !void {
+        if (self.constrained_identity) |identity| {
+            try validateNameConstraints(encoded, identity);
+        }
+        var remaining = constrained_certificates;
+        while (remaining != 0) {
+            const index: usize = @intCast(@ctz(remaining));
+            remaining &= remaining - 1;
+            const certificate = &self.parsed[index];
+            if (index != 0 and
+                namesEqualForSelfIssued(
+                    certificate.issuer(),
+                    certificate.subject(),
+                )) continue;
+            try validateCertificateNamesAgainstConstraints(
+                encoded,
+                certificate,
+            );
+        }
+    }
+
     fn verifyCertificateSignature(
         self: *const PathSearch,
         subject_index: usize,
@@ -539,6 +576,15 @@ const PathSearch = struct {
         }
     }
 };
+
+// This comparison is reached only for non-leaf certificates selected into a
+// constrained path, so keep it out of the per-name validation loop.
+noinline fn namesEqualForSelfIssued(
+    issuer: []const u8,
+    subject: []const u8,
+) bool {
+    return std.mem.eql(u8, issuer, subject);
+}
 
 fn validatePathLimits(limits: PathLimits) !void {
     if (limits.max_depth == 0 or
@@ -783,47 +829,6 @@ fn validateIssuerUsage(
         ca_below,
         purpose,
     );
-}
-
-fn validateIssuerUsageAndNameConstraints(
-    certificate_der: []const u8,
-    ca_below: usize,
-    purpose: EndpointPurpose,
-    constrained_identity: ?ServerIdentity,
-    leaf_der: ?[]const u8,
-) !void {
-    const usage = try certificateUsage(certificate_der);
-    return validateIssuerUsageAndNameConstraintsFromUsage(
-        usage,
-        ca_below,
-        purpose,
-        constrained_identity,
-        leaf_der,
-    );
-}
-
-fn validateIssuerUsageAndNameConstraintsFromUsage(
-    usage: CertificateUsage,
-    ca_below: usize,
-    purpose: EndpointPurpose,
-    constrained_identity: ?ServerIdentity,
-    leaf_der: ?[]const u8,
-) !void {
-    try validateIssuerUsageProfile(usage, ca_below, purpose);
-    if (usage.name_constraints) |encoded| {
-        if (purpose != .server_auth) {
-            return error.UnsupportedCertificateNameConstraint;
-        }
-        try validateNameConstraints(
-            encoded,
-            constrained_identity orelse
-                return error.MissingServerName,
-        );
-        try validateSubjectAlternativeNamesAgainstConstraints(
-            encoded,
-            leaf_der orelse return error.InvalidCertificate,
-        );
-    }
 }
 
 fn validateIssuerUsageProfile(
@@ -1207,11 +1212,10 @@ fn validateNameConstraints(
     }
 }
 
-fn validateSubjectAlternativeNamesAgainstConstraints(
+fn validateCertificateNamesAgainstConstraints(
     constraints: []const u8,
-    certificate_der: []const u8,
+    certificate: *const Certificate.Parsed,
 ) !void {
-    const certificate = try parseCertificate(certificate_der);
     const encoded_names = certificate.subjectAltName();
     if (encoded_names.len == 0) return;
     const names = singleInner(encoded_names, 0x30) catch
