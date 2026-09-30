@@ -96,6 +96,13 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.quic, "transport_parameters"));
     try std.testing.expect(@hasDecl(vail, "tls"));
     try std.testing.expect(@hasDecl(vail.tls, "auth"));
+    try std.testing.expect(@hasField(vail.tls.auth.Signer, "ml_dsa_44"));
+    try std.testing.expect(@hasField(vail.tls.auth.Signer, "ml_dsa_65"));
+    try std.testing.expect(@hasField(vail.tls.auth.Signer, "ml_dsa_87"));
+    try std.testing.expectEqual(
+        @as(u16, 0x0904),
+        vail.tls.auth.signature_scheme_ml_dsa_44,
+    );
     try std.testing.expect(@hasDecl(vail.tls, "certificate_compression"));
     try std.testing.expect(
         vail.tls.certificate_compression.Algorithm.brotli.supported(),

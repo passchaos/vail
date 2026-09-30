@@ -37,9 +37,10 @@ The current foundation provides:
   1.2 without reconstructing transcript bytes, and wipe the unused version's
   one-shot key material;
 - Ed25519, ECDSA P-256, ECDSA P-384, and SM2/SM3 verifier
-  implementations, plus RSA-PSS/RSAE and TLS 1.2 RSA PKCS#1 v1.5
-  SHA-256/384/512 signatures and DER RSAPublicKey pin verification. A built-in
-  pure-Zig RSA signer accepts
+  implementations, plus opt-in FIPS 204 ML-DSA-44/65/87 for TLS 1.3 Raw
+  Public Keys, RSA-PSS/RSAE, TLS 1.2 RSA PKCS#1 v1.5 SHA-256/384/512
+  signatures, and DER RSAPublicKey pin verification. A built-in pure-Zig RSA
+  signer accepts
   strict PKCS#1 or unencrypted PKCS#8 keys, uses fresh per-signature PSS salt,
   and performs CRT private operations through Zig std's constant-time finite-
   field implementation. TLS P-256 verification uses the curve's public
@@ -298,6 +299,10 @@ Public Key authentication in both directions against rustls 0.23 with its
 AWS-LC provider. Both peers send a single DER SubjectPublicKeyInfo, verify
 RSA-PSS CertificateVerify possession, pin the peer SPKI exactly, and exchange
 encrypted application data.
+`interop-rustls-mldsa-rpk-server` and
+`interop-rustls-mldsa-rpk-client` repeat mutual RPK authentication with
+ML-DSA-44, using identical deterministic FIPS 204 seeds to cross-check Zig
+std's public keys and signatures against AWS-LC.
 `zig build interop-rustls-quic-client` drives a rustls/AWS-LC QUIC client
 against Vail's server adapter, while `interop-rustls-quic-server` exercises the
 reverse direction. Both checks exchange raw CRYPTO-stream handshake bytes,

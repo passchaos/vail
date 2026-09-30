@@ -1323,6 +1323,25 @@ pub fn build(b: *std.Build) void {
     interop_rustls_rpk_server_step.dependOn(
         &check_rustls_rpk_client.step,
     );
+    const check_rustls_mldsa_rpk_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_mldsa_rpk_client.step.dependOn(&build_rustls_min.step);
+    check_rustls_mldsa_rpk_client.addArg(
+        "timeout 30s $1 mldsa44 > /tmp/vail-mldsa-rpk-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 25s bench/rustls_min_client/target/release/vail-rustls-rpk-client src/crypto/testdata/rsa_signing_key.pem mldsa44 > /tmp/rustls-mldsa-rpk-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'scheme=ML_DSA_44' /tmp/vail-mldsa-rpk-server.log && " ++
+            "grep -q 'scheme=ML_DSA_44' /tmp/rustls-mldsa-rpk-client.log",
+    );
+    check_rustls_mldsa_rpk_client.addArg("sh");
+    check_rustls_mldsa_rpk_client.addArtifactArg(min_rpk_server);
+    const interop_rustls_mldsa_rpk_server_step = b.step(
+        "interop-rustls-mldsa-rpk-server",
+        "Exercise Vail's ML-DSA-44 RPK server with rustls/AWS-LC",
+    );
+    interop_rustls_mldsa_rpk_server_step.dependOn(
+        &check_rustls_mldsa_rpk_client.step,
+    );
 
     const min_rpk_client = b.addExecutable(.{
         .name = "vail-min-rpk-client",
@@ -1351,5 +1370,24 @@ pub fn build(b: *std.Build) void {
     );
     interop_rustls_rpk_client_step.dependOn(
         &check_rustls_rpk_server.step,
+    );
+    const check_rustls_mldsa_rpk_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_rustls_mldsa_rpk_server.step.dependOn(&build_rustls_server.step);
+    check_rustls_mldsa_rpk_server.addArg(
+        "timeout 30s bench/rustls_min_server/target/release/vail-rustls-rpk-server src/crypto/testdata/rsa_signing_key.pem mldsa44 > /tmp/rustls-mldsa-rpk-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 25s $1 mldsa44 > /tmp/vail-mldsa-rpk-client.log 2>&1; client_status=$?; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 -a $server_status -eq 0 && " ++
+            "grep -q 'scheme=ML_DSA_44' /tmp/rustls-mldsa-rpk-server.log && " ++
+            "grep -q 'scheme=ML_DSA_44' /tmp/vail-mldsa-rpk-client.log",
+    );
+    check_rustls_mldsa_rpk_server.addArg("sh");
+    check_rustls_mldsa_rpk_server.addArtifactArg(min_rpk_client);
+    const interop_rustls_mldsa_rpk_client_step = b.step(
+        "interop-rustls-mldsa-rpk-client",
+        "Exercise Vail's ML-DSA-44 RPK client with rustls/AWS-LC",
+    );
+    interop_rustls_mldsa_rpk_client_step.dependOn(
+        &check_rustls_mldsa_rpk_server.step,
     );
 }

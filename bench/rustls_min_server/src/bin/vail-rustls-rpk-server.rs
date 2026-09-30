@@ -1,4 +1,7 @@
-use rustls::pki_types::{CertificateDer, SubjectPublicKeyInfoDer, UnixTime};
+use aws_lc_rs::signature::{PqdsaKeyPair, ML_DSA_44_SIGNING};
+use rustls::pki_types::{
+    CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, SubjectPublicKeyInfoDer, UnixTime,
+};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::AlwaysResolvesServerRawPublicKeys;
 use rustls::sign::CertifiedKey;
@@ -14,6 +17,7 @@ use std::sync::Arc;
 #[derive(Debug)]
 struct RawClientVerifier {
     expected_spki: Vec<u8>,
+    scheme: SignatureScheme,
 }
 
 impl ClientCertVerifier for RawClientVerifier {
@@ -57,7 +61,7 @@ impl ClientCertVerifier for RawClientVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![SignatureScheme::RSA_PSS_SHA256]
+        vec![self.scheme]
     }
 
     fn requires_raw_public_keys(&self) -> bool {
@@ -66,27 +70,52 @@ impl ClientCertVerifier for RawClientVerifier {
 }
 
 fn main() {
-    let key_path = std::env::args().nth(1).expect("private-key path");
+    let mut args = std::env::args();
+    let _executable = args.next();
+    let key_path = args.next().expect("private-key path");
+    let mldsa = match args.next().as_deref() {
+        None => false,
+        Some("mldsa44") => true,
+        Some(_) => panic!("expected optional mldsa44 mode"),
+    };
+    assert!(args.next().is_none());
     let provider = rustls::crypto::aws_lc_rs::default_provider();
-    let mut key_reader = BufReader::new(File::open(key_path).unwrap());
-    let key_der = rustls_pemfile::private_key(&mut key_reader)
-        .unwrap()
-        .expect("private key");
+    let key_der = if mldsa {
+        let generated = PqdsaKeyPair::from_seed(&ML_DSA_44_SIGNING, &[0x5a; 32]).unwrap();
+        let encoded = generated.to_pkcs8v1().unwrap();
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(encoded.as_ref().to_vec()))
+    } else {
+        let mut key_reader = BufReader::new(File::open(key_path).unwrap());
+        rustls_pemfile::private_key(&mut key_reader)
+            .unwrap()
+            .expect("private key")
+    };
     let signing_key = provider.key_provider.load_private_key(key_der).unwrap();
     let spki = signing_key.public_key().unwrap().as_ref().to_vec();
+    let signature_scheme = if mldsa {
+        SignatureScheme::ML_DSA_44
+    } else {
+        SignatureScheme::RSA_PSS_SHA256
+    };
     let certified_key = CertifiedKey::new(vec![CertificateDer::from(spki.clone())], signing_key);
     let mut config = ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .unwrap()
         .with_client_cert_verifier(Arc::new(RawClientVerifier {
             expected_spki: spki,
+            scheme: signature_scheme,
         }))
         .with_cert_resolver(Arc::new(AlwaysResolvesServerRawPublicKeys::new(Arc::new(
             certified_key,
         ))));
     config.alpn_protocols.push(b"h2".to_vec());
 
-    let listener = TcpListener::bind("127.0.0.1:24453").unwrap();
+    let listener = TcpListener::bind(if mldsa {
+        "127.0.0.1:24469"
+    } else {
+        "127.0.0.1:24453"
+    })
+    .unwrap();
     let (socket, _) = listener.accept().unwrap();
     let connection = ServerConnection::new(Arc::new(config)).unwrap();
     let mut tls = StreamOwned::new(connection, socket);
@@ -95,5 +124,8 @@ fn main() {
     assert_eq!(&request[..received], b"ping");
     tls.write_all(b"rustls rpk ok\n").unwrap();
     tls.flush().unwrap();
-    println!("rustls/AWS-LC server verified mutual RFC 7250 RPK");
+    println!(
+        "rustls/AWS-LC server verified mutual RFC 7250 RPK scheme={}",
+        if mldsa { "ML_DSA_44" } else { "RSA_PSS_SHA256" }
+    );
 }

@@ -376,7 +376,7 @@ pub fn parseAndVerifyServerKeyExchange(
     }
     const signature_len = try readInt(u16, message, &pos);
     if (signature_len == 0 or
-        signature_len > auth.max_certificate_verify_signature_len)
+        signature_len > auth.max_classical_signature_len)
     {
         return error.InvalidServerKeyExchange;
     }
@@ -907,7 +907,7 @@ pub fn writeCertificateVerify(
     signer: auth.Signer,
     handshake_messages: []const u8,
 ) Error!void {
-    var signature: [auth.max_certificate_verify_signature_len]u8 = undefined;
+    var signature: [auth.max_classical_signature_len]u8 = undefined;
     const signature_len = try signer.sign(handshake_messages, &signature);
     try appendHandshakeHeader(
         out,
@@ -954,7 +954,7 @@ fn writeServerKeyExchange(
     signed_content[0..32].* = client_random;
     signed_content[32..64].* = server_random;
     @memcpy(signed_content[64..][0..params_len], params[0..params_len]);
-    var signature: [auth.max_certificate_verify_signature_len]u8 = undefined;
+    var signature: [auth.max_classical_signature_len]u8 = undefined;
     const signature_len = try signer.sign(
         signed_content[0 .. 64 + params_len],
         &signature,

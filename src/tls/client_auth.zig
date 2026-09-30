@@ -64,6 +64,9 @@ pub const ParsedRequest = struct {
     supports_rsa_pss_pss_sha384: bool,
     supports_rsa_pss_pss_sha512: bool,
     supports_sm2sig_sm3: bool,
+    supports_ml_dsa_44: bool,
+    supports_ml_dsa_65: bool,
+    supports_ml_dsa_87: bool,
     certificate_compression_algorithms: []const u8,
 
     pub fn supportsCertificateCompression(
@@ -282,8 +285,8 @@ pub fn writeRequestWithCompression(
     var extensions: std.ArrayList(u8) = .empty;
     defer extensions.deinit(allocator);
     try appendInt(&extensions, allocator, u16, ext_signature_algorithms);
-    try appendInt(&extensions, allocator, u16, 22);
-    try appendInt(&extensions, allocator, u16, 20);
+    try appendInt(&extensions, allocator, u16, 28);
+    try appendInt(&extensions, allocator, u16, 26);
     try appendInt(
         &extensions,
         allocator,
@@ -343,6 +346,24 @@ pub fn writeRequestWithCompression(
         allocator,
         u16,
         auth.signature_scheme_ed25519,
+    );
+    try appendInt(
+        &extensions,
+        allocator,
+        u16,
+        auth.signature_scheme_ml_dsa_44,
+    );
+    try appendInt(
+        &extensions,
+        allocator,
+        u16,
+        auth.signature_scheme_ml_dsa_65,
+    );
+    try appendInt(
+        &extensions,
+        allocator,
+        u16,
+        auth.signature_scheme_ml_dsa_87,
     );
     if (compression_algorithms.len != 0) {
         certificate_compression.validateAlgorithms(
@@ -459,6 +480,9 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
     var supports_rsa_pss_pss_sha384 = false;
     var supports_rsa_pss_pss_sha512 = false;
     var supports_sm2 = false;
+    var supports_ml_dsa_44 = false;
+    var supports_ml_dsa_65 = false;
+    var supports_ml_dsa_87 = false;
     var certificate_compression_algorithms: []const u8 = &.{};
     var saw_signature_algorithms = false;
     var saw_certificate_compression = false;
@@ -496,6 +520,15 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
                 }
                 if (scheme == auth.signature_scheme_sm2sig_sm3) {
                     supports_sm2 = true;
+                }
+                if (scheme == auth.signature_scheme_ml_dsa_44) {
+                    supports_ml_dsa_44 = true;
+                }
+                if (scheme == auth.signature_scheme_ml_dsa_65) {
+                    supports_ml_dsa_65 = true;
+                }
+                if (scheme == auth.signature_scheme_ml_dsa_87) {
+                    supports_ml_dsa_87 = true;
                 }
                 if (scheme ==
                     auth.signature_scheme_rsa_pss_rsae_sha256)
@@ -565,6 +598,9 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
         .supports_rsa_pss_pss_sha384 = supports_rsa_pss_pss_sha384,
         .supports_rsa_pss_pss_sha512 = supports_rsa_pss_pss_sha512,
         .supports_sm2sig_sm3 = supports_sm2,
+        .supports_ml_dsa_44 = supports_ml_dsa_44,
+        .supports_ml_dsa_65 = supports_ml_dsa_65,
+        .supports_ml_dsa_87 = supports_ml_dsa_87,
         .certificate_compression_algorithms = certificate_compression_algorithms,
     };
 }

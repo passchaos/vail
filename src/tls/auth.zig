@@ -1,9 +1,10 @@
 //! TLS 1.3 server Certificate and CertificateVerify helpers.
 //!
 //! The handshake codec is certificate-format agnostic. Built-in possession
-//! verification supports Ed25519, ECDSA P-256/P-384, SM2, RSA-PSS, and the
-//! TLS 1.2 RSA PKCS#1 v1.5 schemes. An allocation-free signer callback supports
-//! additional pure-Zig or hardware-backed private-key implementations.
+//! verification supports Ed25519, ECDSA P-256/P-384, ML-DSA-44/65/87, SM2,
+//! RSA-PSS, and the TLS 1.2 RSA PKCS#1 v1.5 schemes. An allocation-free signer
+//! callback supports additional pure-Zig or hardware-backed private-key
+//! implementations.
 //! Applications can separately provide a trust callback for chain, validity,
 //! EKU, and policy.
 
@@ -13,6 +14,9 @@ const rsa = @import("../crypto/rsa.zig");
 const sm2 = @import("../crypto/sm2.zig");
 const Certificate = std.crypto.Certificate;
 const Ed25519 = std.crypto.sign.Ed25519;
+const MlDsa44 = std.crypto.sign.mldsa.MLDSA44;
+const MlDsa65 = std.crypto.sign.mldsa.MLDSA65;
+const MlDsa87 = std.crypto.sign.mldsa.MLDSA87;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 const EcdsaP256Sha384 = std.crypto.sign.ecdsa.Ecdsa(
@@ -40,6 +44,9 @@ pub const signature_scheme_rsa_pss_pss_sha256: u16 = 0x0809;
 pub const signature_scheme_rsa_pss_pss_sha384: u16 = 0x080a;
 pub const signature_scheme_rsa_pss_pss_sha512: u16 = 0x080b;
 pub const signature_scheme_sm2sig_sm3: u16 = 0x0708;
+pub const signature_scheme_ml_dsa_44: u16 = 0x0904;
+pub const signature_scheme_ml_dsa_65: u16 = 0x0905;
+pub const signature_scheme_ml_dsa_87: u16 = 0x0906;
 pub const handshake_type_certificate: u8 = 0x0b;
 pub const handshake_type_certificate_verify: u8 = 0x0f;
 
@@ -68,7 +75,21 @@ pub const Error = std.mem.Allocator.Error || error{
     CertificateUntrusted,
 };
 
-pub const max_certificate_verify_signature_len: usize = 512;
+pub const max_classical_signature_len: usize = 512;
+pub const max_certificate_verify_signature_len: usize =
+    MlDsa87.Signature.encoded_length;
+
+pub fn MlDsaSigner(comptime MlDsa: type) type {
+    return struct {
+        key_pair: *const MlDsa.KeyPair,
+        /// Fresh hedging randomness is recommended for each signature.
+        noise: ?[MlDsa.noise_length]u8 = null,
+    };
+}
+
+pub const MlDsa44Signer = MlDsaSigner(MlDsa44);
+pub const MlDsa65Signer = MlDsaSigner(MlDsa65);
+pub const MlDsa87Signer = MlDsaSigner(MlDsa87);
 
 pub const ServerIdentity = struct {
     /// DER-encoded leaf-first certificate chain. Raw Ed25519 and uncompressed
@@ -112,6 +133,9 @@ pub const Signer = union(enum) {
         /// Must be fresh for each SM2 signature.
         nonce: [sm2.scalar_len]u8,
     },
+    ml_dsa_44: MlDsa44Signer,
+    ml_dsa_65: MlDsa65Signer,
+    ml_dsa_87: MlDsa87Signer,
     rsa_pss: RsaPssSigner,
     rsa_pkcs1: RsaPkcs1Signer,
     /// Allocation-free extension point for pure-Zig software keys, hardware
@@ -125,9 +149,27 @@ pub const Signer = union(enum) {
             .ecdsa_p256_sha256 => signature_scheme_ecdsa_secp256r1_sha256,
             .ecdsa_p384_sha384 => signature_scheme_ecdsa_secp384r1_sha384,
             .sm2sig_sm3 => signature_scheme_sm2sig_sm3,
+            .ml_dsa_44 => signature_scheme_ml_dsa_44,
+            .ml_dsa_65 => signature_scheme_ml_dsa_65,
+            .ml_dsa_87 => signature_scheme_ml_dsa_87,
             .rsa_pss => |rsa_signer| rsa_signer.signature_scheme,
             .rsa_pkcs1 => |rsa_signer| rsa_signer.signature_scheme,
             .custom => |custom| custom.signature_scheme,
+        };
+    }
+
+    pub fn maxSignatureLen(self: Signer) usize {
+        return switch (self) {
+            .ed25519 => Ed25519.Signature.encoded_length,
+            .ecdsa_p256_sha256 => EcdsaP256Sha256.Signature.der_encoded_length_max,
+            .ecdsa_p384_sha384 => EcdsaP384Sha384.Signature.der_encoded_length_max,
+            .sm2sig_sm3 => sm2.Signature.der_encoded_length_max,
+            .ml_dsa_44 => MlDsa44.Signature.encoded_length,
+            .ml_dsa_65 => MlDsa65.Signature.encoded_length,
+            .ml_dsa_87 => MlDsa87.Signature.encoded_length,
+            .rsa_pss => |signer| signer.prepared_key.signatureLength(),
+            .rsa_pkcs1 => |signer| signer.prepared_key.signatureLength(),
+            .custom => |custom| custom.max_signature_len,
         };
     }
 
@@ -168,6 +210,24 @@ pub const Signer = union(enum) {
                     return error.InvalidCertificate;
                 }
             },
+            .ml_dsa_44 => |signer| try validateMlDsaCertificate(
+                MlDsa44,
+                .ml_dsa_44,
+                signer.key_pair,
+                certificate,
+            ),
+            .ml_dsa_65 => |signer| try validateMlDsaCertificate(
+                MlDsa65,
+                .ml_dsa_65,
+                signer.key_pair,
+                certificate,
+            ),
+            .ml_dsa_87 => |signer| try validateMlDsaCertificate(
+                MlDsa87,
+                .ml_dsa_87,
+                signer.key_pair,
+                certificate,
+            ),
             .rsa_pss => |signer| {
                 const expected_key_algorithm: Certificate.AlgorithmCategory =
                     switch (signer.signature_scheme) {
@@ -288,6 +348,24 @@ pub const Signer = union(enum) {
                 @memcpy(output[0..encoded.len], encoded);
                 break :blk encoded.len;
             },
+            .ml_dsa_44 => |signer| signMlDsa(
+                MlDsa44,
+                signer,
+                content,
+                output,
+            ),
+            .ml_dsa_65 => |signer| signMlDsa(
+                MlDsa65,
+                signer,
+                content,
+                output,
+            ),
+            .ml_dsa_87 => |signer| signMlDsa(
+                MlDsa87,
+                signer,
+                content,
+                output,
+            ),
             .rsa_pss => |rsa_signer| blk: {
                 const hash_len = rsa_signer.hashLength();
                 if (hash_len == 0 or output.len <
@@ -367,6 +445,24 @@ pub const Signer = union(enum) {
         };
     }
 };
+
+fn signMlDsa(
+    comptime MlDsa: type,
+    signer: MlDsaSigner(MlDsa),
+    content: []const u8,
+    output: []u8,
+) Error!usize {
+    if (output.len < MlDsa.Signature.encoded_length) {
+        return error.InvalidCertificateVerify;
+    }
+    var state = signer.key_pair.signer(signer.noise) catch
+        return error.InvalidCertificateVerify;
+    state.update(content);
+    const signature = state.finalize();
+    const encoded = signature.toBytes();
+    @memcpy(output[0..encoded.len], &encoded);
+    return encoded.len;
+}
 
 pub const RsaPssSigner = struct {
     prepared_key: *const rsa.PreparedPrivateKey,
@@ -830,9 +926,21 @@ pub fn writeCertificateVerifyForRole(
     );
     const content = signed_content[0 .. separator + 1 +
         transcript_hash.len];
-    var signature_storage: [max_certificate_verify_signature_len]u8 =
-        undefined;
-    const signature_len = try signer.sign(content, &signature_storage);
+    const signature_capacity = signer.maxSignatureLen();
+    if (signature_capacity == 0 or
+        signature_capacity > max_certificate_verify_signature_len)
+    {
+        return error.UnsupportedSignatureScheme;
+    }
+    var stack_signature: [max_classical_signature_len]u8 = undefined;
+    const heap_signature = if (signature_capacity > stack_signature.len)
+        try allocator.alloc(u8, signature_capacity)
+    else
+        null;
+    defer if (heap_signature) |bytes| allocator.free(bytes);
+    const signature_storage = heap_signature orelse
+        stack_signature[0..signature_capacity];
+    const signature_len = try signer.sign(content, signature_storage);
     const signature_bytes = signature_storage[0..signature_len];
 
     const body_len = 2 + 2 + signature_bytes.len;
@@ -855,13 +963,22 @@ fn isTls13CertificateVerifyScheme(scheme: u16) bool {
         scheme == signature_scheme_rsa_pss_pss_sha256 or
         scheme == signature_scheme_rsa_pss_pss_sha384 or
         scheme == signature_scheme_rsa_pss_pss_sha512 or
-        scheme == signature_scheme_sm2sig_sm3;
+        scheme == signature_scheme_sm2sig_sm3 or
+        scheme == signature_scheme_ml_dsa_44 or
+        scheme == signature_scheme_ml_dsa_65 or
+        scheme == signature_scheme_ml_dsa_87;
 }
 
 fn isRsaPkcs1Scheme(scheme: u16) bool {
     return scheme == signature_scheme_rsa_pkcs1_sha256 or
         scheme == signature_scheme_rsa_pkcs1_sha384 or
         scheme == signature_scheme_rsa_pkcs1_sha512;
+}
+
+fn isMlDsaScheme(scheme: u16) bool {
+    return scheme == signature_scheme_ml_dsa_44 or
+        scheme == signature_scheme_ml_dsa_65 or
+        scheme == signature_scheme_ml_dsa_87;
 }
 
 pub fn parseCertificateVerify(
@@ -886,13 +1003,23 @@ pub fn parseCertificateVerify(
         scheme != signature_scheme_rsa_pss_pss_sha256 and
         scheme != signature_scheme_rsa_pss_pss_sha384 and
         scheme != signature_scheme_rsa_pss_pss_sha512 and
-        scheme != signature_scheme_sm2sig_sm3)
+        scheme != signature_scheme_sm2sig_sm3 and
+        scheme != signature_scheme_ml_dsa_44 and
+        scheme != signature_scheme_ml_dsa_65 and
+        scheme != signature_scheme_ml_dsa_87)
     {
         return error.UnsupportedSignatureScheme;
     }
     const signature_len = try readInt(u16, bytes, &pos);
-    if ((scheme == signature_scheme_ed25519 and
-        signature_len != Ed25519.Signature.encoded_length) or
+    const fixed_signature_len: ?usize = switch (scheme) {
+        signature_scheme_ed25519 => Ed25519.Signature.encoded_length,
+        signature_scheme_ml_dsa_44 => MlDsa44.Signature.encoded_length,
+        signature_scheme_ml_dsa_65 => MlDsa65.Signature.encoded_length,
+        signature_scheme_ml_dsa_87 => MlDsa87.Signature.encoded_length,
+        else => null,
+    };
+    if ((fixed_signature_len != null and
+        signature_len != fixed_signature_len.?) or
         signature_len == 0)
     {
         return error.InvalidCertificateVerify;
@@ -954,6 +1081,27 @@ pub fn verifySignedContent(
             verifier.update(content);
             verifier.verify() catch return error.BadCertificateVerify;
         },
+        signature_scheme_ml_dsa_44 => try verifyMlDsaContent(
+            MlDsa44,
+            .ml_dsa_44,
+            certificate,
+            parsed.signature,
+            content,
+        ),
+        signature_scheme_ml_dsa_65 => try verifyMlDsaContent(
+            MlDsa65,
+            .ml_dsa_65,
+            certificate,
+            parsed.signature,
+            content,
+        ),
+        signature_scheme_ml_dsa_87 => try verifyMlDsaContent(
+            MlDsa87,
+            .ml_dsa_87,
+            certificate,
+            parsed.signature,
+            content,
+        ),
         signature_scheme_rsa_pss_rsae_sha256 => try verifyRsaPssContent(
             Sha256,
             .rsaEncryption,
@@ -1022,6 +1170,9 @@ pub fn verifyTls12SignedContent(
     parsed: ParsedCertificateVerify,
     content: []const u8,
 ) Error!void {
+    if (isMlDsaScheme(parsed.scheme)) {
+        return error.UnsupportedSignatureScheme;
+    }
     switch (parsed.scheme) {
         signature_scheme_rsa_pkcs1_sha256 => try verifyRsaPkcs1Content(
             Sha256,
@@ -1166,6 +1317,90 @@ fn verifyEcdsaContent(
         return error.BadCertificateVerify;
 }
 
+fn validateMlDsaCertificate(
+    comptime MlDsa: type,
+    comptime expected_kind: RawSpkiKind,
+    key_pair: *const MlDsa.KeyPair,
+    certificate: []const u8,
+) Error!void {
+    const certificate_key = try mlDsaCertificatePublicKey(
+        MlDsa,
+        expected_kind,
+        certificate,
+    );
+    const signer_key = key_pair.public_key.toBytes();
+    if (!std.mem.eql(u8, &certificate_key, &signer_key)) {
+        return error.InvalidCertificate;
+    }
+}
+
+fn mlDsaCertificatePublicKey(
+    comptime MlDsa: type,
+    comptime expected_kind: RawSpkiKind,
+    certificate: []const u8,
+) Error![MlDsa.PublicKey.encoded_length]u8 {
+    if (certificate.len == MlDsa.PublicKey.encoded_length) {
+        const encoded = certificate[0..MlDsa.PublicKey.encoded_length].*;
+        _ = MlDsa.PublicKey.fromBytes(encoded) catch
+            return error.InvalidCertificate;
+        return encoded;
+    }
+    const spki = (try parseRawSpki(certificate)) orelse
+        return error.UnsupportedCertificateKey;
+    if (spki.kind != expected_kind or
+        spki.public_key.len != MlDsa.PublicKey.encoded_length)
+    {
+        return error.UnsupportedCertificateKey;
+    }
+    const encoded = spki.public_key[0..MlDsa.PublicKey.encoded_length].*;
+    _ = MlDsa.PublicKey.fromBytes(encoded) catch
+        return error.InvalidCertificate;
+    return encoded;
+}
+
+fn verifyMlDsaContent(
+    comptime MlDsa: type,
+    comptime expected_kind: RawSpkiKind,
+    certificate: []const u8,
+    signature_bytes: []const u8,
+    content: []const u8,
+) Error!void {
+    if (signature_bytes.len != MlDsa.Signature.encoded_length) {
+        return error.InvalidCertificateVerify;
+    }
+    const public_key = MlDsa.PublicKey.fromBytes(
+        try mlDsaCertificatePublicKey(MlDsa, expected_kind, certificate),
+    ) catch return error.InvalidCertificate;
+    const signature = MlDsa.Signature.fromBytes(
+        signature_bytes[0..MlDsa.Signature.encoded_length].*,
+    ) catch return error.InvalidCertificateVerify;
+    signature.verify(content, public_key) catch
+        return error.BadCertificateVerify;
+}
+
+fn verifyMlDsaCertificateVerify(
+    comptime MlDsa: type,
+    comptime expected_kind: RawSpkiKind,
+    certificate: []const u8,
+    signature_bytes: []const u8,
+    transcript_hash: []const u8,
+    role: EndpointRole,
+) Error!void {
+    if (signature_bytes.len != MlDsa.Signature.encoded_length) {
+        return error.InvalidCertificateVerify;
+    }
+    const public_key = MlDsa.PublicKey.fromBytes(
+        try mlDsaCertificatePublicKey(MlDsa, expected_kind, certificate),
+    ) catch return error.InvalidCertificate;
+    const signature = MlDsa.Signature.fromBytes(
+        signature_bytes[0..MlDsa.Signature.encoded_length].*,
+    ) catch return error.InvalidCertificateVerify;
+    var verifier = signature.verifier(public_key) catch
+        return error.BadCertificateVerify;
+    updateCertificateVerifyInput(&verifier, transcript_hash, role);
+    verifier.verify() catch return error.BadCertificateVerify;
+}
+
 pub fn verifyCertificateVerify(
     certificate: []const u8,
     parsed: ParsedCertificateVerify,
@@ -1208,6 +1443,30 @@ pub fn verifyCertificateVerifyForRole(
             updateCertificateVerifyInput(&verifier, transcript_hash, role);
             verifier.verify() catch return error.BadCertificateVerify;
         },
+        signature_scheme_ml_dsa_44 => try verifyMlDsaCertificateVerify(
+            MlDsa44,
+            .ml_dsa_44,
+            certificate,
+            parsed.signature,
+            transcript_hash,
+            role,
+        ),
+        signature_scheme_ml_dsa_65 => try verifyMlDsaCertificateVerify(
+            MlDsa65,
+            .ml_dsa_65,
+            certificate,
+            parsed.signature,
+            transcript_hash,
+            role,
+        ),
+        signature_scheme_ml_dsa_87 => try verifyMlDsaCertificateVerify(
+            MlDsa87,
+            .ml_dsa_87,
+            certificate,
+            parsed.signature,
+            transcript_hash,
+            role,
+        ),
         signature_scheme_ecdsa_secp256r1_sha256 => {
             const public_key_bytes =
                 try p256CertificatePublicKey(certificate);
@@ -1687,6 +1946,9 @@ const oid_sm2 = [_]u8{ 0x2a, 0x81, 0x1c, 0xcf, 0x55, 0x01, 0x82, 0x2d };
 const oid_rsa_encryption = [_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01 };
 const oid_rsassa_pss = [_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a };
 const oid_ed25519 = [_]u8{ 0x2b, 0x65, 0x70 };
+const oid_ml_dsa_44 = [_]u8{ 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x11 };
+const oid_ml_dsa_65 = [_]u8{ 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x12 };
+const oid_ml_dsa_87 = [_]u8{ 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x13 };
 const oid_p256 = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
 const oid_p384 = [_]u8{ 0x2b, 0x81, 0x04, 0x00, 0x22 };
 
@@ -1694,6 +1956,9 @@ const RawSpkiKind = enum {
     rsa_encryption,
     rsa_pss,
     ed25519,
+    ml_dsa_44,
+    ml_dsa_65,
+    ml_dsa_87,
     p256,
     p384,
     sm2,
@@ -1727,6 +1992,12 @@ fn parseRawSpki(bytes: []const u8) Error!?RawSpki {
         .rsa_pss
     else if (oidEquals(bytes, oid, &oid_ed25519))
         .ed25519
+    else if (oidEquals(bytes, oid, &oid_ml_dsa_44))
+        .ml_dsa_44
+    else if (oidEquals(bytes, oid, &oid_ml_dsa_65))
+        .ml_dsa_65
+    else if (oidEquals(bytes, oid, &oid_ml_dsa_87))
+        .ml_dsa_87
     else if (oidEquals(bytes, oid, &oid_id_ec_public_key)) blk: {
         const parameters = DerElement.parse(bytes, pos) catch
             return error.InvalidCertificate;
@@ -1740,8 +2011,9 @@ fn parseRawSpki(bytes: []const u8) Error!?RawSpki {
     while (pos < algorithm.end) {
         const parameter = try DerElement.parse(bytes, pos);
         pos = parameter.end;
-        if (kind == .ed25519 or kind == .p256 or kind == .p384 or
-            kind == .sm2)
+        if (kind == .ed25519 or kind == .ml_dsa_44 or
+            kind == .ml_dsa_65 or kind == .ml_dsa_87 or
+            kind == .p256 or kind == .p384 or kind == .sm2)
         {
             return error.InvalidCertificate;
         }
@@ -1984,6 +2256,99 @@ test "custom signer preserves CertificateVerify construction and validation" {
     );
 }
 
+test "RFC 7250 ML-DSA CertificateVerify covers all registered schemes" {
+    try testMlDsaCertificateVerify(
+        MlDsa44,
+        signature_scheme_ml_dsa_44,
+        &oid_ml_dsa_44,
+        0x94,
+    );
+    try testMlDsaCertificateVerify(
+        MlDsa65,
+        signature_scheme_ml_dsa_65,
+        &oid_ml_dsa_65,
+        0x95,
+    );
+    try testMlDsaCertificateVerify(
+        MlDsa87,
+        signature_scheme_ml_dsa_87,
+        &oid_ml_dsa_87,
+        0x96,
+    );
+}
+
+fn testMlDsaCertificateVerify(
+    comptime MlDsa: type,
+    comptime scheme: u16,
+    comptime oid: *const [9]u8,
+    comptime seed_byte: u8,
+) !void {
+    var key_pair = try MlDsa.KeyPair.generateDeterministic(
+        [_]u8{seed_byte} ** MlDsa.KeyPair.seed_length,
+    );
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
+    const spki = mlDsaSubjectPublicKeyInfo(
+        MlDsa,
+        oid,
+        key_pair.public_key.toBytes(),
+    );
+    const signer: Signer = if (scheme == signature_scheme_ml_dsa_44)
+        .{ .ml_dsa_44 = .{
+            .key_pair = &key_pair,
+            .noise = [_]u8{seed_byte +% 1} ** MlDsa.noise_length,
+        } }
+    else if (scheme == signature_scheme_ml_dsa_65)
+        .{ .ml_dsa_65 = .{
+            .key_pair = &key_pair,
+            .noise = [_]u8{seed_byte +% 1} ** MlDsa.noise_length,
+        } }
+    else
+        .{ .ml_dsa_87 = .{
+            .key_pair = &key_pair,
+            .noise = [_]u8{seed_byte +% 1} ** MlDsa.noise_length,
+        } };
+    try std.testing.expectEqual(scheme, signer.scheme());
+    try std.testing.expectEqual(
+        MlDsa.Signature.encoded_length,
+        signer.maxSignatureLen(),
+    );
+    try (ServerIdentity{
+        .certificate_chain = &.{&spki},
+        .signer = signer,
+        .certificate_type = .raw_public_key,
+    }).validate();
+
+    const transcript_hash = [_]u8{seed_byte +% 2} ** Sha256.digest_length;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    try writeCertificateVerify(
+        &encoded,
+        std.testing.allocator,
+        signer,
+        &transcript_hash,
+    );
+    const parsed = try parseCertificateVerify(encoded.items);
+    try std.testing.expectEqual(scheme, parsed.scheme);
+    try std.testing.expectEqual(
+        MlDsa.Signature.encoded_length,
+        parsed.signature.len,
+    );
+    try verifyCertificateVerify(&spki, parsed, &transcript_hash);
+    try std.testing.expectError(
+        error.UnsupportedSignatureScheme,
+        verifyTls12SignedContent(&spki, parsed, "tls12"),
+    );
+
+    encoded.items[encoded.items.len - 1] ^= 1;
+    const tampered = try parseCertificateVerify(encoded.items);
+    verifyCertificateVerify(&spki, tampered, &transcript_hash) catch |err| {
+        try std.testing.expect(err == error.InvalidCertificateVerify or
+            err == error.BadCertificateVerify);
+        return;
+    };
+    return error.TestUnexpectedResult;
+}
+
 test "RFC 7250 RSA SubjectPublicKeyInfo signs and verifies" {
     const allocator = std.testing.allocator;
     const vectors = @import("../crypto/testdata/rsa_signing.zig");
@@ -2162,6 +2527,34 @@ test "RFC 7250 elliptic-curve SubjectPublicKeyInfo signs and verifies" {
         },
         message,
     );
+}
+
+fn mlDsaSubjectPublicKeyInfo(
+    comptime MlDsa: type,
+    comptime oid: *const [9]u8,
+    public_key: [MlDsa.PublicKey.encoded_length]u8,
+) [22 + MlDsa.PublicKey.encoded_length]u8 {
+    const body_len = 18 + MlDsa.PublicKey.encoded_length;
+    const bit_string_len = 1 + MlDsa.PublicKey.encoded_length;
+    comptime {
+        std.debug.assert(body_len <= std.math.maxInt(u16));
+        std.debug.assert(bit_string_len <= std.math.maxInt(u16));
+    }
+    var spki: [22 + MlDsa.PublicKey.encoded_length]u8 = undefined;
+    spki[0] = 0x30;
+    spki[1] = 0x82;
+    std.mem.writeInt(u16, spki[2..4], body_len, .big);
+    spki[4] = 0x30;
+    spki[5] = 0x0b;
+    spki[6] = 0x06;
+    spki[7] = oid.len;
+    @memcpy(spki[8..17], oid);
+    spki[17] = 0x03;
+    spki[18] = 0x82;
+    std.mem.writeInt(u16, spki[19..21], bit_string_len, .big);
+    spki[21] = 0;
+    @memcpy(spki[22..], &public_key);
+    return spki;
 }
 
 fn p256SubjectPublicKeyInfo(public_key: [65]u8) [91]u8 {
