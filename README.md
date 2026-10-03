@@ -92,10 +92,12 @@ the expanded AES key and GHASH table, avoiding per-record key-dependent setup.
 SM2, SM3, and SM4 are implemented in Vail.
 
 On x86_64 targets with AVX2, VAES, and VPCLMULQDQ, the prepared AES-GCM path
-uses two-lane AES-CTR and 16-block aggregated GHASH. Other targets retain the
-portable Zig standard-library path. On an Intel Core i9-13900K pinned to CPU 0,
-seven alternating ReleaseFast runs over 1,200-byte QUIC payloads produced these
-median times against the former AWS-LC backend:
+uses two-lane AES-CTR and 16-block aggregated GHASH. AArch64 targets with the
+AES/PMULL extension use the same 16-block reduction schedule with independent
+PMULL products; other targets retain the portable Zig standard-library path.
+On an Intel Core i9-13900K pinned to CPU 0, seven alternating ReleaseFast runs
+over 1,200-byte QUIC payloads produced these median times against the former
+AWS-LC backend:
 
 | Operation | Pure Zig | AWS-LC | Speedup |
 | --- | ---: | ---: | ---: |
@@ -103,6 +105,14 @@ median times against the former AWS-LC backend:
 | AES-128-GCM open+seal | 383 ns | 487 ns | 1.27x |
 | AES-256-GCM seal | 207 ns | 275 ns | 1.33x |
 | AES-256-GCM open+seal | 421 ns | 550 ns | 1.31x |
+
+On an ARM64 host, seven fixed-binary pairs over 85-byte short packets reduced
+prepared AES-128 seal/open medians from 206/283 to 135/217 ns and AES-256 from
+220/334 to 166/270 ns, with every pair faster. Nine fixed-binary 1,149-byte
+QUIC DATAGRAM receive pairs reduced the median from 2,752 to 2,606 ns/packet
+(5.31%, 9/9 wins). The compact runtime-loop implementation adds about 23 KiB
+to the complete netz receive benchmark, rather than the roughly 301 KiB of the
+rejected fully unrolled prototype.
 
 The reusable AES-GCM context is checked against NIST AES-128-GCM and
 AES-256-GCM vectors, Zig's one-shot implementations across block-boundary
