@@ -539,11 +539,13 @@ than TLS's `L=3`, 12-byte-nonce construction, so no mismatched primitive timing
 is presented as an AWS-LC comparison.
 
 On x86_64 targets with AVX2, VAES, and VPCLMULQDQ, the prepared AES-GCM path
-uses two-lane AES-CTR and 16-block aggregated GHASH. Other targets retain the
-portable Zig standard-library path. Clean, order-balanced ReleaseFast runs on
-an Intel Core i9-13900K pinned to CPU 14 produced these medians over 1,200-byte
-QUIC payloads. The AWS-LC side uses its out-of-place scatter/gather APIs, so
-neither implementation is charged an extra plaintext, ciphertext, or tag copy:
+uses two-lane AES-CTR and 16-block aggregated GHASH. AArch64 targets with the
+AES/PMULL extension use the same 16-block reduction schedule with independent
+PMULL products; other targets retain the portable Zig standard-library path.
+Clean, order-balanced ReleaseFast runs on an Intel Core i9-13900K pinned to
+CPU 14 produced these medians over 1,200-byte QUIC payloads. The AWS-LC side
+uses its out-of-place scatter/gather APIs, so neither implementation is charged
+an extra plaintext, ciphertext, or tag copy:
 
 | Operation | Pure Zig | AWS-LC | Speedup |
 | --- | ---: | ---: | ---: |
@@ -551,6 +553,14 @@ neither implementation is charged an extra plaintext, ciphertext, or tag copy:
 | AES-128-GCM open+seal | 378 ns | 480 ns | 1.27x |
 | AES-256-GCM seal | 206.5 ns | 276 ns | 1.34x |
 | AES-256-GCM open+seal | 418 ns | 545 ns | 1.30x |
+
+On an ARM64 host, seven fixed-binary pairs over 85-byte short packets reduced
+prepared AES-128 seal/open medians from 206/283 to 135/217 ns and AES-256 from
+220/334 to 166/270 ns, with every pair faster. Nine fixed-binary 1,149-byte
+QUIC DATAGRAM receive pairs reduced the median from 2,752 to 2,606 ns/packet
+(5.31%, 9/9 wins). The compact runtime-loop implementation adds about 23 KiB
+to the complete netz receive benchmark, rather than the roughly 301 KiB of the
+rejected fully unrolled prototype.
 
 ChaCha20-Poly1305 uses a prepared pure-Zig core on x86_64 AVX2 and aarch64
 NEON targets. It emits eight ChaCha blocks together on AVX2 and four on NEON,
