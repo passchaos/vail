@@ -562,6 +562,22 @@ QUIC DATAGRAM receive pairs reduced the median from 2,752 to 2,606 ns/packet
 to the complete netz receive benchmark, rather than the roughly 301 KiB of the
 rejected fully unrolled prototype.
 
+A 2026-10-09 ARM64 follow-up groups four independent PMULL products before
+folding them into the runtime-loop accumulator. Seven order-alternated,
+CPU-0, fixed-binary pairs over 1,200-byte QUIC payloads reduced prepared
+AES-128-GCM seal from 888 to 851 ns/op (4.17%, 6/7 wins) and combined open plus
+seal from 1,780 to 1,700 ns/op (4.49%, 7/7 wins). Nine corresponding netz
+in-place DATAGRAM receive pairs, each with 500 warmups and 10,000 batches of
+54 1,149-byte packets, reduced the median from 2,689 to 2,646 ns/packet (1.60%,
+9/9 wins). The complete receive benchmark's ELF `.text` grew by only 776 bytes;
+tail widths remain in the compact runtime loop rather than instantiating every
+width as in the rejected fully unrolled design. The fixed Vail binary hashes
+were `5f31d6ccceed4ea5d0e167d911612df8f9290643411610b7277b6015dab9e2a1`
+and `d4790dc20fb2824ec1ca0ef8bab4afda054f5d420db0593f78be5ba9b7e65428`;
+the netz receive binaries were
+`61ac4cd751b7bd8287ef21596919df76b3dc278097023e96914ffdb7c91cdb13`
+and `270ea2e206430f27a53babf8ee6d590d720f5b1c2e5aacecb30ff000e0cdf687`.
+
 ChaCha20-Poly1305 uses a prepared pure-Zig core on x86_64 AVX2 and aarch64
 NEON targets. It emits eight ChaCha blocks together on AVX2 and four on NEON,
 derives the Poly1305 one-time key in the first wide batch, and uses a
