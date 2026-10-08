@@ -361,15 +361,32 @@ noinline fn hashBlocksPmull(
         powers[block_count - 1],
     );
     var index: usize = 1;
+    while (index + 3 < block_count) : (index += 4) {
+        const first = multiply(
+            loadBlock(blocks, index),
+            powers[block_count - 1 - index],
+        );
+        const second = multiply(
+            loadBlock(blocks, index + 1),
+            powers[block_count - 2 - index],
+        );
+        const third = multiply(
+            loadBlock(blocks, index + 2),
+            powers[block_count - 3 - index],
+        );
+        const fourth = multiply(
+            loadBlock(blocks, index + 3),
+            powers[block_count - 4 - index],
+        );
+        product.hi ^= first.hi ^ second.hi ^ third.hi ^ fourth.hi;
+        product.lo ^= first.lo ^ second.lo ^ third.lo ^ fourth.lo;
+        product.mid ^= first.mid ^ second.mid ^ third.mid ^ fourth.mid;
+    }
     while (index < block_count) : (index += 1) {
         xorProduct(
             &product,
             multiply(
-                std.mem.readInt(
-                    u128,
-                    blocks[index * Ghash.block_length ..][0..Ghash.block_length],
-                    .big,
-                ),
+                loadBlock(blocks, index),
                 powers[block_count - 1 - index],
             ),
         );
@@ -392,15 +409,32 @@ noinline fn hashWithSuffixPmull(
         powers[total_block_count - 1],
     );
     var index: usize = 1;
+    while (index + 3 < input_block_count) : (index += 4) {
+        const first = multiply(
+            loadBlock(input, index),
+            powers[total_block_count - 1 - index],
+        );
+        const second = multiply(
+            loadBlock(input, index + 1),
+            powers[total_block_count - 2 - index],
+        );
+        const third = multiply(
+            loadBlock(input, index + 2),
+            powers[total_block_count - 3 - index],
+        );
+        const fourth = multiply(
+            loadBlock(input, index + 3),
+            powers[total_block_count - 4 - index],
+        );
+        product.hi ^= first.hi ^ second.hi ^ third.hi ^ fourth.hi;
+        product.lo ^= first.lo ^ second.lo ^ third.lo ^ fourth.lo;
+        product.mid ^= first.mid ^ second.mid ^ third.mid ^ fourth.mid;
+    }
     while (index < input_block_count) : (index += 1) {
         xorProduct(
             &product,
             multiply(
-                std.mem.readInt(
-                    u128,
-                    input[index * Ghash.block_length ..][0..Ghash.block_length],
-                    .big,
-                ),
+                loadBlock(input, index),
                 powers[total_block_count - 1 - index],
             ),
         );
@@ -410,6 +444,14 @@ noinline fn hashWithSuffixPmull(
         multiply(std.mem.readInt(u128, suffix, .big), powers[0]),
     );
     return reduce(product);
+}
+
+inline fn loadBlock(input: []const u8, index: usize) u128 {
+    return std.mem.readInt(
+        u128,
+        input[index * Ghash.block_length ..][0..Ghash.block_length],
+        .big,
+    );
 }
 
 fn hashOne(
