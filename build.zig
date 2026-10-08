@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const mldsa_benchmarks = @import("build/mldsa_benchmarks.zig");
+const mlkem_benchmarks = @import("build/mlkem_benchmarks.zig");
 
 const required_zig_version = "0.16.0";
 
@@ -57,6 +59,12 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all Vail tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_package_tests.step);
+    const test_compile_step = b.step(
+        "test-compile",
+        "Compile all Vail tests without running them",
+    );
+    test_compile_step.dependOn(&tests.step);
+    test_compile_step.dependOn(&package_tests.step);
 
     const traffic_bench = b.addExecutable(.{
         .name = "vail-bench-quic-traffic-crypto",
@@ -70,7 +78,7 @@ pub fn build(b: *std.Build) void {
     const run_traffic_bench = b.addRunArtifact(traffic_bench);
     const bench_step = b.step(
         "bench-quic-traffic-crypto",
-        "Benchmark QUIC AES-GCM and ChaCha20 traffic protection",
+        "Benchmark QUIC AEAD traffic protection",
     );
     bench_step.dependOn(&run_traffic_bench.step);
 
@@ -126,6 +134,26 @@ pub fn build(b: *std.Build) void {
         &run_chacha_components_bench.step,
     );
 
+    const chacha20_poly1305_bench = b.addExecutable(.{
+        .name = "vail-bench-chacha20-poly1305",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/chacha20_poly1305.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_chacha20_poly1305_bench = b.addRunArtifact(
+        chacha20_poly1305_bench,
+    );
+    const chacha20_poly1305_bench_step = b.step(
+        "bench-chacha20-poly1305",
+        "Benchmark prepared pure-Zig ChaCha20-Poly1305 seal/open",
+    );
+    chacha20_poly1305_bench_step.dependOn(
+        &run_chacha20_poly1305_bench.step,
+    );
+
     const aws_lc_aead_bench = b.addSystemCommand(&.{
         "cargo",
         "run",
@@ -141,6 +169,1047 @@ pub fn build(b: *std.Build) void {
         "Benchmark test-only AWS-LC AEAD implementations",
     );
     aws_lc_aead_bench_step.dependOn(&aws_lc_aead_bench.step);
+
+    const aws_lc_rsa_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-rsa-bench",
+        "--",
+        "src/crypto/testdata/rsa_signing_key.pem",
+    });
+    const aws_lc_rsa_bench_step = b.step(
+        "bench-aws-lc-rsa",
+        "Benchmark test-only AWS-LC RSA-2048 signing",
+    );
+    aws_lc_rsa_bench_step.dependOn(&aws_lc_rsa_bench.step);
+
+    const p521_verify_bench = b.addExecutable(.{
+        .name = "vail-bench-p521-verify",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p521_verify.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p521_verify_bench = b.addRunArtifact(p521_verify_bench);
+    const p521_verify_bench_step = b.step(
+        "bench-p521-verify",
+        "Benchmark pure-Zig P-521 ECDSA verification",
+    );
+    p521_verify_bench_step.dependOn(&run_p521_verify_bench.step);
+
+    const p521_one_shot_bench = b.addExecutable(.{
+        .name = "vail-bench-p521-one-shot",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p521_one_shot.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p521_one_shot_bench = b.addRunArtifact(p521_one_shot_bench);
+    const p521_one_shot_bench_step = b.step(
+        "bench-p521-one-shot",
+        "Benchmark pure-Zig one-shot P-521 ECDSA verification",
+    );
+    p521_one_shot_bench_step.dependOn(&run_p521_one_shot_bench.step);
+
+    const p521_public_key_bench = b.addExecutable(.{
+        .name = "vail-bench-p521-public-key",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p521_public_key.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p521_public_key_bench = b.addRunArtifact(p521_public_key_bench);
+    const p521_public_key_bench_step = b.step(
+        "bench-p521-public-key",
+        "Benchmark P-521 public-key SEC1 serialization",
+    );
+    p521_public_key_bench_step.dependOn(&run_p521_public_key_bench.step);
+
+    const p521_prepared_bench = b.addExecutable(.{
+        .name = "vail-bench-p521-prepared",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p521_prepared.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p521_prepared_bench = b.addRunArtifact(p521_prepared_bench);
+    const p521_prepared_bench_step = b.step(
+        "bench-p521-prepared",
+        "Benchmark pure-Zig prepared P-521 ECDSA verification",
+    );
+    p521_prepared_bench_step.dependOn(&run_p521_prepared_bench.step);
+
+    const p521_sign_bench = b.addExecutable(.{
+        .name = "vail-bench-p521-sign",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p521_sign.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p521_sign_bench = b.addRunArtifact(p521_sign_bench);
+    const p521_sign_bench_step = b.step(
+        "bench-p521-sign",
+        "Benchmark pure-Zig P-521 ECDSA signing",
+    );
+    p521_sign_bench_step.dependOn(&run_p521_sign_bench.step);
+
+    const p521_sign_one_shot_bench = b.addExecutable(.{
+        .name = "vail-bench-p521-sign-one-shot",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p521_sign_one_shot.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p521_sign_one_shot_bench = b.addRunArtifact(
+        p521_sign_one_shot_bench,
+    );
+    const p521_sign_one_shot_bench_step = b.step(
+        "bench-p521-sign-one-shot",
+        "Benchmark pure-Zig random-nonce P-521 ECDSA signing",
+    );
+    p521_sign_one_shot_bench_step.dependOn(
+        &run_p521_sign_one_shot_bench.step,
+    );
+
+    const p521_ecdh_bench = b.addExecutable(.{
+        .name = "vail-bench-p521-ecdh",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p521_ecdh.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p521_ecdh_bench = b.addRunArtifact(p521_ecdh_bench);
+    const p521_ecdh_bench_step = b.step(
+        "bench-p521-ecdh",
+        "Benchmark pure-Zig P-521 public-key recovery and ECDH",
+    );
+    p521_ecdh_bench_step.dependOn(&run_p521_ecdh_bench.step);
+
+    const aws_lc_p521_ecdh_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-p521-ecdh-bench",
+    });
+    const aws_lc_p521_ecdh_bench_step = b.step(
+        "bench-aws-lc-p521-ecdh",
+        "Benchmark test-only AWS-LC P-521 public-key recovery and ECDH",
+    );
+    aws_lc_p521_ecdh_bench_step.dependOn(&aws_lc_p521_ecdh_bench.step);
+
+    const p384_ecdh_bench = b.addExecutable(.{
+        .name = "vail-bench-p384-ecdh",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p384_ecdh.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p384_ecdh_bench = b.addRunArtifact(p384_ecdh_bench);
+    const p384_ecdh_bench_step = b.step(
+        "bench-p384-ecdh",
+        "Benchmark pure-Zig P-384 public-key recovery and ECDH",
+    );
+    p384_ecdh_bench_step.dependOn(&run_p384_ecdh_bench.step);
+
+    const aws_lc_p384_ecdh_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-p384-ecdh-bench",
+    });
+    const aws_lc_p384_ecdh_bench_step = b.step(
+        "bench-aws-lc-p384-ecdh",
+        "Benchmark test-only AWS-LC P-384 public-key recovery and ECDH",
+    );
+    aws_lc_p384_ecdh_bench_step.dependOn(&aws_lc_p384_ecdh_bench.step);
+
+    const p256_ecdh_bench = b.addExecutable(.{
+        .name = "vail-bench-p256-ecdh",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p256_ecdh.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p256_ecdh_bench = b.addRunArtifact(p256_ecdh_bench);
+    const p256_ecdh_bench_step = b.step(
+        "bench-p256-ecdh",
+        "Benchmark pure-Zig P-256 public-key recovery and ECDH",
+    );
+    p256_ecdh_bench_step.dependOn(&run_p256_ecdh_bench.step);
+
+    const aws_lc_p256_ecdh_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-p256-ecdh-bench",
+    });
+    const aws_lc_p256_ecdh_bench_step = b.step(
+        "bench-aws-lc-p256-ecdh",
+        "Benchmark test-only AWS-LC P-256 public-key recovery and ECDH",
+    );
+    aws_lc_p256_ecdh_bench_step.dependOn(&aws_lc_p256_ecdh_bench.step);
+
+    const aws_lc_p521_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-p521-bench",
+    });
+    const aws_lc_p521_bench_step = b.step(
+        "bench-aws-lc-p521",
+        "Benchmark test-only AWS-LC P-521 ECDSA verification",
+    );
+    aws_lc_p521_bench_step.dependOn(&aws_lc_p521_bench.step);
+
+    const aws_lc_p521_sign_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-p521-sign-bench",
+    });
+    const aws_lc_p521_sign_bench_step = b.step(
+        "bench-aws-lc-p521-sign",
+        "Benchmark test-only AWS-LC P-521 ECDSA signing",
+    );
+    aws_lc_p521_sign_bench_step.dependOn(&aws_lc_p521_sign_bench.step);
+
+    const p384_verify_bench = b.addExecutable(.{
+        .name = "vail-bench-p384-verify",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p384_verify.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p384_verify_bench = b.addRunArtifact(p384_verify_bench);
+    const p384_verify_bench_step = b.step(
+        "bench-p384-verify",
+        "Benchmark pure-Zig P-384 ECDSA verification and signing",
+    );
+    p384_verify_bench_step.dependOn(&run_p384_verify_bench.step);
+
+    const p384_one_shot_bench = b.addExecutable(.{
+        .name = "vail-bench-p384-one-shot",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p384_one_shot.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p384_one_shot_bench = b.addRunArtifact(p384_one_shot_bench);
+    const p384_one_shot_bench_step = b.step(
+        "bench-p384-one-shot",
+        "Benchmark pure-Zig one-shot P-384 ECDSA verification",
+    );
+    p384_one_shot_bench_step.dependOn(&run_p384_one_shot_bench.step);
+
+    const p384_sign_bench = b.addExecutable(.{
+        .name = "vail-bench-p384-sign",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p384_sign.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p384_sign_bench = b.addRunArtifact(p384_sign_bench);
+    const p384_sign_bench_step = b.step(
+        "bench-p384-sign",
+        "Benchmark pure-Zig P-384 ECDSA signing",
+    );
+    p384_sign_bench_step.dependOn(&run_p384_sign_bench.step);
+
+    const aws_lc_p384_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-p384-bench",
+    });
+    const aws_lc_p384_bench_step = b.step(
+        "bench-aws-lc-p384",
+        "Benchmark test-only AWS-LC P-384 ECDSA verification and signing",
+    );
+    aws_lc_p384_bench_step.dependOn(&aws_lc_p384_bench.step);
+
+    const aws_lc_p384_sign_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-p384-sign-bench",
+    });
+    const aws_lc_p384_sign_bench_step = b.step(
+        "bench-aws-lc-p384-sign",
+        "Benchmark test-only AWS-LC P-384 ECDSA signing",
+    );
+    aws_lc_p384_sign_bench_step.dependOn(&aws_lc_p384_sign_bench.step);
+
+    const x25519_bench = b.addExecutable(.{
+        .name = "vail-bench-x25519",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/x25519.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_x25519_bench = b.addRunArtifact(x25519_bench);
+    const x25519_bench_step = b.step(
+        "bench-x25519",
+        "Benchmark Vail and Zig standard-library X25519 primitives",
+    );
+    x25519_bench_step.dependOn(&run_x25519_bench.step);
+
+    const p256_verify_bench = b.addExecutable(.{
+        .name = "vail-bench-p256-verify",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p256_verify.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p256_verify_bench = b.addRunArtifact(p256_verify_bench);
+    const p256_verify_bench_step = b.step(
+        "bench-p256-verify",
+        "Benchmark Zig P-256 ECDSA verification components",
+    );
+    p256_verify_bench_step.dependOn(&run_p256_verify_bench.step);
+
+    const p256_one_shot_bench = b.addExecutable(.{
+        .name = "vail-bench-p256-one-shot",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p256_one_shot.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p256_one_shot_bench = b.addRunArtifact(p256_one_shot_bench);
+    const p256_one_shot_bench_step = b.step(
+        "bench-p256-one-shot",
+        "Benchmark pure-Zig one-shot P-256 ECDSA verification",
+    );
+    p256_one_shot_bench_step.dependOn(&run_p256_one_shot_bench.step);
+
+    const p256_prepared_bench = b.addExecutable(.{
+        .name = "vail-bench-p256-prepared",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p256_prepared.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p256_prepared_bench = b.addRunArtifact(p256_prepared_bench);
+    const p256_prepared_bench_step = b.step(
+        "bench-p256-prepared",
+        "Benchmark prepared pure-Zig P-256 ECDSA verification",
+    );
+    p256_prepared_bench_step.dependOn(&run_p256_prepared_bench.step);
+
+    const p256_sign_bench = b.addExecutable(.{
+        .name = "vail-bench-p256-sign",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/p256_sign.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_p256_sign_bench = b.addRunArtifact(p256_sign_bench);
+    const p256_sign_bench_step = b.step(
+        "bench-p256-sign",
+        "Benchmark pure-Zig P-256 ECDSA signing",
+    );
+    p256_sign_bench_step.dependOn(&run_p256_sign_bench.step);
+
+    const aws_lc_p256_sign_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-p256-sign-bench",
+    });
+    const aws_lc_p256_sign_bench_step = b.step(
+        "bench-aws-lc-p256-sign",
+        "Benchmark test-only AWS-LC P-256 ECDSA signing",
+    );
+    aws_lc_p256_sign_bench_step.dependOn(&aws_lc_p256_sign_bench.step);
+
+    const aws_lc_p256_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-p256-bench",
+    });
+    const aws_lc_p256_bench_step = b.step(
+        "bench-aws-lc-p256",
+        "Benchmark test-only AWS-LC P-256 ECDSA verification",
+    );
+    aws_lc_p256_bench_step.dependOn(&aws_lc_p256_bench.step);
+
+    const ed25519_bench = b.addExecutable(.{
+        .name = "vail-bench-ed25519",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/ed25519.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_ed25519_bench = b.addRunArtifact(ed25519_bench);
+    const ed25519_bench_step = b.step(
+        "bench-ed25519",
+        "Benchmark Zig std and Vail Ed25519 primitives",
+    );
+    ed25519_bench_step.dependOn(&run_ed25519_bench.step);
+
+    const ed25519_keygen_bench = b.addExecutable(.{
+        .name = "vail-bench-ed25519-keygen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/ed25519_keygen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_ed25519_keygen_bench = b.addRunArtifact(ed25519_keygen_bench);
+    const ed25519_keygen_bench_step = b.step(
+        "bench-ed25519-keygen",
+        "Benchmark Vail Ed25519 deterministic key generation",
+    );
+    ed25519_keygen_bench_step.dependOn(&run_ed25519_keygen_bench.step);
+
+    const aws_lc_ed25519_keygen_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-ed25519-keygen-bench",
+    });
+    const aws_lc_ed25519_keygen_bench_step = b.step(
+        "bench-aws-lc-ed25519-keygen",
+        "Benchmark test-only AWS-LC Ed25519 key generation",
+    );
+    aws_lc_ed25519_keygen_bench_step.dependOn(
+        &aws_lc_ed25519_keygen_bench.step,
+    );
+
+    const ed25519_verify_bench = b.addExecutable(.{
+        .name = "vail-bench-ed25519-verify",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/ed25519_verify.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_ed25519_verify_bench = b.addRunArtifact(ed25519_verify_bench);
+    const ed25519_verify_bench_step = b.step(
+        "bench-ed25519-verify",
+        "Benchmark pure-Zig one-shot Ed25519 verification",
+    );
+    ed25519_verify_bench_step.dependOn(&run_ed25519_verify_bench.step);
+
+    const aws_lc_ed25519_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-ed25519-bench",
+    });
+    const aws_lc_ed25519_bench_step = b.step(
+        "bench-aws-lc-ed25519",
+        "Benchmark test-only AWS-LC Ed25519 primitives",
+    );
+    aws_lc_ed25519_bench_step.dependOn(&aws_lc_ed25519_bench.step);
+
+    const aws_lc_ed25519_verify_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-ed25519-verify-bench",
+    });
+    const aws_lc_ed25519_verify_bench_step = b.step(
+        "bench-aws-lc-ed25519-verify",
+        "Benchmark test-only AWS-LC one-shot Ed25519 verification",
+    );
+    aws_lc_ed25519_verify_bench_step.dependOn(
+        &aws_lc_ed25519_verify_bench.step,
+    );
+
+    const ed25519_sign_bench = b.addExecutable(.{
+        .name = "vail-bench-ed25519-sign",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/ed25519_sign.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_ed25519_sign_bench = b.addRunArtifact(ed25519_sign_bench);
+    const ed25519_sign_bench_step = b.step(
+        "bench-ed25519-sign",
+        "Benchmark pure-Zig Ed25519 signing",
+    );
+    ed25519_sign_bench_step.dependOn(&run_ed25519_sign_bench.step);
+
+    const aws_lc_ed25519_sign_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-ed25519-sign-bench",
+    });
+    const aws_lc_ed25519_sign_bench_step = b.step(
+        "bench-aws-lc-ed25519-sign",
+        "Benchmark test-only AWS-LC Ed25519 signing",
+    );
+    aws_lc_ed25519_sign_bench_step.dependOn(
+        &aws_lc_ed25519_sign_bench.step,
+    );
+
+    const aws_lc_x25519_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-x25519-bench",
+    });
+    const aws_lc_x25519_bench_step = b.step(
+        "bench-aws-lc-x25519",
+        "Benchmark test-only AWS-LC X25519 primitives",
+    );
+    aws_lc_x25519_bench_step.dependOn(&aws_lc_x25519_bench.step);
+
+    const x25519_shared_bench = b.addExecutable(.{
+        .name = "vail-bench-x25519-shared",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/x25519_shared.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_x25519_shared_bench = b.addRunArtifact(x25519_shared_bench);
+    const x25519_shared_bench_step = b.step(
+        "bench-x25519-shared",
+        "Benchmark pure-Zig X25519 arbitrary-point multiplication",
+    );
+    x25519_shared_bench_step.dependOn(&run_x25519_shared_bench.step);
+
+    const aws_lc_x25519_shared_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-x25519-shared-bench",
+    });
+    const aws_lc_x25519_shared_bench_step = b.step(
+        "bench-aws-lc-x25519-shared",
+        "Benchmark test-only AWS-LC X25519 arbitrary-point multiplication",
+    );
+    aws_lc_x25519_shared_bench_step.dependOn(
+        &aws_lc_x25519_shared_bench.step,
+    );
+
+    const hkdf_sha256_bench = b.addExecutable(.{
+        .name = "vail-bench-hkdf-sha256",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/hkdf_sha256.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_hkdf_sha256_bench = b.addRunArtifact(hkdf_sha256_bench);
+    const hkdf_sha256_bench_step = b.step(
+        "bench-hkdf-sha256",
+        "Benchmark prepared pure-Zig three-label HKDF-SHA-256",
+    );
+    hkdf_sha256_bench_step.dependOn(&run_hkdf_sha256_bench.step);
+
+    const hkdf_sha256_std_bench = b.addExecutable(.{
+        .name = "vail-bench-hkdf-sha256-std",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/hkdf_sha256_std.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_hkdf_sha256_std_bench = b.addRunArtifact(
+        hkdf_sha256_std_bench,
+    );
+    const hkdf_sha256_std_bench_step = b.step(
+        "bench-hkdf-sha256-std",
+        "Benchmark Zig std three-label HKDF-SHA-256",
+    );
+    hkdf_sha256_std_bench_step.dependOn(
+        &run_hkdf_sha256_std_bench.step,
+    );
+
+    const aws_lc_hkdf_sha256_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-hkdf-sha256-bench",
+    });
+    const aws_lc_hkdf_sha256_bench_step = b.step(
+        "bench-aws-lc-hkdf-sha256",
+        "Benchmark test-only AWS-LC three-label HKDF-SHA-256",
+    );
+    aws_lc_hkdf_sha256_bench_step.dependOn(
+        &aws_lc_hkdf_sha256_bench.step,
+    );
+
+    const hkdf_sha384_bench = b.addExecutable(.{
+        .name = "vail-bench-hkdf-sha384",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/hkdf_sha384.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_hkdf_sha384_bench = b.addRunArtifact(hkdf_sha384_bench);
+    const hkdf_sha384_bench_step = b.step(
+        "bench-hkdf-sha384",
+        "Benchmark prepared pure-Zig three-label HKDF-SHA-384",
+    );
+    hkdf_sha384_bench_step.dependOn(&run_hkdf_sha384_bench.step);
+
+    const hkdf_sha384_std_bench = b.addExecutable(.{
+        .name = "vail-bench-hkdf-sha384-std",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/hkdf_sha384_std.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_hkdf_sha384_std_bench = b.addRunArtifact(
+        hkdf_sha384_std_bench,
+    );
+    const hkdf_sha384_std_bench_step = b.step(
+        "bench-hkdf-sha384-std",
+        "Benchmark Zig std three-label HKDF-SHA-384",
+    );
+    hkdf_sha384_std_bench_step.dependOn(
+        &run_hkdf_sha384_std_bench.step,
+    );
+
+    const aws_lc_hkdf_sha384_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-hkdf-sha384-bench",
+    });
+    const aws_lc_hkdf_sha384_bench_step = b.step(
+        "bench-aws-lc-hkdf-sha384",
+        "Benchmark test-only AWS-LC three-label HKDF-SHA-384",
+    );
+    aws_lc_hkdf_sha384_bench_step.dependOn(
+        &aws_lc_hkdf_sha384_bench.step,
+    );
+
+    const sha512_primitives_bench = b.addExecutable(.{
+        .name = "vail-bench-sha512-primitives",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/sha512_primitives.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_sha512_primitives_bench = b.addRunArtifact(
+        sha512_primitives_bench,
+    );
+    const sha512_primitives_bench_step = b.step(
+        "bench-sha512-primitives",
+        "Benchmark pure-Zig SHA-384/SHA-512 digest and HMAC primitives",
+    );
+    sha512_primitives_bench_step.dependOn(
+        &run_sha512_primitives_bench.step,
+    );
+
+    const aws_lc_sha512_primitives_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-sha512-primitives-bench",
+    });
+    const aws_lc_sha512_primitives_bench_step = b.step(
+        "bench-aws-lc-sha512-primitives",
+        "Benchmark test-only AWS-LC SHA-384/SHA-512 digest and HMAC primitives",
+    );
+    aws_lc_sha512_primitives_bench_step.dependOn(
+        &aws_lc_sha512_primitives_bench.step,
+    );
+
+    const sha256_primitives_bench = b.addExecutable(.{
+        .name = "vail-bench-sha256-primitives",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/sha256_primitives.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_sha256_primitives_bench = b.addRunArtifact(
+        sha256_primitives_bench,
+    );
+    const sha256_primitives_bench_step = b.step(
+        "bench-sha256-primitives",
+        "Benchmark pure-Zig SHA-256 digest and HMAC primitives",
+    );
+    sha256_primitives_bench_step.dependOn(
+        &run_sha256_primitives_bench.step,
+    );
+
+    const aws_lc_sha256_primitives_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-sha256-primitives-bench",
+    });
+    const aws_lc_sha256_primitives_bench_step = b.step(
+        "bench-aws-lc-sha256-primitives",
+        "Benchmark test-only AWS-LC SHA-256 digest and HMAC primitives",
+    );
+    aws_lc_sha256_primitives_bench_step.dependOn(
+        &aws_lc_sha256_primitives_bench.step,
+    );
+
+    mldsa_benchmarks.add(b, vail, target, optimize);
+
+    const x25519_public_bench = b.addExecutable(.{
+        .name = "vail-bench-x25519-public",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/x25519_public.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_x25519_public_bench = b.addRunArtifact(x25519_public_bench);
+    const x25519_public_bench_step = b.step(
+        "bench-x25519-public",
+        "Benchmark pure-Zig X25519 public-key recovery",
+    );
+    x25519_public_bench_step.dependOn(&run_x25519_public_bench.step);
+
+    const aws_lc_x25519_public_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-aws-lc-x25519-public-bench",
+    });
+    const aws_lc_x25519_public_bench_step = b.step(
+        "bench-aws-lc-x25519-public",
+        "Benchmark test-only AWS-LC X25519 public-key recovery",
+    );
+    aws_lc_x25519_public_bench_step.dependOn(
+        &aws_lc_x25519_public_bench.step,
+    );
+
+    mlkem_benchmarks.add(b, vail, target, optimize);
+
+    const rsa_sha3_sign = b.addExecutable(.{
+        .name = "vail-rsa-sha3-sign",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/rsa_sha3_sign.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_rsa_sha3_sign = b.addSystemCommand(&.{ "bash", "-c" });
+    check_rsa_sha3_sign.addArg(
+        "work=$(mktemp -d /tmp/vail-rsa-sha3.XXXXXX); " ++
+            "trap 'rm -rf \"$work\"' EXIT; " ++
+            "openssl x509 -in src/crypto/testdata/rsa_signing_cert.pem -pubkey -noout >\"$work/public.pem\"; " ++
+            "$1 \"$work\"; " ++
+            "for digest in sha3-224 sha3-256 sha3-384 sha3-512; do " ++
+            "printf 'Vail pure Zig RSA SHA3 signing oracle' | openssl dgst -\"$digest\" -verify \"$work/public.pem\" -signature \"$work/pss-$digest.sig\" -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:digest >/dev/null || exit 1; " ++
+            "printf 'Vail pure Zig RSA SHA3 signing oracle' | openssl dgst -\"$digest\" -verify \"$work/public.pem\" -signature \"$work/pkcs1-$digest.sig\" >/dev/null || exit 1; " ++
+            "done",
+    );
+    check_rsa_sha3_sign.addArg("bash");
+    check_rsa_sha3_sign.addArtifactArg(rsa_sha3_sign);
+    const interop_rsa_sha3_sign_step = b.step(
+        "interop-openssl-rsa-sha3-sign",
+        "Verify pure-Zig RSA SHA3 signatures with OpenSSL",
+    );
+    interop_rsa_sha3_sign_step.dependOn(&check_rsa_sha3_sign.step);
+
+    const rsa_sha512_truncated_sign = b.addExecutable(.{
+        .name = "vail-rsa-sha512-truncated-sign",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/rsa_sha512_truncated_sign.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_rsa_sha512_truncated_sign = b.addSystemCommand(&.{
+        "bash",
+        "-c",
+    });
+    check_rsa_sha512_truncated_sign.addArg(
+        "work=$(mktemp -d /tmp/vail-rsa-sha512-truncated.XXXXXX); " ++
+            "trap 'rm -rf \"$work\"' EXIT; " ++
+            "openssl x509 -in src/crypto/testdata/rsa_signing_cert.pem -pubkey -noout >\"$work/public.pem\"; " ++
+            "$1 \"$work\"; " ++
+            "for digest in sha512-224 sha512-256; do " ++
+            "printf 'Vail pure Zig RSA SHA-512 truncated signing oracle' | openssl dgst -\"$digest\" -verify \"$work/public.pem\" -signature \"$work/pss-$digest.sig\" -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:digest -sigopt rsa_mgf1_md:\"$digest\" >/dev/null || exit 1; " ++
+            "printf 'Vail pure Zig RSA SHA-512 truncated signing oracle' | openssl dgst -\"$digest\" -verify \"$work/public.pem\" -signature \"$work/pkcs1-$digest.sig\" >/dev/null || exit 1; " ++
+            "done",
+    );
+    check_rsa_sha512_truncated_sign.addArg("bash");
+    check_rsa_sha512_truncated_sign.addArtifactArg(
+        rsa_sha512_truncated_sign,
+    );
+    const interop_rsa_sha512_truncated_sign_step = b.step(
+        "interop-openssl-rsa-sha512-truncated-sign",
+        "Verify pure-Zig RSA SHA-512/224 and SHA-512/256 signatures with OpenSSL",
+    );
+    interop_rsa_sha512_truncated_sign_step.dependOn(
+        &check_rsa_sha512_truncated_sign.step,
+    );
+
+    const rsa_shake_sign = b.addExecutable(.{
+        .name = "vail-rsa-shake-sign",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/rsa_shake_sign.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_rsa_shake_sign = b.addSystemCommand(&.{ "bash", "-c" });
+    check_rsa_shake_sign.addArg(
+        "work=$(mktemp -d /tmp/vail-rsa-shake.XXXXXX); " ++
+            "trap 'rm -rf \"$work\"' EXIT; " ++
+            "openssl x509 -in src/crypto/testdata/rsa_signing_cert.pem -pubkey -noout >\"$work/public.pem\"; " ++
+            "$1 \"$work\"; " ++
+            "for digest in shake128 shake256; do " ++
+            "openssl pkeyutl -encrypt -pubin -inkey \"$work/public.pem\" -pkeyopt rsa_padding_mode:none -in \"$work/pss-$digest.sig\" -out \"$work/$digest.em\" || exit 1; " ++
+            "xxd -r -p \"tools/interop/testdata/rsa-pss-$digest.em.hex\" >\"$work/$digest.expected\"; " ++
+            "cmp \"$work/$digest.expected\" \"$work/$digest.em\" || exit 1; " ++
+            "done",
+    );
+    check_rsa_shake_sign.addArg("bash");
+    check_rsa_shake_sign.addArtifactArg(rsa_shake_sign);
+    const interop_rsa_shake_sign_step = b.step(
+        "interop-openssl-rsa-shake-sign",
+        "Check pure-Zig RFC 8692 RSA-PSS-SHAKE signatures with OpenSSL raw RSA",
+    );
+    interop_rsa_shake_sign_step.dependOn(&check_rsa_shake_sign.step);
+
+    const p521_sign = b.addExecutable(.{
+        .name = "vail-p521-sign",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/p521_sign.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_p521_sign = b.addSystemCommand(&.{ "bash", "-c" });
+    check_p521_sign.addArg(
+        "work=$(mktemp -d /tmp/vail-p521-sign.XXXXXX); " ++
+            "trap 'rm -rf \"$work\"' EXIT; " ++
+            "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:secp521r1 -out \"$work/key.pem\"; " ++
+            "openssl pkcs8 -topk8 -nocrypt -in \"$work/key.pem\" -outform DER -out \"$work/key.der\"; " ++
+            "key_hex=$(xxd -p -c 100000 \"$work/key.der\"); " ++
+            "$1 \"$work\" \"$key_hex\"; " ++
+            "openssl dgst -sha512 -verify \"$work/public.der\" -keyform DER " ++
+            "-signature \"$work/signature.der\" \"$work/message.bin\" >/dev/null",
+    );
+    check_p521_sign.addArg("bash");
+    check_p521_sign.addArtifactArg(p521_sign);
+    const interop_p521_sign_step = b.step(
+        "interop-openssl-p521-sign",
+        "Verify a pure-Zig P-521 signature with OpenSSL",
+    );
+    interop_p521_sign_step.dependOn(&check_p521_sign.step);
+
+    const p256_sign = b.addExecutable(.{
+        .name = "vail-p256-sign",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/p256_sign.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_p256_sign = b.addSystemCommand(&.{ "bash", "-c" });
+    check_p256_sign.addArg(
+        "work=$(mktemp -d /tmp/vail-p256-sign.XXXXXX); " ++
+            "trap 'rm -rf \"$work\"' EXIT; " ++
+            "$1 \"$work\"; " ++
+            "openssl dgst -sha256 -verify \"$work/public.der\" -keyform DER " ++
+            "-signature \"$work/signature.der\" \"$work/message.bin\" >/dev/null",
+    );
+    check_p256_sign.addArg("bash");
+    check_p256_sign.addArtifactArg(p256_sign);
+    const interop_p256_sign_step = b.step(
+        "interop-openssl-p256-sign",
+        "Verify a pure-Zig P-256 signature with OpenSSL",
+    );
+    interop_p256_sign_step.dependOn(&check_p256_sign.step);
+
+    const p384_sign = b.addExecutable(.{
+        .name = "vail-p384-sign",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/p384_sign.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_p384_sign = b.addSystemCommand(&.{ "bash", "-c" });
+    check_p384_sign.addArg(
+        "work=$(mktemp -d /tmp/vail-p384-sign.XXXXXX); " ++
+            "trap 'rm -rf \"$work\"' EXIT; " ++
+            "$1 \"$work\"; " ++
+            "openssl dgst -sha384 -verify \"$work/public.der\" -keyform DER " ++
+            "-signature \"$work/signature.der\" \"$work/message.bin\" >/dev/null",
+    );
+    check_p384_sign.addArg("bash");
+    check_p384_sign.addArtifactArg(p384_sign);
+    const interop_p384_sign_step = b.step(
+        "interop-openssl-p384-sign",
+        "Verify a pure-Zig P-384 signature with OpenSSL",
+    );
+    interop_p384_sign_step.dependOn(&check_p384_sign.step);
+
+    const ed25519_sign = b.addExecutable(.{
+        .name = "vail-ed25519-sign",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/ed25519_sign.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const check_ed25519_sign = b.addSystemCommand(&.{ "bash", "-c" });
+    check_ed25519_sign.addArg(
+        "work=$(mktemp -d /tmp/vail-ed25519-sign.XXXXXX); " ++
+            "trap 'rm -rf \"$work\"' EXIT; " ++
+            "$1 \"$work\"; " ++
+            "openssl pkeyutl -verify -pubin -keyform DER " ++
+            "-inkey \"$work/public.der\" -rawin " ++
+            "-in \"$work/message.bin\" " ++
+            "-sigfile \"$work/signature.bin\" >/dev/null",
+    );
+    check_ed25519_sign.addArg("bash");
+    check_ed25519_sign.addArtifactArg(ed25519_sign);
+    const interop_ed25519_sign_step = b.step(
+        "interop-openssl-ed25519-sign",
+        "Verify a pure-Zig Ed25519 signature with OpenSSL",
+    );
+    interop_ed25519_sign_step.dependOn(&check_ed25519_sign.step);
 
     const tls_handshake_bench = b.addExecutable(.{
         .name = "vail-bench-tls-server-handshake",
@@ -176,6 +1245,366 @@ pub fn build(b: *std.Build) void {
     );
     tls_server_connection_bench_step.dependOn(
         &run_tls_server_connection_bench.step,
+    );
+
+    const rustls_tls_server_connection_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_server/Cargo.toml",
+        "--bin",
+        "vail-rustls-tls13-server-bench",
+    });
+    const rustls_tls_server_connection_bench_step = b.step(
+        "bench-rustls-tls-server-connection",
+        "Benchmark the test-only rustls/AWS-LC TLS 1.3 server first flight",
+    );
+    rustls_tls_server_connection_bench_step.dependOn(
+        &rustls_tls_server_connection_bench.step,
+    );
+
+    const rustls_tls_server_x509_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_server/Cargo.toml",
+        "--bin",
+        "vail-rustls-tls13-server-bench",
+        "--",
+        "x509",
+    });
+    const rustls_tls_server_x509_bench_step = b.step(
+        "bench-rustls-tls-server-x509",
+        "Benchmark rustls/AWS-LC TLS 1.3 server with an X.509 identity",
+    );
+    rustls_tls_server_x509_bench_step.dependOn(
+        &rustls_tls_server_x509_bench.step,
+    );
+
+    const tls_client_connection_bench = b.addExecutable(.{
+        .name = "vail-bench-tls-client-connection",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/tls_client_connection.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_tls_client_connection_bench = b.addRunArtifact(
+        tls_client_connection_bench,
+    );
+    const tls_client_connection_bench_step = b.step(
+        "bench-tls-client-connection",
+        "Benchmark the TLS 1.3 client through its encrypted Finished",
+    );
+    tls_client_connection_bench_step.dependOn(
+        &run_tls_client_connection_bench.step,
+    );
+
+    const rustls_tls_client_connection_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-tls13-client-bench",
+    });
+    const rustls_tls_client_connection_bench_step = b.step(
+        "bench-rustls-tls-client-connection",
+        "Benchmark the test-only rustls/AWS-LC TLS 1.3 client handshake",
+    );
+    rustls_tls_client_connection_bench_step.dependOn(
+        &rustls_tls_client_connection_bench.step,
+    );
+
+    const rustls_tls_client_x509_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-tls13-client-bench",
+        "--",
+        "x509",
+    });
+    const rustls_tls_client_x509_bench_step = b.step(
+        "bench-rustls-tls-client-x509",
+        "Benchmark rustls/AWS-LC TLS 1.3 client X.509 validation",
+    );
+    rustls_tls_client_x509_bench_step.dependOn(
+        &rustls_tls_client_x509_bench.step,
+    );
+
+    const tls_client_x509_bench = b.addExecutable(.{
+        .name = "vail-bench-tls-client-x509",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/tls_client_x509.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_tls_client_x509_bench = b.addRunArtifact(
+        tls_client_x509_bench,
+    );
+    const tls_client_x509_bench_step = b.step(
+        "bench-tls-client-x509",
+        "Benchmark TLS 1.3 client handshake with X.509 path validation",
+    );
+    tls_client_x509_bench_step.dependOn(
+        &run_tls_client_x509_bench.step,
+    );
+
+    const tls_server_x509_bench = b.addExecutable(.{
+        .name = "vail-bench-tls-server-x509",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/tls_server_x509.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_tls_server_x509_bench = b.addRunArtifact(
+        tls_server_x509_bench,
+    );
+    const tls_server_x509_bench_step = b.step(
+        "bench-tls-server-x509",
+        "Benchmark TLS 1.3 server first flight with an X.509 identity",
+    );
+    tls_server_x509_bench_step.dependOn(
+        &run_tls_server_x509_bench.step,
+    );
+
+    const tls_x509_handshake_bench = b.addExecutable(.{
+        .name = "vail-bench-tls-x509-handshake",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/tls_handshake_x509.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_tls_x509_handshake_bench = b.addRunArtifact(
+        tls_x509_handshake_bench,
+    );
+    const tls_x509_handshake_bench_step = b.step(
+        "bench-tls-x509-handshake",
+        "Benchmark a complete in-process TLS 1.3 X.509 handshake",
+    );
+    tls_x509_handshake_bench_step.dependOn(
+        &run_tls_x509_handshake_bench.step,
+    );
+
+    const rustls_tls_x509_handshake_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-tls13-client-bench",
+        "--",
+        "pair-x509",
+    });
+    const rustls_tls_x509_handshake_bench_step = b.step(
+        "bench-rustls-tls-x509-handshake",
+        "Benchmark a complete rustls/AWS-LC TLS 1.3 X.509 handshake",
+    );
+    rustls_tls_x509_handshake_bench_step.dependOn(
+        &rustls_tls_x509_handshake_bench.step,
+    );
+
+    const versioned_tls_handshake_bench = b.addExecutable(.{
+        .name = "vail-bench-versioned-tls-handshake",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/versioned_tls_handshake.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_versioned_tls_handshake_bench = b.addRunArtifact(
+        versioned_tls_handshake_bench,
+    );
+    const versioned_tls_handshake_bench_step = b.step(
+        "bench-versioned-tls-handshake",
+        "Benchmark a complete dual-version in-process TLS 1.3 handshake",
+    );
+    versioned_tls_handshake_bench_step.dependOn(
+        &run_versioned_tls_handshake_bench.step,
+    );
+
+    const rustls_versioned_tls_handshake_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-tls13-client-bench",
+        "--",
+        "pair-x509-auto",
+    });
+    const rustls_versioned_tls_handshake_bench_step = b.step(
+        "bench-rustls-versioned-tls-handshake",
+        "Benchmark a complete rustls/AWS-LC dual-version TLS 1.3 handshake",
+    );
+    rustls_versioned_tls_handshake_bench_step.dependOn(
+        &rustls_versioned_tls_handshake_bench.step,
+    );
+
+    const quic_tls_handshake_bench = b.addExecutable(.{
+        .name = "vail-bench-quic-tls-handshake",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/quic_tls_handshake.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_quic_tls_handshake_bench = b.addRunArtifact(
+        quic_tls_handshake_bench,
+    );
+    const quic_tls_handshake_bench_step = b.step(
+        "bench-quic-tls-handshake",
+        "Benchmark a complete in-process QUIC TLS 1.3 X.509 handshake",
+    );
+    quic_tls_handshake_bench_step.dependOn(
+        &run_quic_tls_handshake_bench.step,
+    );
+
+    const rustls_quic_tls_handshake_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-quic-handshake-bench",
+    });
+    const rustls_quic_tls_handshake_bench_step = b.step(
+        "bench-rustls-quic-tls-handshake",
+        "Benchmark a complete rustls/AWS-LC QUIC TLS 1.3 X.509 handshake",
+    );
+    rustls_quic_tls_handshake_bench_step.dependOn(
+        &rustls_quic_tls_handshake_bench.step,
+    );
+
+    const quic_tls_resumption_bench = b.addExecutable(.{
+        .name = "vail-bench-quic-tls-resumption",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/quic_tls_resumption.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_quic_tls_resumption_bench = b.addRunArtifact(
+        quic_tls_resumption_bench,
+    );
+    const quic_tls_resumption_bench_step = b.step(
+        "bench-quic-tls-resumption",
+        "Benchmark QUIC TLS 1.3 PSK-DHE resumption with ticket rollover",
+    );
+    quic_tls_resumption_bench_step.dependOn(
+        &run_quic_tls_resumption_bench.step,
+    );
+
+    const rustls_quic_tls_resumption_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-quic-handshake-bench",
+        "--",
+        "resume",
+    });
+    const rustls_quic_tls_resumption_bench_step = b.step(
+        "bench-rustls-quic-tls-resumption",
+        "Benchmark rustls/AWS-LC QUIC TLS 1.3 resumption with ticket rollover",
+    );
+    rustls_quic_tls_resumption_bench_step.dependOn(
+        &rustls_quic_tls_resumption_bench.step,
+    );
+
+    const run_quic_tls_0rtt_bench = b.addRunArtifact(
+        quic_tls_resumption_bench,
+    );
+    run_quic_tls_0rtt_bench.addArg("early");
+    const quic_tls_0rtt_bench_step = b.step(
+        "bench-quic-tls-0rtt",
+        "Benchmark accepted QUIC TLS 1.3 0-RTT with ticket rollover",
+    );
+    quic_tls_0rtt_bench_step.dependOn(&run_quic_tls_0rtt_bench.step);
+
+    const rustls_quic_tls_0rtt_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-quic-handshake-bench",
+        "--",
+        "early",
+    });
+    const rustls_quic_tls_0rtt_bench_step = b.step(
+        "bench-rustls-quic-tls-0rtt",
+        "Benchmark rustls/AWS-LC accepted QUIC TLS 1.3 0-RTT",
+    );
+    rustls_quic_tls_0rtt_bench_step.dependOn(
+        &rustls_quic_tls_0rtt_bench.step,
+    );
+
+    const tls_resumption_bench = b.addExecutable(.{
+        .name = "vail-bench-tls-resumption",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/tls_resumption.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_tls_resumption_bench = b.addRunArtifact(tls_resumption_bench);
+    const tls_resumption_bench_step = b.step(
+        "bench-tls-resumption",
+        "Benchmark TLS 1.3 PSK-DHE resumption with ticket rollover",
+    );
+    tls_resumption_bench_step.dependOn(&run_tls_resumption_bench.step);
+
+    const rustls_tls_resumption_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-tls13-client-bench",
+        "--",
+        "resume",
+    });
+    const rustls_tls_resumption_bench_step = b.step(
+        "bench-rustls-tls-resumption",
+        "Benchmark rustls/AWS-LC TLS 1.3 resumption with ticket rollover",
+    );
+    rustls_tls_resumption_bench_step.dependOn(
+        &rustls_tls_resumption_bench.step,
     );
 
     const x509_path_bench = b.addExecutable(.{
@@ -302,6 +1731,174 @@ pub fn build(b: *std.Build) void {
         &run_tls12_client_handshake_bench.step,
     );
 
+    const tls12_full_handshake_bench = b.addExecutable(.{
+        .name = "vail-bench-tls12-handshake",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/tls12_handshake.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_tls12_full_handshake_bench = b.addRunArtifact(
+        tls12_full_handshake_bench,
+    );
+    const tls12_full_handshake_bench_step = b.step(
+        "bench-tls12-handshake",
+        "Benchmark a complete in-process TLS 1.2 handshake",
+    );
+    tls12_full_handshake_bench_step.dependOn(
+        &run_tls12_full_handshake_bench.step,
+    );
+    const run_tls12_full_handshake_pss_bench = b.addRunArtifact(
+        tls12_full_handshake_bench,
+    );
+    run_tls12_full_handshake_pss_bench.addArg("pss");
+    const tls12_full_handshake_pss_bench_step = b.step(
+        "bench-tls12-handshake-pss",
+        "Benchmark a complete in-process RSA-PSS TLS 1.2 handshake",
+    );
+    tls12_full_handshake_pss_bench_step.dependOn(
+        &run_tls12_full_handshake_pss_bench.step,
+    );
+    const run_tls12_full_handshake_aes256_bench = b.addRunArtifact(
+        tls12_full_handshake_bench,
+    );
+    run_tls12_full_handshake_aes256_bench.addArg("aes256");
+    const tls12_full_handshake_aes256_bench_step = b.step(
+        "bench-tls12-handshake-aes256",
+        "Benchmark a complete AES-256/SHA-384 TLS 1.2 handshake",
+    );
+    tls12_full_handshake_aes256_bench_step.dependOn(
+        &run_tls12_full_handshake_aes256_bench.step,
+    );
+
+    const rustls_tls12_full_handshake_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-tls12-handshake-bench",
+    });
+    const rustls_tls12_full_handshake_bench_step = b.step(
+        "bench-rustls-tls12-handshake",
+        "Benchmark a complete rustls/AWS-LC TLS 1.2 handshake",
+    );
+    rustls_tls12_full_handshake_bench_step.dependOn(
+        &rustls_tls12_full_handshake_bench.step,
+    );
+    const rustls_tls12_full_handshake_pss_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-tls12-handshake-bench",
+        "--",
+        "pss",
+    });
+    const rustls_tls12_full_handshake_pss_bench_step = b.step(
+        "bench-rustls-tls12-handshake-pss",
+        "Benchmark a complete rustls/AWS-LC RSA-PSS TLS 1.2 handshake",
+    );
+    rustls_tls12_full_handshake_pss_bench_step.dependOn(
+        &rustls_tls12_full_handshake_pss_bench.step,
+    );
+    const rustls_tls12_full_handshake_aes256_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-tls12-handshake-bench",
+        "--",
+        "aes256",
+    });
+    const rustls_tls12_full_handshake_aes256_bench_step = b.step(
+        "bench-rustls-tls12-handshake-aes256",
+        "Benchmark a complete rustls/AWS-LC AES-256/SHA-384 TLS 1.2 handshake",
+    );
+    rustls_tls12_full_handshake_aes256_bench_step.dependOn(
+        &rustls_tls12_full_handshake_aes256_bench.step,
+    );
+
+    const tls12_resumption_bench = b.addExecutable(.{
+        .name = "vail-bench-tls12-resumption",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/tls12_resumption.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_tls12_resumption_bench = b.addRunArtifact(
+        tls12_resumption_bench,
+    );
+    const tls12_resumption_bench_step = b.step(
+        "bench-tls12-resumption",
+        "Benchmark TLS 1.2 ticket resumption with ticket rollover",
+    );
+    tls12_resumption_bench_step.dependOn(
+        &run_tls12_resumption_bench.step,
+    );
+    const run_tls12_session_resumption_bench = b.addRunArtifact(
+        tls12_resumption_bench,
+    );
+    run_tls12_session_resumption_bench.addArg("session");
+    const tls12_session_resumption_bench_step = b.step(
+        "bench-tls12-session-resumption",
+        "Benchmark TLS 1.2 session-ID resumption",
+    );
+    tls12_session_resumption_bench_step.dependOn(
+        &run_tls12_session_resumption_bench.step,
+    );
+
+    const rustls_tls12_resumption_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-tls12-handshake-bench",
+        "--",
+        "resume",
+    });
+    const rustls_tls12_resumption_bench_step = b.step(
+        "bench-rustls-tls12-resumption",
+        "Benchmark rustls/AWS-LC TLS 1.2 ticket resumption with rollover",
+    );
+    rustls_tls12_resumption_bench_step.dependOn(
+        &rustls_tls12_resumption_bench.step,
+    );
+    const rustls_tls12_session_resumption_bench = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "bench/rustls_min_client/Cargo.toml",
+        "--bin",
+        "vail-rustls-tls12-handshake-bench",
+        "--",
+        "resume-session",
+    });
+    const rustls_tls12_session_resumption_bench_step = b.step(
+        "bench-rustls-tls12-session-resumption",
+        "Benchmark rustls/AWS-LC TLS 1.2 session-ID resumption",
+    );
+    rustls_tls12_session_resumption_bench_step.dependOn(
+        &rustls_tls12_session_resumption_bench.step,
+    );
+
     const client_hello_check = b.addExecutable(.{
         .name = "vail-clienthello-check",
         .root_module = b.createModule(.{
@@ -381,6 +1978,85 @@ pub fn build(b: *std.Build) void {
     );
     interop_min_server_step.dependOn(&check_min_server.step);
 
+    const check_p521_server = b.addSystemCommand(&.{ "bash", "-c" });
+    check_p521_server.addArg(
+        "work=$(mktemp -d /tmp/vail-p521-server.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp521r1 -nodes -subj /CN=localhost -addext subjectAltName=DNS:localhost -days 1 -sha512 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl pkcs8 -topk8 -nocrypt -in \"$work/key.pem\" -outform DER -out \"$work/key.der\"; " ++
+            "openssl x509 -in \"$work/cert.pem\" -outform DER -out \"$work/cert.der\"; " ++
+            "key_hex=$(xxd -p -c 100000 \"$work/key.der\"); " ++
+            "cert_hex=$(xxd -p -c 100000 \"$work/cert.der\"); " ++
+            "$1 p521-all 24460 \"$key_hex\" \"$cert_hex\" >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 6s openssl s_client -connect 127.0.0.1:24460 -tls1_3 -groups P-521 -sigalgs ecdsa_secp521r1_sha512 -servername localhost -verify_hostname localhost -verify_return_error -CAfile \"$work/cert.pem\" -alpn h2 -ign_eof < /dev/null >\"$work/client.log\" 2>&1 || true; " ++
+            "wait $pid; " ++
+            "grep -q 'New, TLSv1.3, Cipher is TLS_AES_128_GCM_SHA256' \"$work/client.log\" && " ++
+            "grep -q 'Peer signature type: ecdsa_secp521r1_sha512' \"$work/client.log\" && " ++
+            "grep -q 'Verify return code: 0 (ok)' \"$work/client.log\" && " ++
+            "grep -q 'client finished verified' \"$work/server.log\" && " ++
+            "grep -q 'P-521 ECDH negotiated' \"$work/server.log\"",
+    );
+    check_p521_server.addArg("bash");
+    check_p521_server.addArtifactArg(min_tls13_server);
+    const interop_p521_server_step = b.step(
+        "interop-openssl-p521-server",
+        "Exercise Vail's native P-521 TLS 1.3 signer with OpenSSL",
+    );
+    interop_p521_server_step.dependOn(&check_p521_server.step);
+
+    const check_p521_kx_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_p521_kx_server.addArg(
+        "$1 p521-kx 24461 > /tmp/vail-p521-kx-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 8s openssl s_client -connect 127.0.0.1:24461 -tls1_3 -groups P-521 -servername localhost -alpn h2 -brief -ign_eof < /dev/null > /tmp/vail-p521-kx-client.log 2>&1 || true; " ++
+            "wait $pid; " ++
+            "grep -q 'Peer Temp Key: ECDH, secp521r1, 521 bits' /tmp/vail-p521-kx-client.log && " ++
+            "grep -q 'client finished verified' /tmp/vail-p521-kx-server.log && " ++
+            "grep -q 'P-521 ECDH negotiated' /tmp/vail-p521-kx-server.log",
+    );
+    check_p521_kx_server.addArg("sh");
+    check_p521_kx_server.addArtifactArg(min_tls13_server);
+    const interop_p521_kx_server_step = b.step(
+        "interop-openssl-p521-kx-server",
+        "Exercise Vail's pure-Zig P-521 TLS 1.3 key exchange with OpenSSL",
+    );
+    interop_p521_kx_server_step.dependOn(&check_p521_kx_server.step);
+
+    const check_ccm_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_ccm_server.addArg(
+        "$1 ccm > /tmp/vail-ccm-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 3s openssl s_client -connect 127.0.0.1:24444 -tls1_3 -ciphersuites TLS_AES_128_CCM_SHA256 -servername localhost -alpn h2 -ign_eof < /dev/null > /tmp/vail-ccm-client.log 2>&1 || true; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'New, TLSv1.3, Cipher is TLS_AES_128_CCM_SHA256' /tmp/vail-ccm-client.log && " ++
+            "grep -q 'client finished verified' /tmp/vail-ccm-server.log",
+    );
+    check_ccm_server.addArg("sh");
+    check_ccm_server.addArtifactArg(min_tls13_server);
+    const interop_ccm_server_step = b.step(
+        "interop-openssl-ccm-server",
+        "Exercise Vail's TLS_AES_128_CCM_SHA256 server with OpenSSL",
+    );
+    interop_ccm_server_step.dependOn(&check_ccm_server.step);
+
+    const check_ccm8_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_ccm8_server.addArg(
+        "$1 ccm8 > /tmp/vail-ccm8-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "timeout 3s openssl s_client -connect 127.0.0.1:24444 -tls1_3 -cipher 'DEFAULT:@SECLEVEL=0' -ciphersuites TLS_AES_128_CCM_8_SHA256 -servername localhost -alpn h2 -ign_eof < /dev/null > /tmp/vail-ccm8-client.log 2>&1 || true; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'New, TLSv1.3, Cipher is TLS_AES_128_CCM_8_SHA256' /tmp/vail-ccm8-client.log && " ++
+            "grep -q 'client finished verified' /tmp/vail-ccm8-server.log",
+    );
+    check_ccm8_server.addArg("sh");
+    check_ccm8_server.addArtifactArg(min_tls13_server);
+    const interop_ccm8_server_step = b.step(
+        "interop-openssl-ccm8-server",
+        "Exercise Vail's TLS_AES_128_CCM_8_SHA256 server with OpenSSL",
+    );
+    interop_ccm8_server_step.dependOn(&check_ccm8_server.step);
+
     const check_certificate_signatures_mtls = b.addSystemCommand(&.{ "sh", "-c" });
     check_certificate_signatures_mtls.addArg(
         "$1 certificate-signatures-mtls > /tmp/vail-cert-signatures-mtls-server.log 2>&1 & pid=$!; " ++
@@ -449,6 +2125,33 @@ pub fn build(b: *std.Build) void {
         "Exercise Vail's minimal TLS 1.3 server flight with rustls client",
     );
     interop_rustls_min_step.dependOn(&check_rustls_min.step);
+
+    const check_rustls_p521_server = b.addSystemCommand(&.{ "bash", "-c" });
+    check_rustls_p521_server.step.dependOn(&build_rustls_min.step);
+    check_rustls_p521_server.addArg(
+        "work=$(mktemp -d /tmp/vail-rustls-p521-server.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp521r1 -nodes -subj /CN=localhost -days 1 -sha512 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl pkcs8 -topk8 -nocrypt -in \"$work/key.pem\" -outform DER -out \"$work/key.der\"; " ++
+            "openssl x509 -in \"$work/cert.pem\" -outform DER -out \"$work/cert.der\"; " ++
+            "key_hex=$(xxd -p -c 100000 \"$work/key.der\"); " ++
+            "cert_hex=$(xxd -p -c 100000 \"$work/cert.der\"); " ++
+            "$1 p521 24460 \"$key_hex\" \"$cert_hex\" >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 6s bench/rustls_min_client/target/release/vail-rustls-min-client p521 24460 >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'client finished verified' \"$work/server.log\" && " ++
+            "grep -q 'rustls connected' \"$work/client.log\" && " ++
+            "grep -q 'rustls P-521 TLS 1.3 signature verified' \"$work/client.log\"",
+    );
+    check_rustls_p521_server.addArg("bash");
+    check_rustls_p521_server.addArtifactArg(min_tls13_server);
+    const interop_rustls_p521_server_step = b.step(
+        "interop-rustls-p521-server",
+        "Exercise Vail's native P-521 TLS 1.3 signer with rustls/AWS-LC",
+    );
+    interop_rustls_p521_server_step.dependOn(
+        &check_rustls_p521_server.step,
+    );
 
     const check_rustls_ca_hints = b.addSystemCommand(&.{ "sh", "-c" });
     check_rustls_ca_hints.step.dependOn(&build_rustls_min.step);
@@ -819,6 +2522,107 @@ pub fn build(b: *std.Build) void {
     );
     interop_vail_client_step.dependOn(&check_vail_client.step);
 
+    const check_vail_p521_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_p521_client.addArg(
+        "work=$(mktemp -d /tmp/vail-openssl-p521.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-521 -nodes -subj /CN=localhost -days 1 -sha512 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl s_server -accept 127.0.0.1:24458 -tls1_3 -groups P-521 -sigalgs ecdsa_secp521r1_sha512 -cert \"$work/cert.pem\" -key \"$work/key.pem\" -alpn h2 -www -naccept 1 >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 6s $1 p521-all 24458 >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'P-521 ECDH negotiated' \"$work/client.log\" && " ++
+            "grep -q 'server authenticated and finished verified' \"$work/client.log\" && " ++
+            "grep -q 'server application data verified' \"$work/client.log\"",
+    );
+    check_vail_p521_client.addArg("sh");
+    check_vail_p521_client.addArtifactArg(min_tls13_client);
+    const interop_vail_p521_client_step = b.step(
+        "interop-openssl-p521-client",
+        "Verify an OpenSSL P-521 TLS 1.3 server with Vail",
+    );
+    interop_vail_p521_client_step.dependOn(&check_vail_p521_client.step);
+
+    const check_vail_p521_kx_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_p521_kx_client.addArg(
+        "work=$(mktemp -d /tmp/vail-openssl-p521-kx.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl s_server -accept 127.0.0.1:24459 -tls1_3 -groups P-521 -cert \"$work/cert.pem\" -key \"$work/key.pem\" -alpn h2 -www -naccept 1 >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 8s $1 p521-kx 24459 >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'P-521 ECDH negotiated' \"$work/client.log\" && " ++
+            "grep -q 'server authenticated and finished verified' \"$work/client.log\" && " ++
+            "grep -q 'server application data verified' \"$work/client.log\"",
+    );
+    check_vail_p521_kx_client.addArg("sh");
+    check_vail_p521_kx_client.addArtifactArg(min_tls13_client);
+    const interop_vail_p521_kx_client_step = b.step(
+        "interop-openssl-p521-kx-client",
+        "Exercise Vail's pure-Zig P-521 TLS 1.3 client key exchange",
+    );
+    interop_vail_p521_kx_client_step.dependOn(
+        &check_vail_p521_kx_client.step,
+    );
+
+    const check_vail_ccm_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_ccm_client.addArg(
+        "work=$(mktemp -d /tmp/vail-openssl-ccm.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl s_server -accept 127.0.0.1:24445 -tls1_3 -groups P-256 -ciphersuites TLS_AES_128_CCM_SHA256 -cert \"$work/cert.pem\" -key \"$work/key.pem\" -alpn h2 -www -naccept 1 >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 4s $1 ccm >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'cipher suite=aes_128_ccm_sha256' \"$work/client.log\" && " ++
+            "grep -q 'server application data verified' \"$work/client.log\"",
+    );
+    check_vail_ccm_client.addArg("sh");
+    check_vail_ccm_client.addArtifactArg(min_tls13_client);
+    const interop_vail_ccm_client_step = b.step(
+        "interop-openssl-ccm-client",
+        "Exercise Vail's TLS_AES_128_CCM_SHA256 client with OpenSSL",
+    );
+    interop_vail_ccm_client_step.dependOn(&check_vail_ccm_client.step);
+
+    const check_vail_ccm8_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_ccm8_client.addArg(
+        "work=$(mktemp -d /tmp/vail-openssl-ccm8.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl s_server -accept 127.0.0.1:24445 -tls1_3 -groups P-256 -cipher 'DEFAULT:@SECLEVEL=0' -ciphersuites TLS_AES_128_CCM_8_SHA256 -cert \"$work/cert.pem\" -key \"$work/key.pem\" -alpn h2 -www -naccept 1 >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 4s $1 ccm8 >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'cipher suite=aes_128_ccm_8_sha256' \"$work/client.log\" && " ++
+            "grep -q 'server application data verified' \"$work/client.log\"",
+    );
+    check_vail_ccm8_client.addArg("sh");
+    check_vail_ccm8_client.addArtifactArg(min_tls13_client);
+    const interop_vail_ccm8_client_step = b.step(
+        "interop-openssl-ccm8-client",
+        "Exercise Vail's TLS_AES_128_CCM_8_SHA256 client with OpenSSL",
+    );
+    interop_vail_ccm8_client_step.dependOn(&check_vail_ccm8_client.step);
+
+    const check_vail_sm4_ccm = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_sm4_ccm.addArg(
+        "work=$(mktemp -d /tmp/vail-sm4-ccm.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "$1 sm4-ccm 24446 >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 6s $2 sm4-ccm 24446 >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'client finished verified' \"$work/server.log\" && " ++
+            "grep -q 'client application data verified' \"$work/server.log\" && " ++
+            "grep -q 'cipher suite=sm4_ccm_sm3' \"$work/client.log\" && " ++
+            "grep -q 'server application data verified' \"$work/client.log\"",
+    );
+    check_vail_sm4_ccm.addArg("sh");
+    check_vail_sm4_ccm.addArtifactArg(min_tls13_server);
+    check_vail_sm4_ccm.addArtifactArg(min_tls13_client);
+    const interop_vail_sm4_ccm_step = b.step(
+        "interop-vail-sm4-ccm",
+        "Exercise a complete Vail TLS_SM4_CCM_SM3 connection",
+    );
+    interop_vail_sm4_ccm_step.dependOn(&check_vail_sm4_ccm.step);
+
     const check_vail_pss_certificate_client = b.addSystemCommand(&.{ "sh", "-c" });
     check_vail_pss_certificate_client.addArg(
         "work=$(mktemp -d /tmp/vail-openssl-pss-server.XXXXXX); " ++
@@ -973,9 +2777,12 @@ pub fn build(b: *std.Build) void {
         "work=$(mktemp -d /tmp/vail-rustls-chacha-server.XXXXXX); " ++
             "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
             "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
-            "bench/rustls_min_server/target/release/vail-rustls-min-server \"$work/cert.pem\" \"$work/key.pem\" >\"$work/server.log\" 2>&1 & pid=$!; " ++
-            "sleep 0.2; timeout 4s $1 chacha >\"$work/client.log\" 2>&1; " ++
-            "wait $pid; " ++
+            "timeout 10s bench/rustls_min_server/target/release/vail-rustls-min-server \"$work/cert.pem\" \"$work/key.pem\" >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "client_status=1; i=0; while [ $i -lt 20 ]; do " ++
+            "if timeout 4s $1 chacha >\"$work/client.log\" 2>&1; then client_status=0; break; fi; " ++
+            "sleep 0.05; i=$((i + 1)); done; " ++
+            "wait $pid; server_status=$?; " ++
+            "test $client_status -eq 0 && test $server_status -eq 0 && " ++
             "grep -q 'rustls server completed' \"$work/server.log\" && " ++
             "grep -q 'server authenticated and finished verified' \"$work/client.log\" && " ++
             "grep -q 'cipher suite=chacha20_poly1305_sha256' \"$work/client.log\" && " ++
@@ -1164,6 +2971,83 @@ pub fn build(b: *std.Build) void {
     );
     interop_tls12_server_step.dependOn(&check_tls12_server.step);
 
+    const check_tls12_aes256_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_tls12_aes256_server.addArg(
+        "$1 aes256 > /tmp/vail-min-tls12-aes256-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "printf ping | timeout 8s openssl s_client -connect 127.0.0.1:24446 -tls1_2 -cipher ECDHE-RSA-AES256-GCM-SHA384 -groups P-256 -no_ticket -brief -ign_eof > /tmp/vail-min-tls12-aes256-client.log 2>&1 || true; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'TLS 1.2 application data verified' /tmp/vail-min-tls12-aes256-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'TLS 1.2 client Finished verified' /tmp/vail-min-tls12-aes256-server.log && " ++
+            "grep -q 'TLS 1.2 application data verified' /tmp/vail-min-tls12-aes256-server.log && " ++
+            "grep -q 'Protocol version: TLSv1.2' /tmp/vail-min-tls12-aes256-client.log && " ++
+            "grep -q 'Ciphersuite: ECDHE-RSA-AES256-GCM-SHA384' /tmp/vail-min-tls12-aes256-client.log && " ++
+            "grep -q 'vail tls12 ok' /tmp/vail-min-tls12-aes256-client.log",
+    );
+    check_tls12_aes256_server.addArg("sh");
+    check_tls12_aes256_server.addArtifactArg(min_tls12_server);
+    const interop_tls12_aes256_server_step = b.step(
+        "interop-openssl-tls12-aes256-server",
+        "Exercise Vail's AES-256/SHA-384 TLS 1.2 server against OpenSSL",
+    );
+    interop_tls12_aes256_server_step.dependOn(
+        &check_tls12_aes256_server.step,
+    );
+
+    const check_tls12_p521_server = b.addSystemCommand(&.{ "bash", "-c" });
+    check_tls12_p521_server.addArg(
+        "work=$(mktemp -d /tmp/vail-tls12-p521-server.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp521r1 -nodes -subj /CN=localhost -addext subjectAltName=DNS:localhost -days 1 -sha512 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl pkcs8 -topk8 -nocrypt -in \"$work/key.pem\" -outform DER -out \"$work/key.der\"; " ++
+            "openssl x509 -in \"$work/cert.pem\" -outform DER -out \"$work/cert.der\"; " ++
+            "key_hex=$(xxd -p -c 100000 \"$work/key.der\"); " ++
+            "cert_hex=$(xxd -p -c 100000 \"$work/cert.der\"); " ++
+            "$1 p521-all \"$key_hex\" \"$cert_hex\" >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "printf ping | timeout 8s openssl s_client -connect 127.0.0.1:24446 -tls1_2 -cipher ECDHE-ECDSA-AES128-GCM-SHA256 -groups P-521 -sigalgs ecdsa_secp521r1_sha512 -servername localhost -verify_hostname localhost -verify_return_error -CAfile \"$work/cert.pem\" -brief -ign_eof >\"$work/client.log\" 2>&1 || true; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'TLS 1.2 application data verified' \"$work/server.log\"; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'TLS 1.2 client Finished verified' \"$work/server.log\" && " ++
+            "grep -q 'TLS 1.2 application data verified' \"$work/server.log\" && " ++
+            "grep -q 'Protocol version: TLSv1.2' \"$work/client.log\" && " ++
+            "grep -q 'Ciphersuite: ECDHE-ECDSA-AES128-GCM-SHA256' \"$work/client.log\" && " ++
+            "grep -q 'Signature type: ecdsa_secp521r1_sha512' \"$work/client.log\" && " ++
+            "grep -q 'TLS 1.2 P-521 ECDH negotiated' \"$work/server.log\" && " ++
+            "grep -q 'vail tls12 ok' \"$work/client.log\"",
+    );
+    check_tls12_p521_server.addArg("bash");
+    check_tls12_p521_server.addArtifactArg(min_tls12_server);
+    const interop_tls12_p521_server_step = b.step(
+        "interop-openssl-tls12-p521-server",
+        "Exercise Vail's native P-521 TLS 1.2 signer with OpenSSL",
+    );
+    interop_tls12_p521_server_step.dependOn(
+        &check_tls12_p521_server.step,
+    );
+
+    const check_tls12_p521_kx_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_tls12_p521_kx_server.addArg(
+        "$1 p521-kx > /tmp/vail-tls12-p521-kx-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "printf ping | timeout 8s openssl s_client -connect 127.0.0.1:24446 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-521 -no_ticket -brief -ign_eof > /tmp/vail-tls12-p521-kx-client.log 2>&1 || true; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'TLS 1.2 application data verified' /tmp/vail-tls12-p521-kx-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'TLS 1.2 P-521 ECDH negotiated' /tmp/vail-tls12-p521-kx-server.log && " ++
+            "grep -q 'TLS 1.2 application data verified' /tmp/vail-tls12-p521-kx-server.log && " ++
+            "grep -q 'Peer Temp Key: ECDH, secp521r1, 521 bits' /tmp/vail-tls12-p521-kx-client.log && " ++
+            "grep -q 'vail tls12 ok' /tmp/vail-tls12-p521-kx-client.log",
+    );
+    check_tls12_p521_kx_server.addArg("sh");
+    check_tls12_p521_kx_server.addArtifactArg(min_tls12_server);
+    const interop_tls12_p521_kx_server_step = b.step(
+        "interop-openssl-tls12-p521-kx-server",
+        "Exercise Vail's pure-Zig P-521 TLS 1.2 server key exchange",
+    );
+    interop_tls12_p521_kx_server_step.dependOn(
+        &check_tls12_p521_kx_server.step,
+    );
+
     const check_rustls_tls12_server = b.addSystemCommand(&.{ "sh", "-c" });
     check_rustls_tls12_server.step.dependOn(&build_rustls_min.step);
     check_rustls_tls12_server.addArg(
@@ -1185,6 +3069,38 @@ pub fn build(b: *std.Build) void {
     );
     interop_rustls_tls12_server_step.dependOn(
         &check_rustls_tls12_server.step,
+    );
+
+    const check_rustls_tls12_p521_server = b.addSystemCommand(&.{
+        "bash",
+        "-c",
+    });
+    check_rustls_tls12_p521_server.step.dependOn(&build_rustls_min.step);
+    check_rustls_tls12_p521_server.addArg(
+        "work=$(mktemp -d /tmp/vail-rustls-tls12-p521-server.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp521r1 -nodes -subj /CN=localhost -days 1 -sha512 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl pkcs8 -topk8 -nocrypt -in \"$work/key.pem\" -outform DER -out \"$work/key.der\"; " ++
+            "openssl x509 -in \"$work/cert.pem\" -outform DER -out \"$work/cert.der\"; " ++
+            "key_hex=$(xxd -p -c 100000 \"$work/key.der\"); " ++
+            "cert_hex=$(xxd -p -c 100000 \"$work/cert.der\"); " ++
+            "$1 p521 \"$key_hex\" \"$cert_hex\" >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 8s bench/rustls_min_client/target/release/vail-rustls-tls12-client p521 >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'TLS 1.2 client Finished verified' \"$work/server.log\" && " ++
+            "grep -q 'TLS 1.2 application data verified' \"$work/server.log\" && " ++
+            "grep -q 'rustls TLS 1.2 connected' \"$work/client.log\" && " ++
+            "grep -q 'rustls P-521 TLS 1.2 signature verified' \"$work/client.log\" && " ++
+            "grep -q 'rustls TLS 1.2 application data verified' \"$work/client.log\"",
+    );
+    check_rustls_tls12_p521_server.addArg("bash");
+    check_rustls_tls12_p521_server.addArtifactArg(min_tls12_server);
+    const interop_rustls_tls12_p521_server_step = b.step(
+        "interop-rustls-tls12-p521-server",
+        "Exercise Vail's native P-521 TLS 1.2 signer with rustls/AWS-LC",
+    );
+    interop_rustls_tls12_p521_server_step.dependOn(
+        &check_rustls_tls12_p521_server.step,
     );
 
     const check_rustls_tls12_key_log = b.addSystemCommand(&.{ "sh", "-c" });
@@ -1240,6 +3156,50 @@ pub fn build(b: *std.Build) void {
     );
     interop_vail_tls12_client_step.dependOn(
         &check_vail_tls12_client.step,
+    );
+
+    const check_vail_tls12_p521_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_tls12_p521_client.addArg(
+        "work=$(mktemp -d /tmp/vail-openssl-tls12-p521.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-521 -nodes -subj /CN=localhost -days 1 -sha512 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl s_server -accept 127.0.0.1:24447 -tls1_2 -cipher ECDHE-ECDSA-AES128-GCM-SHA256 -groups P-521 -sigalgs ecdsa_secp521r1_sha512 -no_ticket -cert \"$work/cert.pem\" -key \"$work/key.pem\" -alpn http/1.1 -www -naccept 1 >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 8s $1 p521-all >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'TLS 1.2 P-521 ECDH negotiated' \"$work/client.log\" && " ++
+            "grep -q 'TLS 1.2 server authenticated and Finished verified' \"$work/client.log\" && " ++
+            "grep -q 'TLS 1.2 server application data verified' \"$work/client.log\"",
+    );
+    check_vail_tls12_p521_client.addArg("sh");
+    check_vail_tls12_p521_client.addArtifactArg(min_tls12_client);
+    const interop_vail_tls12_p521_client_step = b.step(
+        "interop-openssl-tls12-p521-client",
+        "Verify an OpenSSL P-521 TLS 1.2 server with Vail",
+    );
+    interop_vail_tls12_p521_client_step.dependOn(
+        &check_vail_tls12_p521_client.step,
+    );
+
+    const check_vail_tls12_p521_kx_client = b.addSystemCommand(&.{ "sh", "-c" });
+    check_vail_tls12_p521_kx_client.addArg(
+        "work=$(mktemp -d /tmp/vail-openssl-tls12-p521-kx.XXXXXX); " ++
+            "trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf \"$work\"' EXIT; " ++
+            "openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=localhost -days 1 -keyout \"$work/key.pem\" -out \"$work/cert.pem\" >/dev/null 2>&1; " ++
+            "openssl s_server -accept 127.0.0.1:24447 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups P-521 -no_ticket -cert \"$work/cert.pem\" -key \"$work/key.pem\" -alpn http/1.1 -www -naccept 1 >\"$work/server.log\" 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 8s $1 p521-kx >\"$work/client.log\" 2>&1; " ++
+            "wait $pid; " ++
+            "grep -q 'TLS 1.2 P-521 ECDH negotiated' \"$work/client.log\" && " ++
+            "grep -q 'TLS 1.2 server authenticated and Finished verified' \"$work/client.log\" && " ++
+            "grep -q 'TLS 1.2 server application data verified' \"$work/client.log\"",
+    );
+    check_vail_tls12_p521_kx_client.addArg("sh");
+    check_vail_tls12_p521_kx_client.addArtifactArg(min_tls12_client);
+    const interop_vail_tls12_p521_kx_client_step = b.step(
+        "interop-openssl-tls12-p521-kx-client",
+        "Exercise Vail's pure-Zig P-521 TLS 1.2 client key exchange",
+    );
+    interop_vail_tls12_p521_kx_client_step.dependOn(
+        &check_vail_tls12_p521_kx_client.step,
     );
 
     const check_vail_tls12_client_matrix = b.addSystemCommand(&.{ "bash", "-c" });
@@ -1774,18 +3734,21 @@ pub fn build(b: *std.Build) void {
     const check_rustls_mldsa_rpk_client = b.addSystemCommand(&.{ "sh", "-c" });
     check_rustls_mldsa_rpk_client.step.dependOn(&build_rustls_min.step);
     check_rustls_mldsa_rpk_client.addArg(
-        "timeout 30s $1 mldsa44 > /tmp/vail-mldsa-rpk-server.log 2>&1 & pid=$!; " ++
-            "sleep 0.2; timeout 25s bench/rustls_min_client/target/release/vail-rustls-rpk-client src/crypto/testdata/rsa_signing_key.pem mldsa44 > /tmp/rustls-mldsa-rpk-client.log 2>&1; client_status=$?; " ++
+        "for mode in mldsa44 mldsa65 mldsa87; do " ++
+            "case $mode in mldsa44) scheme=ML_DSA_44;; mldsa65) scheme=ML_DSA_65;; mldsa87) scheme=ML_DSA_87;; esac; " ++
+            "timeout 30s $1 $mode > /tmp/vail-mldsa-rpk-server-$mode.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 25s bench/rustls_min_client/target/release/vail-rustls-rpk-client src/crypto/testdata/rsa_signing_key.pem $mode > /tmp/rustls-mldsa-rpk-client-$mode.log 2>&1; client_status=$?; " ++
             "wait $pid; server_status=$?; " ++
             "test $client_status -eq 0 -a $server_status -eq 0 && " ++
-            "grep -q 'scheme=ML_DSA_44' /tmp/vail-mldsa-rpk-server.log && " ++
-            "grep -q 'scheme=ML_DSA_44' /tmp/rustls-mldsa-rpk-client.log",
+            "grep -q \"scheme=$scheme\" /tmp/vail-mldsa-rpk-server-$mode.log && " ++
+            "grep -q \"scheme=$scheme\" /tmp/rustls-mldsa-rpk-client-$mode.log || exit 1; " ++
+            "done",
     );
     check_rustls_mldsa_rpk_client.addArg("sh");
     check_rustls_mldsa_rpk_client.addArtifactArg(min_rpk_server);
     const interop_rustls_mldsa_rpk_server_step = b.step(
         "interop-rustls-mldsa-rpk-server",
-        "Exercise Vail's ML-DSA-44 RPK server with rustls/AWS-LC",
+        "Exercise Vail's ML-DSA-44/65/87 RPK server with rustls/AWS-LC",
     );
     interop_rustls_mldsa_rpk_server_step.dependOn(
         &check_rustls_mldsa_rpk_client.step,
@@ -1822,18 +3785,21 @@ pub fn build(b: *std.Build) void {
     const check_rustls_mldsa_rpk_server = b.addSystemCommand(&.{ "sh", "-c" });
     check_rustls_mldsa_rpk_server.step.dependOn(&build_rustls_server.step);
     check_rustls_mldsa_rpk_server.addArg(
-        "timeout 30s bench/rustls_min_server/target/release/vail-rustls-rpk-server src/crypto/testdata/rsa_signing_key.pem mldsa44 > /tmp/rustls-mldsa-rpk-server.log 2>&1 & pid=$!; " ++
-            "sleep 0.2; timeout 25s $1 mldsa44 > /tmp/vail-mldsa-rpk-client.log 2>&1; client_status=$?; " ++
+        "for mode in mldsa44 mldsa65 mldsa87; do " ++
+            "case $mode in mldsa44) scheme=ML_DSA_44;; mldsa65) scheme=ML_DSA_65;; mldsa87) scheme=ML_DSA_87;; esac; " ++
+            "timeout 30s bench/rustls_min_server/target/release/vail-rustls-rpk-server src/crypto/testdata/rsa_signing_key.pem $mode > /tmp/rustls-mldsa-rpk-server-$mode.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; timeout 25s $1 $mode > /tmp/vail-mldsa-rpk-client-$mode.log 2>&1; client_status=$?; " ++
             "wait $pid; server_status=$?; " ++
             "test $client_status -eq 0 -a $server_status -eq 0 && " ++
-            "grep -q 'scheme=ML_DSA_44' /tmp/rustls-mldsa-rpk-server.log && " ++
-            "grep -q 'scheme=ML_DSA_44' /tmp/vail-mldsa-rpk-client.log",
+            "grep -q \"scheme=$scheme\" /tmp/rustls-mldsa-rpk-server-$mode.log && " ++
+            "grep -q \"scheme=$scheme\" /tmp/vail-mldsa-rpk-client-$mode.log || exit 1; " ++
+            "done",
     );
     check_rustls_mldsa_rpk_server.addArg("sh");
     check_rustls_mldsa_rpk_server.addArtifactArg(min_rpk_client);
     const interop_rustls_mldsa_rpk_client_step = b.step(
         "interop-rustls-mldsa-rpk-client",
-        "Exercise Vail's ML-DSA-44 RPK client with rustls/AWS-LC",
+        "Exercise Vail's ML-DSA-44/65/87 RPK client with rustls/AWS-LC",
     );
     interop_rustls_mldsa_rpk_client_step.dependOn(
         &check_rustls_mldsa_rpk_server.step,

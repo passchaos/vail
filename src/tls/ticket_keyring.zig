@@ -738,9 +738,9 @@ fn deriveTls12Key(base_key: *const [key_len]u8) [key_len]u8 {
 
 fn expectedHashForSuite(suite_wire: u16) Error!secret.Hash {
     return switch (suite_wire) {
-        0x1301, 0x1303 => .sha256,
+        0x1301, 0x1303, 0x1304, 0x1305 => .sha256,
         0x1302 => .sha384,
-        0x00c6 => .sm3,
+        0x00c6, 0x00c7 => .sm3,
         else => error.InvalidTicket,
     };
 }
@@ -769,6 +769,82 @@ fn writeContext(
     output[alpn_len_offset] = @intCast(alpn.len);
     @memcpy(output[alpn_len_offset + 1 ..][0..alpn.len], alpn);
     return alpn_len_offset + 1 + alpn.len;
+}
+
+test "stateless ticket preserves TLS AES-CCM suite binding" {
+    inline for (.{
+        cipher_suite.Suite.aes_128_ccm_sha256,
+        cipher_suite.Suite.aes_128_ccm_8_sha256,
+    }) |suite| {
+        var keyring = try Keyring.init(.{
+            .id = 5,
+            .secret = [_]u8{0x81} ** key_len,
+        });
+        defer keyring.deinit();
+        const original = Opened{
+            .secret = [_]u8{0x82} ** 32,
+            .age_add = 17,
+            .issued_at_ms = 20_000,
+            .lifetime_seconds = 60,
+            .cipher_suite = suite,
+            .max_early_data_size = 2048,
+        };
+        const encoded = try keyring.seal(
+            [_]u8{0x83} ** nonce_len,
+            "ccm.example",
+            "h2",
+            original,
+        );
+        const opened = try keyring.open(
+            &encoded,
+            "ccm.example",
+            "h2",
+            20_001,
+        );
+        try std.testing.expectEqual(original.secret, opened.secret);
+        try std.testing.expectEqual(original.cipher_suite, opened.cipher_suite);
+        try std.testing.expectEqual(
+            original.max_early_data_size,
+            opened.max_early_data_size,
+        );
+    }
+}
+
+test "stateless ticket preserves TLS SM4-CCM suite binding" {
+    var keyring = try Keyring.init(.{
+        .id = 7,
+        .secret = [_]u8{0x84} ** key_len,
+    });
+    defer keyring.deinit();
+    const original = OpenedSecret{
+        .secret = secret.Secret.fromSm3([_]u8{0x85} ** 32),
+        .age_add = 19,
+        .issued_at_ms = 30_000,
+        .lifetime_seconds = 60,
+        .cipher_suite_wire = cipher_suite.Suite.sm4_ccm_sm3.wireValue(),
+        .max_early_data_size = 4096,
+    };
+    const encoded = try keyring.sealSecret(
+        [_]u8{0x86} ** nonce_len,
+        "sm4-ccm.example",
+        "h2",
+        original,
+    );
+    const opened = try keyring.openSecret(
+        &encoded,
+        "sm4-ccm.example",
+        "h2",
+        30_001,
+    );
+    try std.testing.expectEqual(original.secret, opened.secret);
+    try std.testing.expectEqual(
+        original.cipher_suite_wire,
+        opened.cipher_suite_wire,
+    );
+    try std.testing.expectEqual(
+        original.max_early_data_size,
+        opened.max_early_data_size,
+    );
 }
 
 test "stateless ticket round trip preserves bounded ALPS state" {

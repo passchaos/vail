@@ -2,6 +2,7 @@ const std = @import("std");
 const vail = @import("vail");
 
 const iterations: usize = 500;
+const warmup_iterations: usize = 16;
 
 pub fn main(init: std.process.Init) !void {
     const vectors = vail.crypto.testing.rsa_signing;
@@ -16,9 +17,17 @@ pub fn main(init: std.process.Init) !void {
     var signature: [512]u8 = undefined;
     var checksum: u64 = 0;
 
+    for (0..warmup_iterations) |_| {
+        try init.io.randomSecure(&salt);
+        _ = try prepared_key.signPssSha256(
+            &message,
+            &salt,
+            &signature,
+        );
+    }
     const start = nowNs(init.io);
     for (0..iterations) |iteration| {
-        salt[0] = @truncate(iteration);
+        try init.io.randomSecure(&salt);
         const len = try prepared_key.signPssSha256(
             &message,
             &salt,
@@ -33,6 +42,12 @@ pub fn main(init: std.process.Init) !void {
     );
 
     checksum = 0;
+    for (0..warmup_iterations) |_| {
+        _ = try prepared_key.signPkcs1v15Sha256(
+            &message,
+            &signature,
+        );
+    }
     const pkcs1_start = nowNs(init.io);
     for (0..iterations) |iteration| {
         const len = try prepared_key.signPkcs1v15Sha256(
@@ -45,6 +60,46 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         "rsa-2048-pkcs1-sha256={d} ns/sign checksum={d}\n",
         .{ pkcs1_elapsed / iterations, checksum },
+    );
+
+    checksum = 0;
+    for (0..warmup_iterations) |_| {
+        try init.io.randomSecure(&salt);
+        _ = try prepared_key.signPssSha3_256(
+            &message,
+            &salt,
+            &signature,
+        );
+    }
+    const pss_sha3_start = nowNs(init.io);
+    for (0..iterations) |iteration| {
+        try init.io.randomSecure(&salt);
+        const len = try prepared_key.signPssSha3_256(
+            &message,
+            &salt,
+            &signature,
+        );
+        checksum +%= signature[iteration % len];
+    }
+    const pss_sha3_elapsed = nowNs(init.io) -| pss_sha3_start;
+    std.debug.print(
+        "rsa-2048-pss-sha3-256={d} ns/sign checksum={d}\n",
+        .{ pss_sha3_elapsed / iterations, checksum },
+    );
+
+    checksum = 0;
+    const pkcs1_sha3_start = nowNs(init.io);
+    for (0..iterations) |iteration| {
+        const len = try prepared_key.signPkcs1v15Sha3_256(
+            &message,
+            &signature,
+        );
+        checksum +%= signature[iteration % len];
+    }
+    const pkcs1_sha3_elapsed = nowNs(init.io) -| pkcs1_sha3_start;
+    std.debug.print(
+        "rsa-2048-pkcs1-sha3-256={d} ns/sign checksum={d}\n",
+        .{ pkcs1_sha3_elapsed / iterations, checksum },
     );
 }
 

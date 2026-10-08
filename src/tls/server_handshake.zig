@@ -214,6 +214,11 @@ fn writeServerHandshakeFlightSelected(
     {
         return error.InvalidEchExtension;
     }
+    if (options.policy.ocsp_response != null and
+        options.policy.ocsp_responses != null)
+    {
+        return error.InvalidCertificate;
+    }
     if (options.record_size_limit) |limit| {
         _ = record_size_limit.validate(limit) catch
             return error.InvalidEncryptedExtensions;
@@ -283,8 +288,8 @@ fn writeServerHandshakeFlightSelected(
     );
     defer record_traffic.deinit();
 
-    var encrypted_extensions: std.ArrayList(u8) = .empty;
-    defer encrypted_extensions.deinit(allocator);
+    var encrypted_flight: std.ArrayList(u8) = .empty;
+    defer encrypted_flight.deinit(allocator);
     const local_record_size_limit = if (options.parsed_client_hello.record_size_limit != null) options.record_size_limit else null;
     const peer_fragment_limit = if (options.parsed_client_hello.record_size_limit) |limit| try record_size_limit.maxApplicationData(limit) else record.max_plaintext_len;
     const can_resume = std.mem.indexOfScalar(
@@ -304,7 +309,9 @@ fn writeServerHandshakeFlightSelected(
         0 else 0;
     const ticket_request_hint: ?u8 = if (options.parsed_client_hello.ticket_request != null and
         options.max_requested_tickets != 0) requested_ticket_count else null;
-    try server_hello.writeEncryptedExtensions(&encrypted_extensions, allocator, .{
+    const encrypted_extensions_start = encrypted_flight.items.len;
+    try server_hello.writeEncryptedExtensions(&encrypted_flight, allocator, .{
+        .server_name_acknowledged = options.parsed_client_hello.server_name != null,
         .alpn_protocol = selection.alpn_protocol,
         .quic_transport_parameters = options.policy.quic_transport_parameters,
         .accept_early_data = options.accept_early_data,
@@ -324,20 +331,14 @@ fn writeServerHandshakeFlightSelected(
         else
             selection.application_settings,
     });
-    try appendEncryptedHandshake(
-        out,
-        allocator,
-        &record_traffic,
-        encrypted_extensions.items,
-        peer_fragment_limit,
+    transcript_state.update(
+        encrypted_flight.items[encrypted_extensions_start..],
     );
-    transcript_state.update(encrypted_extensions.items);
 
-    var certificate_request: std.ArrayList(u8) = .empty;
-    defer certificate_request.deinit(allocator);
     if (options.client_auth) |client_auth_options| {
+        const certificate_request_start = encrypted_flight.items.len;
         try client_auth.writeRequestWithOptions(
-            &certificate_request,
+            &encrypted_flight,
             allocator,
             .{
                 .request_context = client_auth_options.request_context,
@@ -346,32 +347,39 @@ fn writeServerHandshakeFlightSelected(
                 .certificate_signature_schemes = client_auth_options.certificate_signature_schemes,
             },
         );
-        try appendEncryptedHandshake(
-            out,
-            allocator,
-            &record_traffic,
-            certificate_request.items,
-            peer_fragment_limit,
+        transcript_state.update(
+            encrypted_flight.items[certificate_request_start..],
         );
-        transcript_state.update(certificate_request.items);
     }
 
     var certificate: std.ArrayList(u8) = .empty;
     defer certificate.deinit(allocator);
-    var certificate_verify: std.ArrayList(u8) = .empty;
-    defer certificate_verify.deinit(allocator);
     var selected_certificate_compression: ?certificate_compression.Algorithm = null;
     if (options.psk == null) {
         if (selection.server_certificate_type == .x509 and
-            options.parsed_client_hello.requests_ocsp and
-            options.policy.ocsp_response != null)
+            options.parsed_client_hello.requests_ocsp)
         {
-            try auth.writeCertificateWithOcsp(
-                &certificate,
-                allocator,
-                options.certificate_chain,
-                options.policy.ocsp_response.?,
-            );
+            if (options.policy.ocsp_responses) |responses| {
+                try auth.writeCertificateWithOcspResponses(
+                    &certificate,
+                    allocator,
+                    options.certificate_chain,
+                    responses,
+                );
+            } else if (options.policy.ocsp_response) |response| {
+                try auth.writeCertificateWithOcsp(
+                    &certificate,
+                    allocator,
+                    options.certificate_chain,
+                    response,
+                );
+            } else {
+                try auth.writeCertificate(
+                    &certificate,
+                    allocator,
+                    options.certificate_chain,
+                );
+            }
         } else {
             try auth.writeCertificate(
                 &certificate,
@@ -392,30 +400,20 @@ fn writeServerHandshakeFlightSelected(
                 break compressed_certificate.items;
             }
         } else certificate.items;
-        try appendEncryptedHandshake(
-            out,
-            allocator,
-            &record_traffic,
-            certificate_wire,
-            peer_fragment_limit,
-        );
+        try encrypted_flight.appendSlice(allocator, certificate_wire);
         transcript_state.update(certificate_wire);
 
         const certificate_verify_hash = transcript_state.digest();
+        const certificate_verify_start = encrypted_flight.items.len;
         try auth.writeCertificateVerify(
-            &certificate_verify,
+            &encrypted_flight,
             allocator,
             options.signer,
             certificate_verify_hash.bytes(),
         );
-        try appendEncryptedHandshake(
-            out,
-            allocator,
-            &record_traffic,
-            certificate_verify.items,
-            peer_fragment_limit,
+        transcript_state.update(
+            encrypted_flight.items[certificate_verify_start..],
         );
-        transcript_state.update(certificate_verify.items);
     }
 
     const finished_hash = transcript_state.digest();
@@ -423,17 +421,16 @@ fn writeServerHandshakeFlightSelected(
         handshake.server_traffic_secret,
         finished_hash,
     );
-    var finished: std.ArrayList(u8) = .empty;
-    defer finished.deinit(allocator);
-    try writeFinished(&finished, allocator, verify_data.bytes());
+    const finished_start = encrypted_flight.items.len;
+    try writeFinished(&encrypted_flight, allocator, verify_data.bytes());
+    transcript_state.update(encrypted_flight.items[finished_start..]);
     try appendEncryptedHandshake(
         out,
         allocator,
         &record_traffic,
-        finished.items,
+        encrypted_flight.items,
         peer_fragment_limit,
     );
-    transcript_state.update(finished.items);
     const transcript_after_server_finished = transcript_state.digest();
 
     return .{
@@ -548,6 +545,22 @@ test "server handshake flight encrypts messages after ServerHello" {
     const first = try keys.open(0, first_record, &opened);
     try std.testing.expectEqual(@as(u8, server_hello.handshake_type_encrypted_extensions), opened[0]);
     try std.testing.expectEqual(record.content_type_handshake, first.content_type);
+    try std.testing.expectEqual(
+        flight.items.len - server_hello_len,
+        first_record.len,
+    );
+    try std.testing.expectEqual(
+        auth.handshake_type_certificate,
+        (try handshakeMessageAt(opened[0..first.len], 1))[0],
+    );
+    try std.testing.expectEqual(
+        auth.handshake_type_certificate_verify,
+        (try handshakeMessageAt(opened[0..first.len], 2))[0],
+    );
+    try std.testing.expectEqual(
+        handshake_type_finished,
+        (try handshakeMessageAt(opened[0..first.len], 3))[0],
+    );
 }
 
 test "server handshake flight inserts encrypted CertificateRequest" {
@@ -616,29 +629,47 @@ test "server handshake flight inserts encrypted CertificateRequest" {
     defer keys.deinit();
     var offset = server_hello_len;
     var plaintext: [1024]u8 = undefined;
-    const encrypted_extensions = try openRecordAt(
+    const encrypted_flight = try openRecordAt(
         flight.items,
         &offset,
         &keys,
         0,
         &plaintext,
     );
+    const encrypted_extensions = try handshakeMessageAt(encrypted_flight, 0);
     try std.testing.expectEqual(
         server_hello.handshake_type_encrypted_extensions,
         encrypted_extensions[0],
     );
-    const request = try openRecordAt(
-        flight.items,
-        &offset,
-        &keys,
-        1,
-        &plaintext,
-    );
+    const request = try handshakeMessageAt(encrypted_flight, 1);
     const parsed_request = try client_auth.parseRequest(request);
     try std.testing.expectEqualStrings(
         "client-auth",
         parsed_request.request_context,
     );
+}
+
+fn handshakeMessageAt(
+    plaintext: []const u8,
+    target_index: usize,
+) ![]const u8 {
+    var offset: usize = 0;
+    var index: usize = 0;
+    while (offset < plaintext.len) : (index += 1) {
+        if (plaintext.len - offset < 4) return error.InvalidServerFlight;
+        const body_len = (@as(usize, plaintext[offset + 1]) << 16) |
+            (@as(usize, plaintext[offset + 2]) << 8) |
+            plaintext[offset + 3];
+        const message_len = 4 + body_len;
+        if (message_len > plaintext.len - offset) {
+            return error.InvalidServerFlight;
+        }
+        if (index == target_index) {
+            return plaintext[offset..][0..message_len];
+        }
+        offset += message_len;
+    }
+    return error.InvalidServerFlight;
 }
 
 fn openRecordAt(
@@ -672,7 +703,7 @@ fn openRecordAt(
     return plaintext[0..opened.len];
 }
 
-test "server handshake staples OCSP only when requested" {
+test "server handshake staples legacy and per-entry OCSP only when requested" {
     const allocator = std.testing.allocator;
     const public_key = [_]u8{0x71} ** key_exchange.secret_len;
     const signing_key = try std.crypto.sign.Ed25519.KeyPair
@@ -680,80 +711,118 @@ test "server handshake staples OCSP only when requested" {
         [_]u8{0x72} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
     );
     const certificate = signing_key.public_key.toBytes();
-    const ocsp_response = "authenticated-ocsp-response";
+    const issuer_certificate = [_]u8{0x77} ** 32;
+    const leaf_ocsp_response = "authenticated-ocsp-response";
+    const issuer_ocsp_response = "authenticated-issuer-ocsp-response";
+    const multi_responses = [_]?[]const u8{
+        leaf_ocsp_response,
+        issuer_ocsp_response,
+    };
 
-    for ([_]bool{ true, false }) |request_ocsp| {
-        var hello: std.ArrayList(u8) = .empty;
-        defer hello.deinit(allocator);
-        try client_hello.write(&hello, allocator, .{
-            .random = [_]u8{0x73} ** 32,
-            .x25519_public_key = public_key,
-            .cipher_suites = &.{.aes_128_gcm_sha256},
-            .request_ocsp = request_ocsp,
-        });
-        const parsed_hello = try client_hello.parse(hello.items);
+    for ([_]bool{ false, true }) |multi_staple| {
+        for ([_]struct {
+            legacy: bool,
+            multi: bool,
+            expect_staple: bool,
+        }{
+            .{ .legacy = true, .multi = false, .expect_staple = true },
+            .{ .legacy = false, .multi = false, .expect_staple = false },
+            // RFC 8446 deprecates status_request_v2 for TLS 1.3. A server
+            // accepts it in ClientHello for version fallback but ignores it.
+            .{ .legacy = false, .multi = true, .expect_staple = false },
+        }) |request| {
+            var hello: std.ArrayList(u8) = .empty;
+            defer hello.deinit(allocator);
+            try client_hello.write(&hello, allocator, .{
+                .random = [_]u8{0x73} ** 32,
+                .x25519_public_key = public_key,
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .request_ocsp = request.legacy,
+                .request_ocsp_multi = request.multi,
+            });
+            const parsed_hello = try client_hello.parse(hello.items);
+            var policy = server_flight.Policy{
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .groups = &.{key_exchange.named_group_x25519},
+            };
+            if (multi_staple) {
+                policy.ocsp_responses = &multi_responses;
+            } else {
+                policy.ocsp_response = leaf_ocsp_response;
+            }
 
-        var flight: std.ArrayList(u8) = .empty;
-        defer flight.deinit(allocator);
-        var result = try writeServerHandshakeFlight(
-            &flight,
-            allocator,
-            .{
-                .client_hello_bytes = hello.items,
-                .parsed_client_hello = parsed_hello,
-                .policy = .{
-                    .cipher_suites = &.{.aes_128_gcm_sha256},
-                    .groups = &.{key_exchange.named_group_x25519},
-                    .ocsp_response = ocsp_response,
+            var flight: std.ArrayList(u8) = .empty;
+            defer flight.deinit(allocator);
+            var result = try writeServerHandshakeFlight(
+                &flight,
+                allocator,
+                .{
+                    .client_hello_bytes = hello.items,
+                    .parsed_client_hello = parsed_hello,
+                    .policy = policy,
+                    .server_random = [_]u8{0x74} ** 32,
+                    .server_key_share = &([_]u8{0x75} ** 32),
+                    .shared_secret = &([_]u8{0x76} ** 32),
+                    .certificate_chain = &.{ &certificate, &issuer_certificate },
+                    .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
                 },
-                .server_random = [_]u8{0x74} ** 32,
-                .server_key_share = &([_]u8{0x75} ** 32),
-                .shared_secret = &([_]u8{0x76} ** 32),
-                .certificate_chain = &.{&certificate},
-                .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
-            },
-        );
-        defer result.handshake_secret.deinit();
-        defer result.client_handshake_traffic_secret.deinit();
-        defer result.server_handshake_traffic_secret.deinit();
-
-        const server_hello_len = 4 +
-            ((@as(usize, flight.items[1]) << 16) |
-                (@as(usize, flight.items[2]) << 8) |
-                flight.items[3]);
-        var keys = try record.Keys.derive(
-            result.selection.suite,
-            result.server_handshake_traffic_secret,
-        );
-        defer keys.deinit();
-        var offset = server_hello_len;
-        var plaintext: [1024]u8 = undefined;
-        _ = try openRecordAt(
-            flight.items,
-            &offset,
-            &keys,
-            0,
-            &plaintext,
-        );
-        const certificate_message = try openRecordAt(
-            flight.items,
-            &offset,
-            &keys,
-            1,
-            &plaintext,
-        );
-        var parsed_certificate = try auth.parseCertificate(
-            allocator,
-            certificate_message,
-        );
-        defer parsed_certificate.deinit(allocator);
-        if (request_ocsp) {
-            try std.testing.expectEqualStrings(
-                ocsp_response,
-                parsed_certificate.ocsp_response.?,
             );
-        } else {
-            try std.testing.expect(parsed_certificate.ocsp_response == null);
+            defer result.handshake_secret.deinit();
+            defer result.client_handshake_traffic_secret.deinit();
+            defer result.server_handshake_traffic_secret.deinit();
+
+            const server_hello_len = 4 +
+                ((@as(usize, flight.items[1]) << 16) |
+                    (@as(usize, flight.items[2]) << 8) |
+                    flight.items[3]);
+            var keys = try record.Keys.derive(
+                result.selection.suite,
+                result.server_handshake_traffic_secret,
+            );
+            defer keys.deinit();
+            var offset = server_hello_len;
+            var plaintext: [1024]u8 = undefined;
+            const encrypted_flight = try openRecordAt(
+                flight.items,
+                &offset,
+                &keys,
+                0,
+                &plaintext,
+            );
+            const certificate_message = try handshakeMessageAt(
+                encrypted_flight,
+                1,
+            );
+            var parsed_certificate = try auth.parseCertificate(
+                allocator,
+                certificate_message,
+            );
+            defer parsed_certificate.deinit(allocator);
+            try std.testing.expectEqual(
+                @as(usize, 2),
+                parsed_certificate.ocsp_responses.?.len,
+            );
+            if (request.expect_staple) {
+                try std.testing.expectEqualStrings(
+                    leaf_ocsp_response,
+                    parsed_certificate.ocsp_response.?,
+                );
+                if (multi_staple) {
+                    try std.testing.expectEqualStrings(
+                        issuer_ocsp_response,
+                        parsed_certificate.ocsp_responses.?[1].?,
+                    );
+                } else {
+                    try std.testing.expect(
+                        parsed_certificate.ocsp_responses.?[1] == null,
+                    );
+                }
+            } else {
+                try std.testing.expect(parsed_certificate.ocsp_response == null);
+                try std.testing.expect(
+                    parsed_certificate.ocsp_responses.?[1] == null,
+                );
+            }
         }
     }
 }
@@ -828,14 +897,14 @@ test "server handshake selects a matching offered compressed certificate" {
     defer keys.deinit();
     var offset = server_hello_len;
     var plaintext: [1024]u8 = undefined;
-    _ = try openRecordAt(flight.items, &offset, &keys, 0, &plaintext);
-    const certificate_message = try openRecordAt(
+    const encrypted_flight = try openRecordAt(
         flight.items,
         &offset,
         &keys,
-        1,
+        0,
         &plaintext,
     );
+    const certificate_message = try handshakeMessageAt(encrypted_flight, 1);
     try std.testing.expectEqual(
         certificate_compression.handshake_type_compressed_certificate,
         certificate_message[0],
@@ -1025,5 +1094,5 @@ test "server handshake fragments large Certificate messages across records" {
     }
     try std.testing.expect(saw_large_certificate);
     try std.testing.expectEqual(@as(usize, 4), message_count);
-    try std.testing.expect(record_count > message_count);
+    try std.testing.expect(record_count > 1);
 }

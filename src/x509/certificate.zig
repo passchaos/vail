@@ -1,9 +1,10 @@
 //! Compatibility parser for X.509 certificates whose signature
 //! AlgorithmIdentifier is not yet understood by `std.crypto.Certificate`.
 //!
-//! The fast path is exactly Zig std's parser. The fallback accepts only the
-//! strict SHA-2 RSA-PSS profile shared with Vail's CRL and OCSP verifiers and
-//! constructs the same borrowed field view used by the trust-path engine.
+//! The fast path is exactly Zig std's parser. The fallback accepts the strict
+//! RSA-PSS profile and NIST ECDSA-with-SHA3 AlgorithmIdentifiers shared with
+//! Vail's CRL and OCSP verifiers, then constructs the same borrowed field view
+//! used by the trust-path engine.
 
 const std = @import("std");
 const x509_signature = @import("signature.zig");
@@ -56,9 +57,43 @@ pub const Parsed = struct {
                 now_seconds,
             );
         }
+        if (issuerUsesP521(issuer_certificate.standard)) {
+            if (!std.mem.eql(
+                u8,
+                self.standard.issuer(),
+                issuer_certificate.standard.subject(),
+            )) {
+                return error.CertificateIssuerMismatch;
+            }
+            return verifySignatureAndValidity(
+                self.standard,
+                null,
+                issuer_certificate.standard,
+                now_seconds,
+            );
+        }
         return self.standard.verify(issuer_certificate.standard, now_seconds);
     }
 };
+
+fn issuerUsesP521(issuer: Certificate.Parsed) bool {
+    return switch (issuer.pub_key_algo) {
+        .X9_62_id_ecPublicKey => |curve| curve == .secp521r1,
+        else => false,
+    };
+}
+
+fn issuerUsesP256(issuer: Certificate.Parsed) bool {
+    return switch (issuer.pub_key_algo) {
+        .X9_62_id_ecPublicKey => |curve| curve == .X9_62_prime256v1,
+        else => false,
+    };
+}
+
+fn issuerUsesEd25519(issuer: Certificate.Parsed) bool {
+    return issuer.pub_key_algo == .curveEd25519 and
+        issuer.pubKey().len == std.crypto.sign.Ed25519.PublicKey.encoded_length;
+}
 
 pub fn verifyWithAlgorithm(
     subject: Certificate.Parsed,
@@ -69,18 +104,148 @@ pub fn verifyWithAlgorithm(
     if (!std.mem.eql(u8, subject.issuer(), issuer.subject())) {
         return error.CertificateIssuerMismatch;
     }
+    return verifySignatureAndValidity(subject, algorithm, issuer, now_seconds);
+}
+
+/// Verify validity and signature after the caller has established issuer-name
+/// equality. This is used when RFC 5280 section 7.1 says two Names are equal
+/// even though their DER string encodings differ.
+pub fn verifySignatureAndValidity(
+    subject: Certificate.Parsed,
+    override_algorithm: ?SignatureAlgorithm,
+    issuer: Certificate.Parsed,
+    now_seconds: i64,
+) !void {
     if (now_seconds < subject.validity.not_before) {
         return error.CertificateNotYetValid;
     }
     if (now_seconds > subject.validity.not_after) {
         return error.CertificateExpired;
     }
+    const algorithm = try signatureAlgorithm(subject, override_algorithm);
     x509_signature.verify(
         algorithm,
         issuer,
         subject.message(),
         subject.signature(),
-    ) catch |err| switch (err) {
+    ) catch |err| return mapSignatureError(err);
+}
+
+/// Verify a certificate signed by a P-521 issuer while reusing a caller-owned
+/// prepared public-key table.
+pub fn verifySignatureAndValidityWithP521(
+    subject: Certificate.Parsed,
+    override_algorithm: ?SignatureAlgorithm,
+    issuer: Certificate.Parsed,
+    now_seconds: i64,
+    verifier: *const x509_signature.P521Verifier,
+) !void {
+    if (!issuerUsesP521(issuer)) {
+        return error.CertificateSignatureAlgorithmUnsupported;
+    }
+    if (now_seconds < subject.validity.not_before) {
+        return error.CertificateNotYetValid;
+    }
+    if (now_seconds > subject.validity.not_after) {
+        return error.CertificateExpired;
+    }
+    const algorithm = try signatureAlgorithm(subject, override_algorithm);
+    x509_signature.verifyWithP521(
+        algorithm,
+        verifier,
+        subject.message(),
+        subject.signature(),
+    ) catch |err| return mapSignatureError(err);
+}
+
+/// Verify validity and a P-256 signature with a caller-retained issuer table.
+pub fn verifySignatureAndValidityWithP256(
+    subject: Certificate.Parsed,
+    override_algorithm: ?SignatureAlgorithm,
+    issuer: Certificate.Parsed,
+    now_seconds: i64,
+    verifier: *const x509_signature.P256Verifier,
+) !void {
+    if (!issuerUsesP256(issuer)) {
+        return error.CertificateSignatureAlgorithmUnsupported;
+    }
+    const public_key = std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey
+        .fromSec1(issuer.pubKey()) catch return error.CertificatePublicKeyInvalid;
+    if (!verifier.matchesPublicKey(public_key.p)) {
+        return error.CertificatePublicKeyInvalid;
+    }
+    if (now_seconds < subject.validity.not_before) {
+        return error.CertificateNotYetValid;
+    }
+    if (now_seconds > subject.validity.not_after) {
+        return error.CertificateExpired;
+    }
+    const algorithm = try signatureAlgorithm(subject, override_algorithm);
+    x509_signature.verifyWithP256(
+        algorithm,
+        verifier,
+        subject.message(),
+        subject.signature(),
+    ) catch |err| return mapSignatureError(err);
+}
+
+/// Verify validity and an Ed25519 signature with a caller-retained issuer
+/// table. This is intended for paths that reuse one issuer for several signed
+/// objects.
+pub fn verifySignatureAndValidityWithEd25519(
+    subject: Certificate.Parsed,
+    override_algorithm: ?SignatureAlgorithm,
+    issuer: Certificate.Parsed,
+    now_seconds: i64,
+    verifier: *const x509_signature.Ed25519Verifier,
+) !void {
+    if (!issuerUsesEd25519(issuer)) {
+        return error.CertificateSignatureAlgorithmUnsupported;
+    }
+    const issuer_key = std.crypto.sign.Ed25519.PublicKey.fromBytes(
+        issuer.pubKey()[0..std.crypto.sign.Ed25519.PublicKey.encoded_length].*,
+    ) catch return error.CertificatePublicKeyInvalid;
+    if (!verifier.matchesPublicKey(issuer_key)) {
+        return error.CertificatePublicKeyInvalid;
+    }
+    if (now_seconds < subject.validity.not_before) {
+        return error.CertificateNotYetValid;
+    }
+    if (now_seconds > subject.validity.not_after) {
+        return error.CertificateExpired;
+    }
+    const algorithm = try signatureAlgorithm(subject, override_algorithm);
+    x509_signature.verifyWithEd25519(
+        algorithm,
+        verifier,
+        subject.message(),
+        subject.signature(),
+    ) catch |err| return mapSignatureError(err);
+}
+
+fn signatureAlgorithm(
+    subject: Certificate.Parsed,
+    override_algorithm: ?SignatureAlgorithm,
+) !SignatureAlgorithm {
+    return override_algorithm orelse switch (subject.signature_algorithm) {
+        .sha1WithRSAEncryption => .rsa_pkcs1_sha1,
+        .sha224WithRSAEncryption => .rsa_pkcs1_sha224,
+        .sha256WithRSAEncryption => .rsa_pkcs1_sha256,
+        .sha384WithRSAEncryption => .rsa_pkcs1_sha384,
+        .sha512WithRSAEncryption => .rsa_pkcs1_sha512,
+        .ecdsa_with_SHA224 => .ecdsa_sha224,
+        .ecdsa_with_SHA256 => .ecdsa_p256_sha256,
+        .ecdsa_with_SHA384 => .ecdsa_p384_sha384,
+        .ecdsa_with_SHA512 => .ecdsa_sha512,
+        .curveEd25519 => .ed25519,
+        .md2WithRSAEncryption,
+        .md5WithRSAEncryption,
+        => return error.CertificateSignatureAlgorithmUnsupported,
+    };
+}
+
+fn mapSignatureError(err: x509_signature.Error) anyerror {
+    return switch (err) {
         error.InvalidSignature => return error.CertificateSignatureInvalid,
         error.InvalidIssuer => return error.CertificatePublicKeyInvalid,
         error.UnsupportedSignatureAlgorithm => return error.CertificateSignatureAlgorithmUnsupported,
@@ -93,11 +258,11 @@ pub fn parse(der: []const u8) !Parsed {
     if (Certificate.parse(certificate)) |standard| {
         return .{ .standard = standard };
     } else |_| {
-        return parseRsaPss(certificate);
+        return parseExtendedSignature(certificate);
     }
 }
 
-fn parseRsaPss(certificate: Certificate) !Parsed {
+fn parseExtendedSignature(certificate: Certificate) !Parsed {
     const bytes = certificate.buffer;
     const outer = try Certificate.der.Element.parse(bytes, certificate.index);
     if (outer.identifier.tag != .sequence or outer.slice.end != bytes.len) {
@@ -170,10 +335,21 @@ fn parseRsaPss(certificate: Certificate) !Parsed {
         bytes,
         public_key_algorithm.slice.start,
     );
-    const public_key_kind: Certificate.Parsed.PubKeyAlgo = switch (try Certificate.parseAlgorithmCategory(
+    var extended_public_key = false;
+    const public_key_category = Certificate.parseAlgorithmCategory(
         bytes,
         public_key_oid,
-    )) {
+    ) catch |err| switch (err) {
+        error.CertificateHasUnrecognizedObjectId => category: {
+            _ = try x509_signature.parsePssPublicKeyAlgorithmIdentifier(
+                bytes[public_key_algorithm.slice.start..public_key_algorithm.slice.end],
+            );
+            extended_public_key = true;
+            break :category Certificate.AlgorithmCategory.rsassa_pss;
+        },
+        else => |parse_error| return parse_error,
+    };
+    const public_key_kind: Certificate.Parsed.PubKeyAlgo = switch (public_key_category) {
         inline else => |tag| @unionInit(
             Certificate.Parsed.PubKeyAlgo,
             @tagName(tag),
@@ -224,9 +400,35 @@ fn parseRsaPss(certificate: Certificate) !Parsed {
     const algorithm = try x509_signature.parseAlgorithmIdentifier(
         bytes[outer_algorithm.slice.start..outer_algorithm.slice.end],
     );
-    switch (algorithm) {
-        .rsa_pss_sha256, .rsa_pss_sha384, .rsa_pss_sha512 => {},
-        else => return error.UnsupportedSignatureAlgorithm,
+    if (!extended_public_key) {
+        switch (algorithm) {
+            .rsa_pss_sha224,
+            .rsa_pss_sha256,
+            .rsa_pss_sha384,
+            .rsa_pss_sha512,
+            .rsa_pss_sha512_224,
+            .rsa_pss_sha512_256,
+            .rsa_pss_sha3_224,
+            .rsa_pss_sha3_256,
+            .rsa_pss_sha3_384,
+            .rsa_pss_sha3_512,
+            .rsa_pss_shake128,
+            .rsa_pss_shake256,
+            .rsa_pkcs1_sha3_224,
+            .rsa_pkcs1_sha3_256,
+            .rsa_pkcs1_sha3_384,
+            .rsa_pkcs1_sha3_512,
+            .rsa_pkcs1_sha512_224,
+            .rsa_pkcs1_sha512_256,
+            .ecdsa_sha3_224,
+            .ecdsa_sha3_256,
+            .ecdsa_sha3_384,
+            .ecdsa_sha3_512,
+            .ecdsa_shake128,
+            .ecdsa_shake256,
+            => {},
+            else => return error.UnsupportedSignatureAlgorithm,
+        }
     }
     const signature_element = try Certificate.der.Element.parse(
         bytes,
@@ -372,7 +574,7 @@ fn parseRsaPss(certificate: Certificate) !Parsed {
             .subject_slice = subject.slice,
             .common_name_slice = common_name,
             .signature_slice = signature,
-            // Only the custom verifier reads the actual PSS algorithm.
+            // Only the compatibility verifier reads the actual algorithm.
             .signature_algorithm = .sha256WithRSAEncryption,
             .pub_key_algo = public_key_kind,
             .pub_key_slice = public_key,
@@ -389,4 +591,74 @@ fn parseRsaPss(certificate: Certificate) !Parsed {
         },
         .signature_algorithm = algorithm,
     };
+}
+
+test "compatibility parser verifies SHA-512 truncated RSA certificates" {
+    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    inline for (.{
+        .{
+            vectors.pkcs1_sha512_224_certificate_hex,
+            SignatureAlgorithm.rsa_pkcs1_sha512_224,
+        },
+        .{
+            vectors.pss_sha512_256_certificate_hex,
+            SignatureAlgorithm.rsa_pss_sha512_256,
+        },
+    }) |case| {
+        var encoded: [case[0].len / 2]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&encoded, case[0]);
+        const certificate = try parse(&encoded);
+        try std.testing.expectEqual(
+            case[1],
+            certificate.signature_algorithm.?,
+        );
+        try certificate.verify(
+            certificate,
+            @intCast(certificate.standard.validity.not_before),
+        );
+
+        encoded[encoded.len - 1] ^= 1;
+        const tampered = try parse(&encoded);
+        try std.testing.expectError(
+            error.CertificateSignatureInvalid,
+            tampered.verify(
+                tampered,
+                @intCast(tampered.standard.validity.not_before),
+            ),
+        );
+    }
+}
+
+test "compatibility parser verifies an RFC 8692 PSS-SHAKE certificate" {
+    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    var encoded: [vectors.pss_shake128_certificate_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(
+        &encoded,
+        vectors.pss_shake128_certificate_hex,
+    );
+    const certificate = try parse(&encoded);
+    try std.testing.expectEqual(
+        SignatureAlgorithm.rsa_pss_shake128,
+        certificate.signature_algorithm.?,
+    );
+    try std.testing.expect(certificate.standard.pub_key_algo == .rsassa_pss);
+    const constraints = try x509_signature.pssConstraintsForCertificate(
+        certificate.standard,
+    );
+    try std.testing.expect(constraints.permits(.rsa_pss_shake128));
+    try std.testing.expect(!constraints.permits(.rsa_pss_shake256));
+    try certificate.verify(
+        certificate,
+        @intCast(certificate.standard.validity.not_before),
+    );
+
+    encoded[encoded.len - 1] ^= 1;
+    const tampered = try parse(&encoded);
+    try std.testing.expectError(
+        error.CertificateSignatureInvalid,
+        tampered.verify(
+            tampered,
+            @intCast(tampered.standard.validity.not_before),
+        ),
+    );
 }

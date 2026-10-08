@@ -1,4 +1,6 @@
-use aws_lc_rs::signature::{PqdsaKeyPair, ML_DSA_44_SIGNING};
+use aws_lc_rs::signature::{
+    PqdsaKeyPair, PqdsaSigningAlgorithm, ML_DSA_44_SIGNING, ML_DSA_65_SIGNING, ML_DSA_87_SIGNING,
+};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::AlwaysResolvesClientRawPublicKeys;
 use rustls::pki_types::{
@@ -12,6 +14,62 @@ use std::io::{BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
+
+#[derive(Clone, Copy)]
+enum Mode {
+    Rsa,
+    MlDsa44,
+    MlDsa65,
+    MlDsa87,
+}
+
+impl Mode {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            None => Self::Rsa,
+            Some("mldsa44") => Self::MlDsa44,
+            Some("mldsa65") => Self::MlDsa65,
+            Some("mldsa87") => Self::MlDsa87,
+            Some(_) => panic!("expected optional mldsa44, mldsa65, or mldsa87 mode"),
+        }
+    }
+
+    fn signing_algorithm(self) -> Option<&'static PqdsaSigningAlgorithm> {
+        match self {
+            Self::Rsa => None,
+            Self::MlDsa44 => Some(&ML_DSA_44_SIGNING),
+            Self::MlDsa65 => Some(&ML_DSA_65_SIGNING),
+            Self::MlDsa87 => Some(&ML_DSA_87_SIGNING),
+        }
+    }
+
+    fn signature_scheme(self) -> SignatureScheme {
+        match self {
+            Self::Rsa => SignatureScheme::RSA_PSS_SHA256,
+            Self::MlDsa44 => SignatureScheme::ML_DSA_44,
+            Self::MlDsa65 => SignatureScheme::ML_DSA_65,
+            Self::MlDsa87 => SignatureScheme::ML_DSA_87,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Rsa => "RSA_PSS_SHA256",
+            Self::MlDsa44 => "ML_DSA_44",
+            Self::MlDsa65 => "ML_DSA_65",
+            Self::MlDsa87 => "ML_DSA_87",
+        }
+    }
+
+    fn port(self) -> u16 {
+        match self {
+            Self::Rsa => 24452,
+            Self::MlDsa44 => 24468,
+            Self::MlDsa65 => 24470,
+            Self::MlDsa87 => 24472,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct RawServerVerifier {
@@ -73,15 +131,11 @@ fn main() {
     let mut args = std::env::args();
     let _executable = args.next();
     let key_path = args.next().expect("private-key path");
-    let mldsa = match args.next().as_deref() {
-        None => false,
-        Some("mldsa44") => true,
-        Some(_) => panic!("expected optional mldsa44 mode"),
-    };
+    let mode = Mode::parse(args.next().as_deref());
     assert!(args.next().is_none());
     let provider = rustls::crypto::aws_lc_rs::default_provider();
-    let key_der = if mldsa {
-        let generated = PqdsaKeyPair::from_seed(&ML_DSA_44_SIGNING, &[0x5a; 32]).unwrap();
+    let key_der = if let Some(signing_algorithm) = mode.signing_algorithm() {
+        let generated = PqdsaKeyPair::from_seed(signing_algorithm, &[0x5a; 32]).unwrap();
         let encoded = generated.to_pkcs8v1().unwrap();
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(encoded.as_ref().to_vec()))
     } else {
@@ -92,11 +146,7 @@ fn main() {
     };
     let signing_key = provider.key_provider.load_private_key(key_der).unwrap();
     let spki = signing_key.public_key().unwrap().as_ref().to_vec();
-    let signature_scheme = if mldsa {
-        SignatureScheme::ML_DSA_44
-    } else {
-        SignatureScheme::RSA_PSS_SHA256
-    };
+    let signature_scheme = mode.signature_scheme();
     let certified_key = CertifiedKey::new(vec![CertificateDer::from(spki.clone())], signing_key);
     let mut config = ClientConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -113,12 +163,7 @@ fn main() {
 
     let name = ServerName::try_from("localhost").unwrap();
     let mut conn = ClientConnection::new(Arc::new(config), name).unwrap();
-    let mut socket = TcpStream::connect(if mldsa {
-        "127.0.0.1:24468"
-    } else {
-        "127.0.0.1:24452"
-    })
-    .unwrap();
+    let mut socket = TcpStream::connect(("127.0.0.1", mode.port())).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(8)))
         .unwrap();
@@ -161,6 +206,6 @@ fn main() {
     }
     println!(
         "rustls/AWS-LC client verified mutual RFC 7250 RPK scheme={}",
-        if mldsa { "ML_DSA_44" } else { "RSA_PSS_SHA256" }
+        mode.label()
     );
 }

@@ -5,6 +5,7 @@
 //! stateful AEAD records needed by both client and server implementations.
 
 const std = @import("std");
+const fast_sha2 = @import("../crypto/sha512.zig");
 const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
 const prepared_chacha = @import("../crypto/chacha20_poly1305.zig");
 const record_fragment = @import("record_fragment.zig");
@@ -13,7 +14,7 @@ const tls_secret = @import("secret.zig");
 const traffic_secrets = @import("traffic_secrets.zig");
 
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
-const HmacSha384 = std.crypto.auth.hmac.sha2.HmacSha384;
+const HmacSha384 = std.crypto.auth.hmac.Hmac(fast_sha2.Sha384);
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 

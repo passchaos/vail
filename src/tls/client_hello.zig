@@ -9,11 +9,13 @@ const application_settings = @import("application_settings.zig");
 const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
+const extension_set = @import("extension_set.zig");
 const record_size_limit = @import("record_size_limit.zig");
 
 pub const handshake_type_client_hello: u8 = 0x01;
 pub const ext_server_name: u16 = 0x0000;
 pub const ext_status_request: u16 = 0x0005;
+pub const ext_status_request_v2: u16 = 0x0011;
 pub const ext_supported_groups: u16 = 0x000a;
 pub const ext_signature_algorithms: u16 = 0x000d;
 pub const ext_application_layer_protocol_negotiation: u16 = 0x0010;
@@ -45,6 +47,7 @@ pub const tls13: u16 = 0x0304;
 pub const default_signature_schemes = [_]u16{
     auth.signature_scheme_ecdsa_secp256r1_sha256,
     auth.signature_scheme_ecdsa_secp384r1_sha384,
+    auth.signature_scheme_ecdsa_secp521r1_sha512,
     auth.signature_scheme_ed25519,
     auth.signature_scheme_rsa_pss_rsae_sha256,
     auth.signature_scheme_rsa_pss_rsae_sha384,
@@ -96,6 +99,9 @@ pub const WriteOptions = struct {
     /// and leaves certificate-chain policy to the verifier.
     certificate_signature_schemes: ?[]const u16 = null,
     request_ocsp: bool = false,
+    /// RFC 6961 OCSP multi-stapling request. TLS 1.3 peers ignore this
+    /// extension; TLS 1.2 peers may acknowledge it instead of status_request.
+    request_ocsp_multi: bool = false,
     offer_extended_master_secret: bool = false,
     record_size_limit: ?u16 = null,
     certificate_authorities: []const []const u8 = &.{},
@@ -138,6 +144,7 @@ pub const FlexibleWriteOptions = struct {
     /// Null omits signature_algorithms_cert.
     certificate_signature_schemes: ?[]const u16 = null,
     request_ocsp: bool = false,
+    request_ocsp_multi: bool = false,
     offer_extended_master_secret: bool = false,
     record_size_limit: ?u16 = null,
     certificate_authorities: []const []const u8 = &.{},
@@ -176,6 +183,7 @@ pub fn write(
         .signature_schemes = options.signature_schemes,
         .certificate_signature_schemes = options.certificate_signature_schemes,
         .request_ocsp = options.request_ocsp,
+        .request_ocsp_multi = options.request_ocsp_multi,
         .offer_extended_master_secret = options.offer_extended_master_secret,
         .record_size_limit = options.record_size_limit,
         .certificate_authorities = options.certificate_authorities,
@@ -259,6 +267,14 @@ pub fn writeWithKeyShare(
             allocator,
             ext_status_request,
             &.{ 1, 0, 0, 0, 0 },
+        );
+    }
+    if (options.request_ocsp_multi) {
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_status_request_v2,
+            &.{ 0, 7, 2, 0, 4, 0, 0, 0, 0 },
         );
     }
 
@@ -665,6 +681,7 @@ pub const Parsed = struct {
     compression_methods: []const u8,
     server_name: ?[]const u8 = null,
     requests_ocsp: bool = false,
+    requests_ocsp_multi: bool = false,
     offers_extended_master_secret: bool = false,
     offers_secure_renegotiation: bool = false,
     record_size_limit: ?u16 = null,
@@ -922,17 +939,20 @@ pub fn parse(bytes: []const u8) Error!Parsed {
     if (pos == bytes.len) return parsed;
     const extensions = try readU16Vector(bytes, &pos);
     if (pos != bytes.len) return error.InvalidClientHello;
-    var seen = std.StaticBitSet(65536).initEmpty();
+    var seen: extension_set.Set = undefined;
+    seen.reset();
     var ext_pos: usize = 0;
     while (ext_pos < extensions.len) {
         const typ = try readInt(u16, extensions, &ext_pos);
         const payload = try readU16Vector(extensions, &ext_pos);
-        if (seen.isSet(typ)) return error.DuplicateExtension;
-        seen.set(typ);
+        if (seen.containsOrInsert(typ)) return error.DuplicateExtension;
         switch (typ) {
             ext_server_name => parsed.server_name = try parseSni(payload),
             ext_status_request => {
                 parsed.requests_ocsp = try parseStatusRequest(payload);
+            },
+            ext_status_request_v2 => {
+                parsed.requests_ocsp_multi = try parseStatusRequestV2(payload);
             },
             ext_supported_groups => parsed.supported_groups = payload,
             ext_signature_algorithms => parsed.signature_algorithms = payload,
@@ -1039,6 +1059,35 @@ fn parseStatusRequest(payload: []const u8) Error!bool {
     var pos: usize = 0;
     const status_type = try readByte(payload, &pos);
     if (status_type != 1) return false;
+    try parseOcspStatusRequest(payload[pos..]);
+    return true;
+}
+
+fn parseStatusRequestV2(payload: []const u8) Error!bool {
+    var pos: usize = 0;
+    const requests = try readU16Vector(payload, &pos);
+    if (pos != payload.len or requests.len == 0) {
+        return error.InvalidClientHello;
+    }
+    var request_pos: usize = 0;
+    var requests_multi = false;
+    while (request_pos < requests.len) {
+        const status_type = try readByte(requests, &request_pos);
+        const request = try readU16Vector(requests, &request_pos);
+        switch (status_type) {
+            1 => try parseOcspStatusRequest(request),
+            2 => {
+                try parseOcspStatusRequest(request);
+                requests_multi = true;
+            },
+            else => {},
+        }
+    }
+    return requests_multi;
+}
+
+fn parseOcspStatusRequest(payload: []const u8) Error!void {
+    var pos: usize = 0;
     const responder_ids = try readU16Vector(payload, &pos);
     var responder_pos: usize = 0;
     while (responder_pos < responder_ids.len) {
@@ -1050,7 +1099,6 @@ fn parseStatusRequest(payload: []const u8) Error!bool {
     }
     _ = try readU16Vector(payload, &pos);
     if (pos != payload.len) return error.InvalidClientHello;
-    return true;
 }
 
 fn parseCertificateCompressionAlgorithms(
@@ -1252,6 +1300,7 @@ pub fn validateSecondClientHello(
         !std.mem.eql(u8, first.compression_methods, second.compression_methods) or
         !optionalBytesEql(first.server_name, second.server_name) or
         first.requests_ocsp != second.requests_ocsp or
+        first.requests_ocsp_multi != second.requests_ocsp_multi or
         first.offers_extended_master_secret !=
             second.offers_extended_master_secret or
         first.record_size_limit != second.record_size_limit or
@@ -1512,6 +1561,49 @@ test "TLS 1.2 ClientHello omits the TLS 1.3 key_share extension" {
     try std.testing.expect(parsed.supportsVersion(0x0303));
     try std.testing.expect(parsed.offers_extended_master_secret);
     try std.testing.expect(parsed.offers_secure_renegotiation);
+}
+
+test "RFC 6961 status_request_v2 is strict and round-trips" {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    try writeWithKeyShare(&encoded, std.testing.allocator, .{
+        .random = [_]u8{0x2b} ** 32,
+        .key_share = null,
+        .supported_groups = &.{0x0017},
+        .cipher_suites = &.{},
+        .additional_cipher_suites = &.{0xc02f},
+        .supported_versions = &.{0x0303},
+        .request_ocsp = true,
+        .request_ocsp_multi = true,
+    });
+    const parsed = try parse(encoded.items);
+    try std.testing.expect(parsed.requests_ocsp);
+    try std.testing.expect(parsed.requests_ocsp_multi);
+
+    try std.testing.expect(try parseStatusRequestV2(
+        &.{ 0, 7, 2, 0, 4, 0, 0, 0, 0 },
+    ));
+    try std.testing.expect(try parseStatusRequestV2(
+        &.{ 0, 14, 1, 0, 4, 0, 0, 0, 0, 2, 0, 4, 0, 0, 0, 0 },
+    ));
+    try std.testing.expect(try parseStatusRequestV2(
+        &.{ 0, 14, 2, 0, 4, 0, 0, 0, 0, 2, 0, 4, 0, 0, 0, 0 },
+    ));
+    try std.testing.expect(!(try parseStatusRequestV2(
+        &.{ 0, 3, 0xfe, 0, 0 },
+    )));
+
+    const invalid = [_][]const u8{
+        &.{ 0, 0 },
+        &.{ 0, 7, 2, 0, 4, 0, 0, 0 },
+        &.{ 0, 7, 2, 0, 3, 0, 0, 0 },
+    };
+    for (invalid) |payload| {
+        try std.testing.expectError(
+            error.InvalidClientHello,
+            parseStatusRequestV2(payload),
+        );
+    }
 }
 
 fn appendExtension(

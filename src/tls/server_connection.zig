@@ -92,14 +92,23 @@ pub const ResolvedIdentity = struct {
     /// When populated, IdentitySet uses ClientHello CA hints to filter it.
     certificate_authorities: []const []const u8 = &.{},
     ocsp_response: ?[]const u8 = null,
+    ocsp_responses: ?[]const ?[]const u8 = null,
     compressed_certificates: []const certificate_compression.PreparedView = &.{},
 
     pub fn validate(self: ResolvedIdentity) auth.Error!void {
         if (self.certificate_type == .raw_public_key and
-            (self.ocsp_response != null or
+            (self.ocsp_response != null or self.ocsp_responses != null or
                 self.certificate_authorities.len != 0))
         {
             return error.InvalidCertificate;
+        }
+        if (self.ocsp_response != null and self.ocsp_responses != null) {
+            return error.InvalidCertificate;
+        }
+        if (self.ocsp_responses) |responses| {
+            if (responses.len != self.certificate_chain.len) {
+                return error.InvalidCertificate;
+            }
         }
         for (self.certificate_authorities) |name| {
             if (name.len == 0) return error.InvalidCertificate;
@@ -243,6 +252,7 @@ pub fn ServerConnection(
             allocator: std.mem.Allocator,
             application: Application,
             master_secret: secret.Secret,
+            exporter_master_secret: secret.Secret,
             transcript_after_client_finished: transcript.Digest,
             resumed: bool,
             early_data_accepted: bool,
@@ -274,6 +284,7 @@ pub fn ServerConnection(
             pub fn deinit(self: *Established) void {
                 self.application.deinit();
                 self.master_secret.deinit();
+                self.exporter_master_secret.deinit();
                 if (self.peer_certificate_chain) |chain| {
                     for (chain) |certificate| self.allocator.free(certificate);
                     self.allocator.free(chain);
@@ -291,6 +302,22 @@ pub fn ServerConnection(
                 self: *Established,
             ) connection.Error!connection.ExtractedSecrets {
                 return self.application.dangerousExtractSecrets();
+            }
+
+            /// Export application keying material as specified by RFC 8446
+            /// section 7.5. The context may be empty but is always hashed.
+            pub fn exportKeyingMaterial(
+                self: *const Established,
+                label: []const u8,
+                context: []const u8,
+                output: []u8,
+            ) key_schedule.Error!void {
+                try key_schedule.exportKeyingMaterialFor(
+                    self.exporter_master_secret,
+                    label,
+                    context,
+                    output,
+                );
             }
 
             pub fn sealNewSessionTicket(
@@ -405,6 +432,21 @@ pub fn ServerConnection(
             event: ?Event,
         };
 
+        pub const ReceiveIntoEvent = union(enum) {
+            hello_retry_request: void,
+            server_flight: void,
+            compatibility_change_cipher_spec: void,
+            early_data: []const u8,
+            end_of_early_data: void,
+            peer_alert: alert.Alert,
+            established: void,
+        };
+
+        pub const ReceiveIntoResult = struct {
+            consumed: usize,
+            event: ?ReceiveIntoEvent,
+        };
+
         const PendingHandshake = struct {
             allocator: std.mem.Allocator,
             suite: cipher_suite.Suite,
@@ -443,7 +485,10 @@ pub fn ServerConnection(
 
             fn deinit(self: *PendingHandshake) void {
                 self.client_records.deinit();
-                if (self.early_records) |*early| early.deinit();
+                if (self.early_records) |*early| {
+                    early.deinit();
+                    std.crypto.secureZero(u8, &self.early_plaintext);
+                }
                 self.handshake_secret.deinit();
                 self.client_handshake_secret.deinit();
                 self.client_flight.deinit(self.allocator);
@@ -456,7 +501,6 @@ pub fn ServerConnection(
                 if (self.peer_application_settings) |settings| {
                     self.allocator.free(settings);
                 }
-                self.* = undefined;
             }
         };
 
@@ -516,15 +560,28 @@ pub fn ServerConnection(
         ech_offered: bool = false,
         ech_accepted: bool = false,
         saw_retry_change_cipher_spec: bool = false,
-        pending: ?PendingHandshake = null,
+        pending: PendingHandshake = undefined,
+        has_pending: bool = false,
 
         pub fn init(config: Config) Self {
-            return .{ .config = config };
+            var self: Self = undefined;
+            self.config = config;
+            self.stage = .client_hello;
+            self.key_material_consumed = false;
+            self.psk_consumed = false;
+            self.records.buffered = 0;
+            self.hello_messages.buffered = 0;
+            self.retry = null;
+            self.ech_context = null;
+            self.ech_offered = false;
+            self.ech_accepted = false;
+            self.saw_retry_change_cipher_spec = false;
+            self.has_pending = false;
+            return self;
         }
 
         pub fn deinit(self: *Self) void {
             self.cleanup();
-            self.* = undefined;
         }
 
         fn resolveIdentity(
@@ -540,6 +597,7 @@ pub fn ServerConnection(
                     .signer = self.config.signer,
                     .certificate_type = self.config.server_certificate_type,
                     .ocsp_response = self.config.policy.ocsp_response,
+                    .ocsp_responses = self.config.policy.ocsp_responses,
                     .compressed_certificates = self.config.policy.compressed_certificates,
                 };
             const selected = identity orelse return error.UnrecognizedName;
@@ -559,8 +617,40 @@ pub fn ServerConnection(
             input: []const u8,
             output: *std.ArrayList(u8),
         ) Error!ReceiveResult {
+            var established: Established = undefined;
+            const result = try self.receiveInto(
+                input,
+                output,
+                &established,
+            );
+            return .{
+                .consumed = result.consumed,
+                .event = if (result.event) |event| switch (event) {
+                    .hello_retry_request => .{ .hello_retry_request = {} },
+                    .server_flight => .{ .server_flight = {} },
+                    .compatibility_change_cipher_spec => .{ .compatibility_change_cipher_spec = {} },
+                    .early_data => |bytes| .{ .early_data = bytes },
+                    .end_of_early_data => .{ .end_of_early_data = {} },
+                    .peer_alert => |received| .{ .peer_alert = received },
+                    .established => .{ .established = established },
+                } else null,
+            };
+        }
+
+        /// Feed transport bytes and write an established connection directly
+        /// into caller-owned storage when the returned event is `.established`.
+        pub fn receiveInto(
+            self: *Self,
+            input: []const u8,
+            output: *std.ArrayList(u8),
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
             if (self.stage == .failed) return error.ConnectionFailed;
-            return self.receiveInner(input, output) catch |err| {
+            return self.receiveInner(
+                input,
+                output,
+                established_output,
+            ) catch |err| {
                 self.fail();
                 return err;
             };
@@ -570,12 +660,16 @@ pub fn ServerConnection(
             self: *Self,
             input: []const u8,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
             return switch (self.stage) {
                 .client_hello,
                 .second_client_hello,
                 => self.receiveClientHello(input, output),
-                .client_finished => self.receiveClientFinished(input),
+                .client_finished => self.receiveClientFinished(
+                    input,
+                    established_output,
+                ),
                 .established => error.AlreadyEstablished,
                 .failed => error.ConnectionFailed,
             };
@@ -585,7 +679,7 @@ pub fn ServerConnection(
             self: *Self,
             input: []const u8,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
+        ) Error!ReceiveIntoResult {
             if ((self.config.client_auth == null) !=
                 (self.config.client_auth_policy == null))
             {
@@ -627,31 +721,30 @@ pub fn ServerConnection(
                 }
                 var inner_hello: std.ArrayList(u8) = .empty;
                 defer inner_hello.deinit(self.config.allocator);
-                const effective_message = try self.clientHelloForNegotiation(
+                const effective = try self.clientHelloForNegotiation(
                     message,
                     &inner_hello,
                 );
-                const parsed = try client_hello.parse(effective_message);
                 if (self.stage == .second_client_hello) {
                     return self.acceptSecondClientHello(
                         record_result.consumed,
-                        effective_message,
-                        parsed,
+                        effective.bytes,
+                        effective.parsed,
                         output,
                     );
                 }
                 const material_group = self.config.key_material.namedGroup();
-                if (try parsed.keyShareForGroup(material_group) == null) {
+                if (try effective.parsed.keyShareForGroup(material_group) == null) {
                     return self.sendHelloRetryRequest(
                         record_result.consumed,
-                        effective_message,
-                        parsed,
+                        effective.bytes,
+                        effective.parsed,
                         output,
                     );
                 }
                 try self.startServerFlight(
-                    effective_message,
-                    parsed,
+                    effective.bytes,
+                    effective.parsed,
                     null,
                     null,
                     null,
@@ -669,28 +762,42 @@ pub fn ServerConnection(
             };
         }
 
+        const NegotiatedClientHello = struct {
+            bytes: []const u8,
+            parsed: client_hello.Parsed,
+        };
+
         fn clientHelloForNegotiation(
             self: *Self,
             outer_message: []const u8,
             inner_output: *std.ArrayList(u8),
-        ) Error![]const u8 {
-            const parsed_outer = try client_hello.parse(outer_message);
-            if (parsed_outer.encrypted_client_hello != null) {
-                self.ech_offered = true;
-            }
+        ) Error!NegotiatedClientHello {
             if (self.stage == .second_client_hello) {
-                const context = &(self.ech_context orelse
-                    return outer_message);
+                const context = &(self.ech_context orelse return .{
+                    .bytes = outer_message,
+                    .parsed = try client_hello.parse(outer_message),
+                });
                 try context.openRetry(
                     inner_output,
                     self.config.allocator,
                     outer_message,
                 );
-                return inner_output.items;
+                return .{
+                    .bytes = inner_output.items,
+                    .parsed = try client_hello.parse(inner_output.items),
+                };
             }
-            const server_config = self.config.ech orelse return outer_message;
+
+            const parsed_outer = try client_hello.parse(outer_message);
+            if (parsed_outer.encrypted_client_hello != null) {
+                self.ech_offered = true;
+            }
+            const server_config = self.config.ech orelse return .{
+                .bytes = outer_message,
+                .parsed = parsed_outer,
+            };
             const encoded_extension = parsed_outer.encrypted_client_hello orelse
-                return outer_message;
+                return .{ .bytes = outer_message, .parsed = parsed_outer };
             const outer = switch (try ech.parseClientHelloExtension(
                 encoded_extension,
             )) {
@@ -703,7 +810,7 @@ pub fn ServerConnection(
                     server_config.config.cipher_suite,
                 ))
             {
-                return outer_message;
+                return .{ .bytes = outer_message, .parsed = parsed_outer };
             }
             if (server_config.require_public_name_match and
                 (parsed_outer.server_name == null or
@@ -720,13 +827,19 @@ pub fn ServerConnection(
                 server_config.config,
                 server_config.key_pair,
             ) catch |err| switch (err) {
-                error.AuthenticationFailed => return outer_message,
+                error.AuthenticationFailed => return .{
+                    .bytes = outer_message,
+                    .parsed = parsed_outer,
+                },
                 else => return err,
             };
             errdefer context.deinit();
             self.ech_context = context;
             self.ech_accepted = true;
-            return inner_output.items;
+            return .{
+                .bytes = inner_output.items,
+                .parsed = try client_hello.parse(inner_output.items),
+            };
         }
 
         fn sendHelloRetryRequest(
@@ -735,7 +848,7 @@ pub fn ServerConnection(
             message: []const u8,
             parsed: client_hello.Parsed,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
+        ) Error!ReceiveIntoResult {
             const material_group = self.config.key_material.namedGroup();
             const identity = try self.resolveIdentity(parsed);
             var policy = self.config.policy;
@@ -810,7 +923,7 @@ pub fn ServerConnection(
             message: []const u8,
             parsed: client_hello.Parsed,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
+        ) Error!ReceiveIntoResult {
             const retry = &(self.retry orelse unreachable);
             try client_hello.validateSecondClientHello(
                 retry.first_client_hello,
@@ -852,6 +965,7 @@ pub fn ServerConnection(
             const identity = resolved_identity orelse
                 try self.resolveIdentity(parsed);
             policy.ocsp_response = identity.ocsp_response;
+            policy.ocsp_responses = identity.ocsp_responses;
             policy.compressed_certificates =
                 identity.compressed_certificates;
             policy.server_certificate_type = identity.certificate_type;
@@ -882,7 +996,7 @@ pub fn ServerConnection(
                 null;
             var early_records: ?traffic.State = null;
             if (selected_psk != null and
-                (try client_hello.parse(message)).early_data)
+                parsed.early_data)
             {
                 const hello_hash = if (binder_prefix) |prefix_state| blk: {
                     var state = prefix_state;
@@ -993,36 +1107,69 @@ pub fn ServerConnection(
             errdefer if (resumed_peer_application_settings) |settings| {
                 self.config.allocator.free(settings);
             };
-            self.pending = .{
-                .allocator = self.config.allocator,
-                .suite = result.selection.suite,
-                .client_random = parsed.random.*,
-                .handshake_secret = result.handshake_secret,
-                .client_handshake_secret = result.client_handshake_traffic_secret,
-                .transcript_after_server_finished = result.transcript_after_server_finished,
-                .transcript_state = result.transcript_state_after_server_finished,
-                .resumed = selected_psk != null,
-                .certificate_compression = result.certificate_compression,
-                .server_certificate_type = result.selection.server_certificate_type,
-                .client_certificate_type = result.selection.client_certificate_type,
-                .local_record_size_limit = result.local_record_size_limit,
-                .peer_record_size_limit = result.peer_record_size_limit,
-                .requested_ticket_count = result.requested_ticket_count,
-                .application_settings = result.application_settings,
-                .peer_application_settings = resumed_peer_application_settings,
-                .expect_client_encrypted_extensions = result.client_application_settings_required,
-                .client_records = client_records,
-                .early_records = early_records,
-                .early_data_accepted = early_limit != null,
-                .early_data_limit = early_limit orelse 0,
-                .expect_end_of_early_data = early_limit != null,
-                .saw_change_cipher_spec = self.saw_retry_change_cipher_spec,
-            };
-            if (result.local_record_size_limit) |limit| {
-                self.pending.?.receiver.setMaxCiphertextFragmentLen(
-                    try record_size_limit.maxCiphertextFragment(limit),
-                );
+            const max_ciphertext_fragment_len =
+                if (result.local_record_size_limit) |limit|
+                    try record_size_limit.maxCiphertextFragmentWithTag(
+                        limit,
+                        result.selection.suite.tagLen(),
+                    )
+                else
+                    null;
+            self.pending.allocator = self.config.allocator;
+            self.pending.suite = result.selection.suite;
+            self.pending.client_random = parsed.random.*;
+            self.pending.handshake_secret = result.handshake_secret;
+            self.pending.client_handshake_secret =
+                result.client_handshake_traffic_secret;
+            self.pending.transcript_after_server_finished =
+                result.transcript_after_server_finished;
+            self.pending.transcript_state =
+                result.transcript_state_after_server_finished;
+            self.pending.resumed = selected_psk != null;
+            self.pending.certificate_compression =
+                result.certificate_compression;
+            self.pending.server_certificate_type =
+                result.selection.server_certificate_type;
+            self.pending.client_certificate_type =
+                result.selection.client_certificate_type;
+            self.pending.client_records = client_records;
+            self.pending.early_records = early_records;
+            self.pending.early_data_accepted = early_limit != null;
+            self.pending.early_data_limit = early_limit orelse 0;
+            self.pending.early_data_received = 0;
+            self.pending.expect_end_of_early_data = early_limit != null;
+            self.pending.early_deframer.buffered = 0;
+            self.pending.early_messages.buffered = 0;
+            self.pending.receiver.records.buffered = 0;
+            self.pending.receiver.handshakes.buffered = 0;
+            self.pending.receiver.max_ciphertext_fragment_len =
+                record.max_ciphertext_len;
+            self.pending.receiver.pending_start = 0;
+            self.pending.receiver.pending_end = 0;
+            self.pending.receiver.peer_closed = false;
+            self.pending.receiver.failed = false;
+            self.pending.saw_change_cipher_spec =
+                self.saw_retry_change_cipher_spec;
+            self.pending.client_flight = .empty;
+            self.pending.client_certificate = null;
+            self.pending.client_certificate_verify = null;
+            self.pending.authenticated_client_chain = null;
+            self.pending.client_certificate_compression = null;
+            self.pending.local_record_size_limit =
+                result.local_record_size_limit;
+            self.pending.peer_record_size_limit =
+                result.peer_record_size_limit;
+            self.pending.requested_ticket_count = result.requested_ticket_count;
+            self.pending.application_settings = result.application_settings;
+            self.pending.peer_application_settings =
+                resumed_peer_application_settings;
+            self.pending.expect_client_encrypted_extensions =
+                result.client_application_settings_required;
+            self.pending.transcript_after_client_finished = null;
+            if (max_ciphertext_fragment_len) |limit| {
+                self.pending.receiver.setMaxCiphertextFragmentLen(limit);
             }
+            self.has_pending = true;
             if (self.ech_context) |*context| context.deinit();
             self.ech_context = null;
             self.stage = .client_finished;
@@ -1189,10 +1336,15 @@ pub fn ServerConnection(
         fn receiveClientFinished(
             self: *Self,
             input: []const u8,
-        ) Error!ReceiveResult {
-            const pending = &(self.pending orelse unreachable);
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
+            std.debug.assert(self.has_pending);
+            const pending = &self.pending;
             if (pending.early_records != null) {
-                return self.receiveEarlyOrHandshake(input);
+                return self.receiveEarlyOrHandshake(
+                    input,
+                    established_output,
+                );
             }
             const result = try pending.receiver.push(
                 input,
@@ -1201,14 +1353,17 @@ pub fn ServerConnection(
             return self.handleClientProtected(
                 result.consumed,
                 result.event,
+                established_output,
             );
         }
 
         fn receiveEarlyOrHandshake(
             self: *Self,
             input: []const u8,
-        ) Error!ReceiveResult {
-            const pending = &(self.pending orelse unreachable);
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
+            std.debug.assert(self.has_pending);
+            const pending = &self.pending;
             const result = try pending.early_deframer.push(input);
             const framed = result.framed orelse return .{
                 .consumed = result.consumed,
@@ -1249,6 +1404,7 @@ pub fn ServerConnection(
                             framed,
                             &pending.client_records,
                         ),
+                        established_output,
                     );
                 },
                 else => return err,
@@ -1304,8 +1460,10 @@ pub fn ServerConnection(
             self: *Self,
             consumed: usize,
             protected_optional: ?stream.ProtectedEvent,
-        ) Error!ReceiveResult {
-            const pending = &(self.pending orelse unreachable);
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
+            std.debug.assert(self.has_pending);
+            const pending = &self.pending;
             const protected = protected_optional orelse return .{
                 .consumed = consumed,
                 .event = null,
@@ -1324,7 +1482,9 @@ pub fn ServerConnection(
                     };
                 },
                 .alert => |peer_alert| {
-                    const event: Event = .{ .peer_alert = peer_alert };
+                    const event: ReceiveIntoEvent = .{
+                        .peer_alert = peer_alert,
+                    };
                     self.fail();
                     return .{
                         .consumed = consumed,
@@ -1367,6 +1527,7 @@ pub fn ServerConnection(
                             return self.handleClientProtected(
                                 consumed,
                                 next.event,
+                                established_output,
                             );
                         }
                         return .{ .consumed = consumed, .event = null };
@@ -1375,6 +1536,7 @@ pub fn ServerConnection(
                         return self.handleClientAuthHandshake(
                             consumed,
                             message,
+                            established_output,
                         );
                     }
                     if (pending.receiver.hasPendingHandshakeData()) {
@@ -1406,11 +1568,10 @@ pub fn ServerConnection(
                         return error.BadClientFinished;
                     }
                     pending.transcript_state.update(message);
+                    try self.establishInto(established_output);
                     return .{
                         .consumed = consumed,
-                        .event = .{
-                            .established = try self.establish(),
-                        },
+                        .event = .{ .established = {} },
                     };
                 },
             }
@@ -1420,8 +1581,10 @@ pub fn ServerConnection(
             self: *Self,
             consumed: usize,
             message: []const u8,
-        ) Error!ReceiveResult {
-            const pending = &(self.pending orelse unreachable);
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
+            std.debug.assert(self.has_pending);
+            const pending = &self.pending;
             const start = pending.client_flight.items.len;
             try pending.client_flight.appendSlice(
                 self.config.allocator,
@@ -1441,7 +1604,11 @@ pub fn ServerConnection(
                         "",
                         &pending.client_records,
                     );
-                    return self.handleClientProtected(consumed, next.event);
+                    return self.handleClientProtected(
+                        consumed,
+                        next.event,
+                        established_output,
+                    );
                 }
                 return .{ .consumed = consumed, .event = null };
             }
@@ -1454,7 +1621,11 @@ pub fn ServerConnection(
                         "",
                         &pending.client_records,
                     );
-                    return self.handleClientProtected(consumed, next.event);
+                    return self.handleClientProtected(
+                        consumed,
+                        next.event,
+                        established_output,
+                    );
                 }
                 return .{ .consumed = consumed, .event = null };
             }
@@ -1496,14 +1667,19 @@ pub fn ServerConnection(
                 verification.certificate_compression;
             pending.transcript_after_client_finished =
                 verification.transcript_after_client_finished;
+            try self.establishInto(established_output);
             return .{
                 .consumed = consumed,
-                .event = .{ .established = try self.establish() },
+                .event = .{ .established = {} },
             };
         }
 
-        fn establish(self: *Self) Error!Established {
-            const pending = &(self.pending orelse unreachable);
+        fn establishInto(
+            self: *Self,
+            established_output: *Established,
+        ) Error!void {
+            std.debug.assert(self.has_pending);
+            const pending = &self.pending;
             var application = try key_schedule.deriveApplicationFor(
                 pending.handshake_secret,
                 pending.transcript_after_server_finished,
@@ -1513,7 +1689,14 @@ pub fn ServerConnection(
                 application.client_traffic_secret.deinit();
                 application.server_traffic_secret.deinit();
             }
-            var application_connection = try Application.initWithRecordSizeLimits(
+            var exporter_master_secret = try key_schedule
+                .deriveExporterMasterSecretFor(
+                application.master_secret,
+                pending.transcript_after_server_finished,
+            );
+            errdefer exporter_master_secret.deinit();
+            var application_connection: Application = undefined;
+            try application_connection.initIntoWithRecordSizeLimits(
                 pending.suite,
                 application.client_traffic_secret,
                 application.server_traffic_secret,
@@ -1540,25 +1723,20 @@ pub fn ServerConnection(
                     application.server_traffic_secret.bytes(),
                 );
                 if (logger.willLog(key_log.exporter_secret)) {
-                    var exporter = try key_schedule
-                        .deriveExporterMasterSecretFor(
-                        application.master_secret,
-                        pending.transcript_after_server_finished,
-                    );
-                    defer exporter.deinit();
                     logger.logEnabled(
                         key_log.exporter_secret,
                         &pending.client_random,
-                        exporter.bytes(),
+                        exporter_master_secret.bytes(),
                     );
                 }
             }
             application.client_traffic_secret.deinit();
             application.server_traffic_secret.deinit();
-            const established = Established{
+            established_output.* = .{
                 .allocator = self.config.allocator,
                 .application = application_connection,
                 .master_secret = application.master_secret,
+                .exporter_master_secret = exporter_master_secret,
                 .transcript_after_client_finished = pending.transcript_after_client_finished orelse
                     pending.transcript_state.digest(),
                 .resumed = pending.resumed,
@@ -1582,9 +1760,8 @@ pub fn ServerConnection(
             pending.authenticated_client_chain = null;
             pending.peer_application_settings = null;
             pending.deinit();
-            self.pending = null;
+            self.has_pending = false;
             self.stage = .established;
-            return established;
         }
 
         fn fail(self: *Self) void {
@@ -1593,8 +1770,8 @@ pub fn ServerConnection(
         }
 
         fn cleanup(self: *Self) void {
-            if (self.pending) |*pending| pending.deinit();
-            self.pending = null;
+            if (self.has_pending) self.pending.deinit();
+            self.has_pending = false;
             if (self.retry) |*retry| retry.deinit();
             self.retry = null;
             if (self.ech_context) |*context| context.deinit();
@@ -1840,6 +2017,50 @@ test "identity set selects SNI wildcard and compatible signature scheme" {
     );
 }
 
+test "resolved identity validates per-entry OCSP configuration" {
+    const signing_key = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0xb5} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const certificate = signing_key.public_key.toBytes();
+    const signer = auth.Signer{
+        .ed25519 = .{ .key_pair = signing_key },
+    };
+    const responses = [_]?[]const u8{"leaf-response"};
+
+    try (ResolvedIdentity{
+        .certificate_chain = &.{&certificate},
+        .signer = signer,
+        .ocsp_responses = &responses,
+    }).validate();
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        (ResolvedIdentity{
+            .certificate_chain = &.{&certificate},
+            .signer = signer,
+            .ocsp_responses = &.{},
+        }).validate(),
+    );
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        (ResolvedIdentity{
+            .certificate_chain = &.{&certificate},
+            .signer = signer,
+            .ocsp_response = "legacy-response",
+            .ocsp_responses = &responses,
+        }).validate(),
+    );
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        (ResolvedIdentity{
+            .certificate_chain = &.{&certificate},
+            .signer = signer,
+            .certificate_type = .raw_public_key,
+            .ocsp_responses = &responses,
+        }).validate(),
+    );
+}
+
 test "identity set honors certificate signature algorithms separately" {
     const allocator = std.testing.allocator;
     const path_vectors = @import("../x509/testdata/path_vectors.zig");
@@ -1960,7 +2181,8 @@ test "server connection incrementally establishes X25519 TLS" {
         else => return error.UnexpectedServerEvent,
     }
 
-    const pending = &(server.pending orelse unreachable);
+    try std.testing.expect(server.has_pending);
+    const pending = &server.pending;
     var client_handshake_records = try traffic.State.init(
         pending.suite,
         pending.client_handshake_secret,
@@ -2117,7 +2339,8 @@ test "server connection rejects application data before Finished" {
     defer fixture.deinit();
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(std.testing.allocator);
-    const pending = &(fixture.server.pending orelse unreachable);
+    try std.testing.expect(fixture.server.has_pending);
+    const pending = &fixture.server.pending;
     var client_records = try traffic.State.init(
         pending.suite,
         pending.client_handshake_secret,
@@ -2144,7 +2367,8 @@ test "server connection rejects malformed Finished and locks" {
     defer fixture.deinit();
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(std.testing.allocator);
-    const pending = &(fixture.server.pending orelse unreachable);
+    try std.testing.expect(fixture.server.has_pending);
+    const pending = &fixture.server.pending;
     var client_records = try traffic.State.init(
         pending.suite,
         pending.client_handshake_secret,
@@ -2174,7 +2398,8 @@ test "server connection rejects messages coalesced after client Finished" {
     defer fixture.deinit();
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(std.testing.allocator);
-    const pending = &(fixture.server.pending orelse unreachable);
+    try std.testing.expect(fixture.server.has_pending);
+    const pending = &fixture.server.pending;
     var client_records = try traffic.State.init(
         pending.suite,
         pending.client_handshake_secret,

@@ -2,10 +2,11 @@
 
 const std = @import("std");
 const mlkem = @import("mlkem.zig");
+const crypto_mlkem = @import("../../crypto/mlkem.zig");
 
 pub const implementation = mlkem.Group(.{
     .named_group = 0x0201,
-    .MLKem = std.crypto.kem.ml_kem.MLKem768,
+    .MLKem = crypto_mlkem.nist.MLKem768,
 });
 
 test "ML-KEM-768 TLS shares agree and use the registered layout" {

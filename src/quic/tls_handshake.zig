@@ -23,6 +23,8 @@ const psk = @import("../tls/psk.zig");
 const secret = @import("../tls/secret.zig");
 const server_flight = @import("../tls/server_flight.zig");
 const server_hello = @import("../tls/server_hello.zig");
+const ticket = @import("../tls/ticket.zig");
+const ticket_keyring = @import("../tls/ticket_keyring.zig");
 const transcript = @import("../tls/transcript.zig");
 const traffic = @import("traffic_crypto.zig");
 const tls_secrets = @import("tls_secrets.zig");
@@ -56,6 +58,7 @@ pub const Error = std.mem.Allocator.Error || server_flight.Error ||
     InvalidEarlyDataConfiguration,
     MissingPskConfiguration,
     InvalidRetryState,
+    UnsupportedCipherSuite,
 };
 
 pub const Result = struct {
@@ -268,6 +271,18 @@ pub const ClientFlightResult = struct {
         }
         self.* = undefined;
     }
+};
+
+pub const NewSessionTicketOptions = struct {
+    keyring: *const ticket_keyring.Keyring,
+    sealing_nonce: [ticket_keyring.nonce_len]u8,
+    server_id: []const u8,
+    alpn: []const u8,
+    ticket_nonce: []const u8,
+    age_add: u32,
+    issued_at_ms: u64,
+    lifetime_seconds: u32,
+    allow_early_data: bool = false,
 };
 
 pub const ClientOptions = struct {
@@ -1217,6 +1232,108 @@ pub fn verifyClientCryptoFlight(
             null,
         .peer_application_settings = peer_application_settings,
     };
+}
+
+/// Derive a resumption PSK after authenticating the client Finished and append
+/// a plaintext NewSessionTicket for delivery in QUIC 1-RTT CRYPTO data.
+pub fn writeNewSessionTicket(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    server: *const Result,
+    verified_client: *const ClientFlightResult,
+    options: NewSessionTicketOptions,
+) (Error || ticket.Error || ticket_keyring.Error)!void {
+    var application = try key_schedule.deriveApplicationFor(
+        server.handshake_secret,
+        server.transcript_after_server_finished,
+    );
+    defer application.master_secret.deinit();
+    defer application.client_traffic_secret.deinit();
+    defer application.server_traffic_secret.deinit();
+    var resumption_master = try key_schedule.deriveResumptionMasterSecretFor(
+        application.master_secret,
+        verified_client.transcript_after_client_finished,
+    );
+    defer resumption_master.deinit();
+    var resumption_psk = try key_schedule.deriveResumptionPskFor(
+        resumption_master,
+        options.ticket_nonce,
+    );
+    defer resumption_psk.deinit();
+
+    const opened = ticket_keyring.OpenedSecret{
+        .secret = resumption_psk,
+        .age_add = options.age_add,
+        .issued_at_ms = options.issued_at_ms,
+        .lifetime_seconds = options.lifetime_seconds,
+        .cipher_suite_wire = server.selection.suite.wireValue(),
+        .max_early_data_size = if (options.allow_early_data)
+            ticket.quic_early_data_size
+        else
+            null,
+    };
+    var fixed_identity: [ticket_keyring.sealed_len]u8 = undefined;
+    var allocated_identity: ?[]u8 = null;
+    defer if (allocated_identity) |identity| allocator.free(identity);
+    const identity: []const u8 = if (options.allow_early_data and
+        server.application_settings != null)
+    blk: {
+        const local = server.application_settings.?;
+        const peer = verified_client.peer_application_settings orelse
+            return error.InvalidApplicationSettings;
+        allocated_identity = try options.keyring
+            .sealSecretWithApplicationSettingsAlloc(
+            allocator,
+            options.sealing_nonce,
+            options.server_id,
+            options.alpn,
+            opened,
+            .{
+                .codepoint = local.codepoint,
+                .local = local.settings,
+                .peer = peer,
+            },
+        );
+        break :blk allocated_identity.?;
+    } else blk: {
+        fixed_identity = try options.keyring.sealSecret(
+            options.sealing_nonce,
+            options.server_id,
+            options.alpn,
+            opened,
+        );
+        break :blk &fixed_identity;
+    };
+    try ticket.write(output, allocator, .{
+        .lifetime_seconds = options.lifetime_seconds,
+        .age_add = options.age_add,
+        .nonce = options.ticket_nonce,
+        .ticket = identity,
+        .allow_early_data = options.allow_early_data,
+    });
+}
+
+/// Consume one RFC 9149 ticket request only after ticket construction
+/// succeeds. QUIC transports encrypt the returned handshake bytes at 1-RTT.
+pub fn writeRequestedNewSessionTicket(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    server: *Result,
+    verified_client: *const ClientFlightResult,
+    options: NewSessionTicketOptions,
+) (Error || ticket.Error || ticket_keyring.Error ||
+    error{NoRequestedTicketsPending})!void {
+    if (server.requested_ticket_count == 0) {
+        return error.NoRequestedTicketsPending;
+    }
+    try writeNewSessionTicket(
+        output,
+        allocator,
+        server,
+        verified_client,
+        options,
+    );
+    server.requested_ticket_count -= 1;
 }
 
 fn validateRetryState(
@@ -2614,6 +2731,10 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
         .quic_transport_parameters = &.{ 1, 2, 3 },
         .server_certificate_types = &.{.raw_public_key},
         .application_settings_protocols = &.{"h3"},
+        .ticket_request = .{
+            .new_session_count = 0,
+            .resumption_count = 1,
+        },
     });
     try psk.appendClientOfferForSecret(
         &hello,
@@ -2654,6 +2775,7 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
             .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
             .resumption = server_resumption,
             .accept_early_data = true,
+            .max_requested_tickets = 1,
         },
     );
     defer server_result.deinit();
@@ -2744,6 +2866,90 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
     try std.testing.expectEqualStrings(
         "quic-client-settings",
         verified_client.peer_application_settings.?,
+    );
+
+    var keyring = try ticket_keyring.Keyring.init(.{
+        .id = 19,
+        .secret = [_]u8{0xb1} ** ticket_keyring.key_len,
+    });
+    defer keyring.deinit();
+    var replacement_ticket: std.ArrayList(u8) = .empty;
+    defer replacement_ticket.deinit(allocator);
+    try writeRequestedNewSessionTicket(
+        &replacement_ticket,
+        allocator,
+        &server_result,
+        &verified_client,
+        .{
+            .keyring = &keyring,
+            .sealing_nonce = [_]u8{0xb2} ** ticket_keyring.nonce_len,
+            .server_id = "quic.example",
+            .alpn = "h3",
+            .ticket_nonce = &.{0x01},
+            .age_add = 29,
+            .issued_at_ms = 2_000,
+            .lifetime_seconds = 60,
+            .allow_early_data = true,
+        },
+    );
+    try std.testing.expectEqual(@as(u8, 0), server_result.requested_ticket_count);
+    try std.testing.expectError(
+        error.NoRequestedTicketsPending,
+        writeRequestedNewSessionTicket(
+            &replacement_ticket,
+            allocator,
+            &server_result,
+            &verified_client,
+            .{
+                .keyring = &keyring,
+                .sealing_nonce = [_]u8{0xb3} ** ticket_keyring.nonce_len,
+                .server_id = "quic.example",
+                .alpn = "h3",
+                .ticket_nonce = &.{0x02},
+                .age_add = 31,
+                .issued_at_ms = 2_000,
+                .lifetime_seconds = 60,
+            },
+        ),
+    );
+    var cached_replacement = try ticket.cacheWithApplicationSettings(
+        allocator,
+        replacement_ticket.items,
+        client_result.verified.cipher_suite,
+        client_result.verified.application.master_secret,
+        client_result.verified.transcript_after_client_finished,
+        "quic.example",
+        "h3",
+        2_000,
+        .{
+            .codepoint = .legacy,
+            .local = "quic-client-settings",
+            .peer = "quic-server-settings",
+        },
+    );
+    defer cached_replacement.deinit();
+    var opened_replacement = try keyring.openSecretWithApplicationSettings(
+        allocator,
+        cached_replacement.identity,
+        "quic.example",
+        "h3",
+        2_000,
+    );
+    defer opened_replacement.deinit();
+    try std.testing.expect(opened_replacement.secret.eql(
+        &cached_replacement.psk,
+    ));
+    try std.testing.expectEqual(
+        @as(?u32, ticket.quic_early_data_size),
+        opened_replacement.max_early_data_size,
+    );
+    try std.testing.expectEqualStrings(
+        "quic-server-settings",
+        opened_replacement.local_application_settings.?,
+    );
+    try std.testing.expectEqualStrings(
+        "quic-client-settings",
+        opened_replacement.peer_application_settings.?,
     );
 
     var changed_client_crypto: std.ArrayList(u8) = .empty;

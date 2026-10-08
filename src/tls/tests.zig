@@ -8,6 +8,7 @@ const key_exchange = @import("key_exchange.zig");
 const secret = @import("secret.zig");
 const ticket_keyring = @import("ticket_keyring.zig");
 const transcript = @import("transcript.zig");
+const p521 = @import("../crypto/p521.zig");
 const sm2 = @import("../crypto/sm2.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
@@ -19,6 +20,39 @@ test "TLS cipher suites expose protocol limits from one canonical type" {
         @as(u16, 0x1301),
         cipher_suite.Suite.aes_128_gcm_sha256.wireValue(),
     );
+    try std.testing.expectEqual(
+        @as(u16, 0x1304),
+        cipher_suite.Suite.aes_128_ccm_sha256.wireValue(),
+    );
+    try std.testing.expectEqual(
+        @as(u16, 0x1305),
+        cipher_suite.Suite.aes_128_ccm_8_sha256.wireValue(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 16),
+        cipher_suite.Suite.aes_128_ccm_sha256.keyLen(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1) << 21,
+        cipher_suite.Suite.aes_128_ccm_sha256.confidentialityLimit(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1) << 21,
+        cipher_suite.Suite.aes_128_ccm_sha256.integrityLimit(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 8),
+        cipher_suite.Suite.aes_128_ccm_8_sha256.tagLen(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1) << 21,
+        cipher_suite.Suite.aes_128_ccm_8_sha256.tlsConfidentialityLimit(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1) << 7,
+        cipher_suite.Suite.aes_128_ccm_8_sha256.integrityLimit(),
+    );
+    try std.testing.expect(!cipher_suite.Suite.aes_128_ccm_8_sha256.quicCompatible());
     try std.testing.expectEqual(
         @as(usize, 32),
         cipher_suite.Suite.chacha20_poly1305_sha256.keyLen(),
@@ -34,9 +68,26 @@ test "TLS cipher suites expose protocol limits from one canonical type" {
         cipher_suite.Suite.sm4_gcm_sm3.wireValue(),
     );
     try std.testing.expectEqual(
+        @as(u16, 0x00c7),
+        cipher_suite.Suite.sm4_ccm_sm3.wireValue(),
+    );
+    try std.testing.expectEqual(
         secret.Hash.sm3,
         cipher_suite.Suite.sm4_gcm_sm3.hash(),
     );
+    try std.testing.expectEqual(
+        secret.Hash.sm3,
+        cipher_suite.Suite.sm4_ccm_sm3.hash(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1) << 21,
+        cipher_suite.Suite.sm4_ccm_sm3.tlsConfidentialityLimit(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1) << 21,
+        cipher_suite.Suite.sm4_ccm_sm3.integrityLimit(),
+    );
+    try std.testing.expect(cipher_suite.Suite.sm4_ccm_sm3.quicCompatible());
 }
 
 test "Certificate and Ed25519 CertificateVerify round-trip" {
@@ -249,6 +300,91 @@ test "ECDSA P384 CertificateVerify round-trip and pin" {
         .pinned_ecdsa_p384_public_key = public_key,
     };
     try verifier.verifyTrust(null, &.{&public_key});
+    var wrong_hash = transcript_hash;
+    wrong_hash[0] ^= 1;
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        auth.verifyCertificateVerify(
+            &public_key,
+            parsed,
+            &wrong_hash,
+        ),
+    );
+}
+
+test "ECDSA P521 CertificateVerify round-trip and pin" {
+    const allocator = std.testing.allocator;
+    var p521_secret = try p521.SecretKey.fromBytes(decodeHex(
+        "00123456789abcdef00112233445566778899aabbccddeeff1021324354657687" ++
+            "98a9bacbdcedfe0f112233445566778899aabbccddeeff00123456789abcdef1234",
+    ));
+    defer p521_secret.deinit();
+    var key_pair = try p521.KeyPair.fromSecretKey(p521_secret);
+    defer key_pair.deinit();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const transcript_hash = [_]u8{0x36} ** 64;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try auth.writeCertificateVerify(
+        &encoded,
+        allocator,
+        .{ .ecdsa_p521_sha512 = .{
+            .key_pair = &key_pair,
+            .io = std.testing.io,
+        } },
+        &transcript_hash,
+    );
+    const parsed = try auth.parseCertificateVerify(encoded.items);
+    try std.testing.expectEqual(
+        auth.signature_scheme_ecdsa_secp521r1_sha512,
+        parsed.scheme,
+    );
+    try auth.verifyCertificateVerify(
+        &public_key,
+        parsed,
+        &transcript_hash,
+    );
+    const verifier = auth.ClientVerifier{
+        .pinned_ecdsa_p521_public_key = public_key,
+    };
+    try verifier.verifyTrust(null, &.{&public_key});
+
+    const prepared_nonce_bytes = decodeHex(
+        "000deadbeefcafebabefeedface0123456789abcdef102030405060708090a0b0" ++
+            "c0d0e0f00112233445566778899aabbccddeeff13579bdf2468ace00123456789ab",
+    );
+    var prepared_nonce = try key_pair.prepareNonce(&prepared_nonce_bytes);
+    defer prepared_nonce.deinit();
+    const prepared_signer = auth.Signer{
+        .ecdsa_p521_sha512_prepared = .{
+            .key_pair = &key_pair,
+            .nonce = &prepared_nonce,
+        },
+    };
+    var prepared_encoded: std.ArrayList(u8) = .empty;
+    defer prepared_encoded.deinit(allocator);
+    try auth.writeCertificateVerify(
+        &prepared_encoded,
+        allocator,
+        prepared_signer,
+        &transcript_hash,
+    );
+    try auth.verifyCertificateVerify(
+        &public_key,
+        try auth.parseCertificateVerify(prepared_encoded.items),
+        &transcript_hash,
+    );
+    var reused: std.ArrayList(u8) = .empty;
+    defer reused.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidCertificateVerify,
+        auth.writeCertificateVerify(
+            &reused,
+            allocator,
+            prepared_signer,
+            &transcript_hash,
+        ),
+    );
     var wrong_hash = transcript_hash;
     wrong_hash[0] ^= 1;
     try std.testing.expectError(
@@ -1625,4 +1761,10 @@ test "Certificate codec is transactional under allocation failure" {
         checkCertificateAllocationFailure,
         .{},
     );
+}
+
+fn decodeHex(comptime encoded: []const u8) [encoded.len / 2]u8 {
+    var result: [encoded.len / 2]u8 = undefined;
+    _ = std.fmt.hexToBytes(&result, encoded) catch unreachable;
+    return result;
 }

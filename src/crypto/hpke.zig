@@ -6,8 +6,8 @@
 
 const std = @import("std");
 const aes_gcm = @import("aes_gcm.zig");
+const X25519 = @import("x25519.zig").X25519;
 
-const X25519 = std.crypto.dh.X25519;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const Aes128Gcm = aes_gcm.Aes128Gcm;
 
@@ -238,7 +238,8 @@ fn exchange(
     if (isAllZero(&public_key)) return error.InvalidPublicKey;
     var secret_copy = secret_key.*;
     defer std.crypto.secureZero(u8, &secret_copy);
-    const shared = X25519.scalarmult(secret_copy, public_key) catch
+    var shared: [32]u8 = undefined;
+    X25519.scalarmultInto(&shared, &secret_copy, &public_key) catch
         return error.InvalidPublicKey;
     if (isAllZero(&shared)) return error.InvalidPublicKey;
     return shared;

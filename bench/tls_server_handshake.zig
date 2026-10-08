@@ -21,6 +21,10 @@ pub fn main(init: std.process.Init) !void {
         .generateDeterministic(
         [_]u8{0x33} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
     );
+    var prepared_signer = try vail.crypto.ed25519.PreparedSigner.init(
+        signing_key,
+    );
+    defer prepared_signer.deinit();
     const certificate = signing_key.public_key.toBytes();
     var flight: std.ArrayList(u8) = .empty;
     defer flight.deinit(allocator);
@@ -50,7 +54,10 @@ pub fn main(init: std.process.Init) !void {
                 .server_random = [_]u8{0x34} ** 32,
                 .key_material = &material,
                 .certificate_chain = &.{&certificate},
-                .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+                .signer = .{ .ed25519 = .{
+                    .key_pair = signing_key,
+                    .prepared = &prepared_signer,
+                } },
             },
         );
         defer result.handshake_secret.deinit();

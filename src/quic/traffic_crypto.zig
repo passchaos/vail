@@ -7,14 +7,17 @@
 const std = @import("std");
 
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
-const HmacSha384 = std.crypto.auth.hmac.sha2.HmacSha384;
+const fast_sha2 = @import("../crypto/sha512.zig");
+const HmacSha384 = std.crypto.auth.hmac.Hmac(fast_sha2.Sha384);
 const HkdfSha384 = std.crypto.kdf.hkdf.Hkdf(HmacSha384);
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const ChaCha20IETF = std.crypto.stream.chacha.ChaCha20IETF;
+const aes_ccm = @import("../crypto/aes_ccm.zig");
 const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
 const prepared_chacha = @import("../crypto/chacha20_poly1305.zig");
+const sha256 = @import("../crypto/sha256.zig");
 const sm3 = @import("../crypto/sm3.zig");
 const sm4 = @import("../crypto/sm4.zig");
 const cipher_suite = @import("../tls/cipher_suite.zig");
@@ -40,6 +43,9 @@ comptime {
     std.debug.assert(ChaCha20Poly1305.key_length == max_key_len);
     std.debug.assert(Aes128Gcm.nonce_length == iv_len);
     std.debug.assert(Aes128Gcm.tag_length == tag_len);
+    std.debug.assert(aes_ccm.Aes128Ccm.key_length <= max_key_len);
+    std.debug.assert(aes_ccm.Aes128Ccm.nonce_length == iv_len);
+    std.debug.assert(aes_ccm.Aes128Ccm.tag_length == tag_len);
     std.debug.assert(sm4.Gcm.key_length <= max_key_len);
     std.debug.assert(sm4.Gcm.nonce_length == iv_len);
     std.debug.assert(sm4.Gcm.tag_length == tag_len);
@@ -53,6 +59,10 @@ pub const Suite = cipher_suite.Suite;
 pub const Labels = common.Labels;
 pub const labels_v1 = common.labels_v1;
 pub const labels_v2 = common.labels_v2;
+pub const DeriveError = error{
+    HashMismatch,
+    UnsupportedCipherSuite,
+};
 
 pub const Keys = struct {
     suite: Suite,
@@ -73,19 +83,20 @@ pub const Keys = struct {
         suite: Suite,
         secret: [secret_len]u8,
         labels: Labels,
-    ) Keys {
+    ) DeriveError!Keys {
         return deriveChecked(
             suite,
             .fromSha256(secret),
             labels,
-        ) catch unreachable;
+        );
     }
 
     pub fn deriveChecked(
         suite: Suite,
         traffic_secret: tls_secret.Secret,
         labels: Labels,
-    ) error{HashMismatch}!Keys {
+    ) DeriveError!Keys {
+        if (!suite.quicCompatible()) return error.UnsupportedCipherSuite;
         if (traffic_secret.hash != suite.hash()) {
             return error.HashMismatch;
         }
@@ -103,28 +114,27 @@ pub const Keys = struct {
             .hp = [_]u8{0} ** max_key_len,
         };
         switch (suite) {
-            .aes_128_gcm_sha256 => {
+            .aes_128_gcm_sha256,
+            .aes_128_ccm_sha256,
+            => {
                 const sha256_secret =
                     traffic_secret.sha256() catch unreachable;
-                keys.iv = std.crypto.tls.hkdfExpandLabel(
-                    HkdfSha256,
-                    sha256_secret,
+                var expander: sha256.PreparedHmac = undefined;
+                expander.initInto(&sha256_secret);
+                defer expander.deinit();
+                keys.iv = expander.expandLabel(
                     labels.iv,
                     "",
                     iv_len,
                 );
                 keys.key[0..Aes128Gcm.key_length].* =
-                    std.crypto.tls.hkdfExpandLabel(
-                        HkdfSha256,
-                        sha256_secret,
+                    expander.expandLabel(
                         labels.key,
                         "",
                         Aes128Gcm.key_length,
                     );
                 keys.hp[0..Aes128Gcm.key_length].* =
-                    std.crypto.tls.hkdfExpandLabel(
-                        HkdfSha256,
-                        sha256_secret,
+                    expander.expandLabel(
                         labels.hp,
                         "",
                         Aes128Gcm.key_length,
@@ -139,7 +149,9 @@ pub const Keys = struct {
                 keys.key = derived.key;
                 keys.hp = derived.hp;
             },
-            .sm4_gcm_sm3 => {
+            .sm4_gcm_sm3,
+            .sm4_ccm_sm3,
+            => {
                 const sm3_secret =
                     traffic_secret.sm3() catch unreachable;
                 keys.iv = std.crypto.tls.hkdfExpandLabel(
@@ -169,28 +181,26 @@ pub const Keys = struct {
             .chacha20_poly1305_sha256 => {
                 const sha256_secret =
                     traffic_secret.sha256() catch unreachable;
-                keys.iv = std.crypto.tls.hkdfExpandLabel(
-                    HkdfSha256,
-                    sha256_secret,
+                var expander: sha256.PreparedHmac = undefined;
+                expander.initInto(&sha256_secret);
+                defer expander.deinit();
+                keys.iv = expander.expandLabel(
                     labels.iv,
                     "",
                     iv_len,
                 );
-                keys.key = std.crypto.tls.hkdfExpandLabel(
-                    HkdfSha256,
-                    sha256_secret,
+                keys.key = expander.expandLabel(
                     labels.key,
                     "",
                     ChaCha20Poly1305.key_length,
                 );
-                keys.hp = std.crypto.tls.hkdfExpandLabel(
-                    HkdfSha256,
-                    sha256_secret,
+                keys.hp = expander.expandLabel(
                     labels.hp,
                     "",
                     ChaCha20Poly1305.key_length,
                 );
             },
+            .aes_128_ccm_8_sha256 => unreachable,
         }
         return keys;
     }
@@ -204,7 +214,7 @@ pub const Keys = struct {
     pub fn nextKeyPhase(
         self: Keys,
         labels: Labels,
-    ) error{HashMismatch}!Keys {
+    ) DeriveError!Keys {
         const next_secret = try nextTrafficSecret(
             self.suite,
             self.traffic_secret,
@@ -216,7 +226,7 @@ pub const Keys = struct {
     }
 
     pub fn protect(
-        self: Keys,
+        self: *const Keys,
         packet_number: u64,
         associated_data: []const u8,
         plaintext: []const u8,
@@ -236,6 +246,14 @@ pub const Keys = struct {
                 nonce,
                 self.key[0..Aes128Gcm.key_length].*,
             ),
+            .aes_128_ccm_sha256 => aes_ccm.encrypt(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                nonce,
+                self.key[0..aes_ccm.Aes128Ccm.key_length].*,
+            ),
             .aes_256_gcm_sha384 => Aes256Gcm.encrypt(
                 ciphertext,
                 tag,
@@ -252,6 +270,14 @@ pub const Keys = struct {
                 nonce,
                 self.key[0..sm4.key_len].*,
             ),
+            .sm4_ccm_sm3 => sm4.Ccm.encryptOneShot(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                nonce,
+                self.key[0..sm4.key_len].*,
+            ),
             .chacha20_poly1305_sha256 => prepared_chacha.encrypt(
                 ciphertext,
                 tag,
@@ -260,11 +286,12 @@ pub const Keys = struct {
                 nonce,
                 self.key,
             ),
+            .aes_128_ccm_8_sha256 => unreachable,
         }
     }
 
     pub fn open(
-        self: Keys,
+        self: *const Keys,
         packet_number: u64,
         associated_data: []const u8,
         ciphertext: []const u8,
@@ -285,6 +312,14 @@ pub const Keys = struct {
                 nonce,
                 self.key[0..Aes128Gcm.key_length].*,
             ),
+            .aes_128_ccm_sha256 => try aes_ccm.decrypt(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                nonce,
+                self.key[0..aes_ccm.Aes128Ccm.key_length].*,
+            ),
             .aes_256_gcm_sha384 => try Aes256Gcm.decrypt(
                 plaintext,
                 ciphertext,
@@ -301,6 +336,14 @@ pub const Keys = struct {
                 nonce,
                 self.key[0..sm4.key_len].*,
             ),
+            .sm4_ccm_sm3 => try sm4.Ccm.decryptOneShot(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                nonce,
+                self.key[0..sm4.key_len].*,
+            ),
             .chacha20_poly1305_sha256 => try prepared_chacha.decrypt(
                 plaintext,
                 ciphertext,
@@ -309,15 +352,18 @@ pub const Keys = struct {
                 nonce,
                 self.key,
             ),
+            .aes_128_ccm_8_sha256 => unreachable,
         }
     }
 
     pub fn headerProtectionMask(
-        self: Keys,
+        self: *const Keys,
         sample: [sample_len]u8,
     ) [mask_len]u8 {
         switch (self.suite) {
-            .aes_128_gcm_sha256 => {
+            .aes_128_gcm_sha256,
+            .aes_128_ccm_sha256,
+            => {
                 const aes = std.crypto.core.aes.Aes128.initEnc(
                     self.hp[0..Aes128Gcm.key_length].*,
                 );
@@ -340,6 +386,13 @@ pub const Keys = struct {
                 const encrypted = schedule.encryptBlock(sample);
                 return encrypted[0..mask_len].*;
             },
+            .sm4_ccm_sm3 => {
+                const schedule = sm4.KeySchedule.init(
+                    self.hp[0..sm4.key_len].*,
+                );
+                const encrypted = schedule.encryptBlock(sample);
+                return encrypted[0..mask_len].*;
+            },
             .chacha20_poly1305_sha256 => {
                 const counter = std.mem.readInt(
                     u32,
@@ -351,6 +404,7 @@ pub const Keys = struct {
                 ChaCha20IETF.stream(&mask, counter, self.hp, nonce);
                 return mask;
             },
+            .aes_128_ccm_8_sha256 => unreachable,
         }
     }
 };
@@ -365,10 +419,12 @@ pub fn nextTrafficSecret(
     suite: Suite,
     traffic_secret: tls_secret.Secret,
     labels: Labels,
-) error{HashMismatch}!tls_secret.Secret {
+) DeriveError!tls_secret.Secret {
+    if (!suite.quicCompatible()) return error.UnsupportedCipherSuite;
     if (traffic_secret.hash != suite.hash()) return error.HashMismatch;
     return switch (suite) {
         .aes_128_gcm_sha256,
+        .aes_128_ccm_sha256,
         .chacha20_poly1305_sha256,
         => .fromSha256(std.crypto.tls.hkdfExpandLabel(
             HkdfSha256,
@@ -384,39 +440,75 @@ pub fn nextTrafficSecret(
             "",
             tls_secret.Hash.sha384.len(),
         )),
-        .sm4_gcm_sm3 => .fromSm3(std.crypto.tls.hkdfExpandLabel(
+        .sm4_gcm_sm3,
+        .sm4_ccm_sm3,
+        => .fromSm3(std.crypto.tls.hkdfExpandLabel(
             HkdfSm3,
             traffic_secret.sm3() catch unreachable,
             labels.ku,
             "",
             tls_secret.Hash.sm3.len(),
         )),
+        .aes_128_ccm_8_sha256 => unreachable,
     };
 }
 
+const PreparedAead = union(enum) {
+    none,
+    aes_gcm: prepared_aes_gcm.Context,
+    aes_ccm: aes_ccm.Aes128Ccm,
+    chacha: prepared_chacha.Context,
+    sm4_gcm: sm4.GcmContext,
+    sm4_ccm: sm4.Ccm,
+
+    fn deinit(self: *PreparedAead) void {
+        switch (self.*) {
+            .none => {},
+            .aes_gcm => |*context| context.deinit(),
+            .aes_ccm => |*context| context.deinit(),
+            .chacha => |*context| context.deinit(),
+            .sm4_gcm => |*context| context.deinit(),
+            .sm4_ccm => |*context| context.deinit(),
+        }
+        self.* = undefined;
+    }
+};
+
 pub const PreparedKeys = struct {
     keys: Keys,
-    aes_gcm: ?prepared_aes_gcm.Context = null,
+    prepared: PreparedAead = .none,
 
     /// Prepare packet-protection state for repeated operations with one key.
-    /// AES suites cache the pure-Zig key schedule and GHASH table so the hot
-    /// packet path avoids repeating key-dependent initialization. Other suites
-    /// retain their allocation-free one-shot implementations.
+    /// AES, ChaCha20, and SM4 suites cache pure-Zig key schedules or parsed key
+    /// words and reusable MAC state so the hot packet path avoids repeating
+    /// key-dependent initialization.
     pub fn init(keys: Keys) PreparedKeys {
         return .{
             .keys = keys,
-            .aes_gcm = switch (keys.suite) {
-                .aes_128_gcm_sha256 => prepared_aes_gcm.Context.init128(
+            .prepared = switch (keys.suite) {
+                .aes_128_gcm_sha256 => .{ .aes_gcm = prepared_aes_gcm.Context.init128(
                     keys.key[0..Aes128Gcm.key_length].*,
-                ),
-                .aes_256_gcm_sha384 => prepared_aes_gcm.Context.init256(keys.key),
-                else => null,
+                ) },
+                .aes_256_gcm_sha384 => .{ .aes_gcm = prepared_aes_gcm.Context.init256(keys.key) },
+                .aes_128_ccm_sha256 => .{ .aes_ccm = aes_ccm.Aes128Ccm.init(
+                    keys.key[0..aes_ccm.Aes128Ccm.key_length].*,
+                ) },
+                .chacha20_poly1305_sha256 => .{ .chacha = prepared_chacha.Context.init(
+                    keys.key,
+                ) },
+                .sm4_gcm_sm3 => .{ .sm4_gcm = sm4.GcmContext.init(
+                    keys.key[0..sm4.Gcm.key_length].*,
+                ) },
+                .sm4_ccm_sm3 => .{ .sm4_ccm = sm4.Ccm.init(
+                    keys.key[0..sm4.Ccm.key_length].*,
+                ) },
+                .aes_128_ccm_8_sha256 => unreachable,
             },
         };
     }
 
     pub fn deinit(self: *PreparedKeys) void {
-        if (self.aes_gcm) |*context| context.deinit();
+        self.prepared.deinit();
         self.keys.deinit();
         self.* = undefined;
     }
@@ -432,24 +524,50 @@ pub const PreparedKeys = struct {
         if (ciphertext.len != plaintext.len) {
             return error.InvalidPayloadLength;
         }
-        const nonce = packetNonce(self.keys.iv, packet_number);
-        if (self.aes_gcm) |*context| {
-            context.encrypt(
+        switch (self.prepared) {
+            .aes_gcm => |*context| context.encrypt(
                 ciphertext,
                 tag,
                 plaintext,
                 associated_data,
-                nonce,
-            );
-            return;
+                packetNonce(self.keys.iv, packet_number),
+            ),
+            .aes_ccm => |*context| context.encrypt(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                packetNonce(self.keys.iv, packet_number),
+            ),
+            .chacha => |*context| context.encrypt(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                packetNonce(self.keys.iv, packet_number),
+            ),
+            .sm4_gcm => |*context| context.encrypt(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                packetNonce(self.keys.iv, packet_number),
+            ),
+            .sm4_ccm => |*context| context.encrypt(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                packetNonce(self.keys.iv, packet_number),
+            ),
+            .none => try self.keys.protect(
+                packet_number,
+                associated_data,
+                plaintext,
+                ciphertext,
+                tag,
+            ),
         }
-        try self.keys.protect(
-            packet_number,
-            associated_data,
-            plaintext,
-            ciphertext,
-            tag,
-        );
     }
 
     pub fn open(
@@ -464,24 +582,50 @@ pub const PreparedKeys = struct {
         if (plaintext.len != ciphertext.len) {
             return error.InvalidPayloadLength;
         }
-        const nonce = packetNonce(self.keys.iv, packet_number);
-        if (self.aes_gcm) |*context| {
-            try context.decrypt(
+        switch (self.prepared) {
+            .aes_gcm => |*context| try context.decrypt(
                 plaintext,
                 ciphertext,
                 tag,
                 associated_data,
-                nonce,
-            );
-            return;
+                packetNonce(self.keys.iv, packet_number),
+            ),
+            .aes_ccm => |*context| try context.decrypt(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                packetNonce(self.keys.iv, packet_number),
+            ),
+            .chacha => |*context| try context.decrypt(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                packetNonce(self.keys.iv, packet_number),
+            ),
+            .sm4_gcm => |*context| try context.decrypt(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                packetNonce(self.keys.iv, packet_number),
+            ),
+            .sm4_ccm => |*context| try context.decrypt(
+                plaintext,
+                ciphertext,
+                tag,
+                associated_data,
+                packetNonce(self.keys.iv, packet_number),
+            ),
+            .none => try self.keys.open(
+                packet_number,
+                associated_data,
+                ciphertext,
+                tag,
+                plaintext,
+            ),
         }
-        try self.keys.open(
-            packet_number,
-            associated_data,
-            ciphertext,
-            tag,
-            plaintext,
-        );
     }
 
     pub fn headerProtectionMask(

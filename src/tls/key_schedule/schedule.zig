@@ -5,6 +5,8 @@
 //! HKDF/HMAC without a runtime algorithm switch.
 
 const std = @import("std");
+const sha256 = @import("../../crypto/sha256.zig");
+const fast_sha2 = @import("../../crypto/sha512.zig");
 
 pub fn Schedule(comptime Hash: type) type {
     const Hmac = std.crypto.auth.hmac.Hmac(Hash);
@@ -33,6 +35,22 @@ pub fn Schedule(comptime Hash: type) type {
             server_traffic_secret: [secret_len]u8,
         };
 
+        const TrafficSecretPair = struct {
+            client: [secret_len]u8,
+            server: [secret_len]u8,
+        };
+
+        const empty_transcript_hash: [secret_len]u8 = blk: {
+            @setEvalBranchQuota(10_000);
+            const ComptimeHash = if (Hash == fast_sha2.Sha384)
+                std.crypto.hash.sha2.Sha384
+            else if (Hash == sha256.Hash)
+                std.crypto.hash.sha2.Sha256
+            else
+                Hash;
+            break :blk std.crypto.tls.emptyHash(ComptimeHash);
+        };
+
         pub fn earlySecret(psk: ?[secret_len]u8) [secret_len]u8 {
             const zero = [_]u8{0} ** secret_len;
             return Hkdf.extract(
@@ -47,29 +65,26 @@ pub fn Schedule(comptime Hash: type) type {
             psk: ?[secret_len]u8,
         ) HandshakeSecrets {
             const early_secret = earlySecret(psk);
-            const empty_hash = std.crypto.tls.emptyHash(Hash);
             const derived_secret = deriveSecret(
                 early_secret,
                 "derived",
-                &empty_hash,
+                &empty_transcript_hash,
             );
             const handshake_secret = Hkdf.extract(
                 &derived_secret,
                 shared_secret,
             );
+            const traffic = deriveSecretPair(
+                handshake_secret,
+                "c hs traffic",
+                "s hs traffic",
+                &transcript_hash,
+            );
             return .{
                 .early_secret = early_secret,
                 .handshake_secret = handshake_secret,
-                .client_traffic_secret = deriveSecret(
-                    handshake_secret,
-                    "c hs traffic",
-                    &transcript_hash,
-                ),
-                .server_traffic_secret = deriveSecret(
-                    handshake_secret,
-                    "s hs traffic",
-                    &transcript_hash,
-                ),
+                .client_traffic_secret = traffic.client,
+                .server_traffic_secret = traffic.server,
             };
         }
 
@@ -78,25 +93,22 @@ pub fn Schedule(comptime Hash: type) type {
             transcript_hash: [secret_len]u8,
         ) ApplicationSecrets {
             const zero = [_]u8{0} ** secret_len;
-            const empty_hash = std.crypto.tls.emptyHash(Hash);
             const derived_secret = deriveSecret(
                 handshake_secret,
                 "derived",
-                &empty_hash,
+                &empty_transcript_hash,
             );
             const master_secret = Hkdf.extract(&derived_secret, &zero);
+            const traffic = deriveSecretPair(
+                master_secret,
+                "c ap traffic",
+                "s ap traffic",
+                &transcript_hash,
+            );
             return .{
                 .master_secret = master_secret,
-                .client_traffic_secret = deriveSecret(
-                    master_secret,
-                    "c ap traffic",
-                    &transcript_hash,
-                ),
-                .server_traffic_secret = deriveSecret(
-                    master_secret,
-                    "s ap traffic",
-                    &transcript_hash,
-                ),
+                .client_traffic_secret = traffic.client,
+                .server_traffic_secret = traffic.server,
             };
         }
 
@@ -115,11 +127,10 @@ pub fn Schedule(comptime Hash: type) type {
             psk: [secret_len]u8,
             truncated_client_hello_hash: [secret_len]u8,
         ) [secret_len]u8 {
-            const empty_hash = std.crypto.tls.emptyHash(Hash);
             const binder_key = deriveSecret(
                 earlySecret(psk),
                 "res binder",
-                &empty_hash,
+                &empty_transcript_hash,
             );
             return computeFinished(
                 binder_key,
@@ -200,11 +211,10 @@ pub fn Schedule(comptime Hash: type) type {
             }
             var context_hash: [secret_len]u8 = undefined;
             Hash.hash(context, &context_hash, .{});
-            const empty_hash = std.crypto.tls.emptyHash(Hash);
             var derived_secret = deriveSecret(
                 exporter_master_secret,
                 label,
-                &empty_hash,
+                &empty_transcript_hash,
             );
             defer std.crypto.secureZero(u8, &derived_secret);
             // The standard helper requires a comptime output length. Build its
@@ -249,6 +259,51 @@ pub fn Schedule(comptime Hash: type) type {
             );
         }
 
+        fn deriveSecretPair(
+            key: [secret_len]u8,
+            client_label: []const u8,
+            server_label: []const u8,
+            context: []const u8,
+        ) TrafficSecretPair {
+            if (comptime Hash == sha256.Hash) {
+                var expander: sha256.PreparedHmac = undefined;
+                expander.initInto(&key);
+                defer expander.deinit();
+                return .{
+                    .client = expander.expandLabel(
+                        client_label,
+                        context,
+                        secret_len,
+                    ),
+                    .server = expander.expandLabel(
+                        server_label,
+                        context,
+                        secret_len,
+                    ),
+                };
+            }
+            if (comptime Hash == fast_sha2.Sha384) {
+                var expander = fast_sha2.PreparedHmac(Hash).init(&key);
+                defer expander.deinit();
+                return .{
+                    .client = expander.expandLabel(
+                        client_label,
+                        context,
+                        secret_len,
+                    ),
+                    .server = expander.expandLabel(
+                        server_label,
+                        context,
+                        secret_len,
+                    ),
+                };
+            }
+            return .{
+                .client = deriveSecret(key, client_label, context),
+                .server = deriveSecret(key, server_label, context),
+            };
+        }
+
         fn deriveSecret(
             secret: [secret_len]u8,
             label: []const u8,
@@ -267,4 +322,88 @@ pub fn Schedule(comptime Hash: type) type {
             _ = Self;
         }
     };
+}
+
+test "prepared SHA-256 traffic-secret pairs match independent HKDF" {
+    const Hash = std.crypto.hash.sha2.Sha256;
+    const Hmac = std.crypto.auth.hmac.Hmac(Hash);
+    const Hkdf = std.crypto.kdf.hkdf.Hkdf(Hmac);
+    const Sha256Schedule = Schedule(Hash);
+    const zero = [_]u8{0} ** Hash.digest_length;
+    const psk = [_]u8{0x31} ** Hash.digest_length;
+    const shared_secret = [_]u8{0x52} ** Hash.digest_length;
+    const handshake_hash = [_]u8{0x73} ** Hash.digest_length;
+    const application_hash = [_]u8{0x94} ** Hash.digest_length;
+    const empty_hash = std.crypto.tls.emptyHash(Hash);
+
+    const early_secret = Hkdf.extract(&zero, &psk);
+    const early_derived = std.crypto.tls.hkdfExpandLabel(
+        Hkdf,
+        early_secret,
+        "derived",
+        &empty_hash,
+        Hash.digest_length,
+    );
+    const handshake_secret = Hkdf.extract(&early_derived, &shared_secret);
+    const handshake = Sha256Schedule.deriveHandshake(
+        &shared_secret,
+        handshake_hash,
+        psk,
+    );
+    try std.testing.expectEqual(early_secret, handshake.early_secret);
+    try std.testing.expectEqual(handshake_secret, handshake.handshake_secret);
+    try std.testing.expectEqual(
+        std.crypto.tls.hkdfExpandLabel(
+            Hkdf,
+            handshake_secret,
+            "c hs traffic",
+            &handshake_hash,
+            Hash.digest_length,
+        ),
+        handshake.client_traffic_secret,
+    );
+    try std.testing.expectEqual(
+        std.crypto.tls.hkdfExpandLabel(
+            Hkdf,
+            handshake_secret,
+            "s hs traffic",
+            &handshake_hash,
+            Hash.digest_length,
+        ),
+        handshake.server_traffic_secret,
+    );
+
+    const handshake_derived = std.crypto.tls.hkdfExpandLabel(
+        Hkdf,
+        handshake_secret,
+        "derived",
+        &empty_hash,
+        Hash.digest_length,
+    );
+    const master_secret = Hkdf.extract(&handshake_derived, &zero);
+    const application = Sha256Schedule.deriveApplication(
+        handshake_secret,
+        application_hash,
+    );
+    try std.testing.expectEqual(master_secret, application.master_secret);
+    try std.testing.expectEqual(
+        std.crypto.tls.hkdfExpandLabel(
+            Hkdf,
+            master_secret,
+            "c ap traffic",
+            &application_hash,
+            Hash.digest_length,
+        ),
+        application.client_traffic_secret,
+    );
+    try std.testing.expectEqual(
+        std.crypto.tls.hkdfExpandLabel(
+            Hkdf,
+            master_secret,
+            "s ap traffic",
+            &application_hash,
+            Hash.digest_length,
+        ),
+        application.server_traffic_secret,
+    );
 }

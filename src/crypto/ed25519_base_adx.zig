@@ -1,0 +1,1748 @@
+//! Constant-time x86_64 ADX Ed25519 signed radix-32 fixed-base kernel.
+//!
+//! The instruction schedule is derived from the formally verified
+//! s2n-bignum Edwards25519 implementation.
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT-0
+
+const std = @import("std");
+const builtin = @import("builtin");
+const base_table = @import("ed25519_base_table.zig");
+
+pub const enabled = builtin.cpu.arch == .x86_64 and
+    builtin.os.tag == .linux and
+    builtin.mode != .Debug and
+    std.Target.x86.featureSetHas(builtin.cpu.features, .avx2) and
+    std.Target.x86.featureSetHas(builtin.cpu.features, .bmi2) and
+    std.Target.x86.featureSetHas(builtin.cpu.features, .adx);
+
+pub const Result = struct {
+    encoded: [32]u8,
+    non_identity: bool,
+};
+
+pub fn scalarMultBase(scalar: *const [32]u8) Result {
+    if (comptime !enabled) @compileError("ADX Ed25519 is unavailable");
+    var coordinates: [8]u64 = undefined;
+    vailEd25519BaseAdx(&coordinates, scalar, &base_table.table);
+    const encoded = encodeCoordinates(&coordinates);
+    return .{
+        .encoded = encoded,
+        .non_identity = (coordinates[0] | coordinates[1] |
+            coordinates[2] | coordinates[3]) != 0,
+    };
+}
+
+/// Fixed-base multiplication for callers that have already established that
+/// the scalar is non-zero modulo the group order.
+pub fn scalarMultBaseNonZero(scalar: *const [32]u8) [32]u8 {
+    if (comptime !enabled) @compileError("ADX Ed25519 is unavailable");
+    var coordinates: [8]u64 = undefined;
+    vailEd25519BaseAdx(&coordinates, scalar, &base_table.table);
+    return encodeCoordinates(&coordinates);
+}
+
+inline fn encodeCoordinates(coordinates: *const [8]u64) [32]u8 {
+    var encoded: [32]u8 = @bitCast(coordinates[4..8].*);
+    encoded[31] |= @as(u8, @intCast(coordinates[0] & 1)) << 7;
+    return encoded;
+}
+
+extern fn vailEd25519BaseAdx(
+    output_xy: *[8]u64,
+    scalar: *const [32]u8,
+    table: *const [51][16][12]u64,
+) callconv(.c) void;
+
+comptime {
+    if (base_table.window_bits != 5 or
+        base_table.table.len != 51 or
+        base_table.table[0].len != 16)
+    {
+        @compileError("Ed25519 ADX table must use 51 signed radix-32 windows");
+    }
+    if (enabled) {
+        asm (
+            \\        .text
+            \\vailEd25519BaseAdx:
+            \\        .cfi_startproc
+            \\        endbr64
+            \\        pushq %rbx ; .cfi_adjust_cfa_offset 8 ; .cfi_rel_offset %rbx, 0
+            \\        pushq %rbp ; .cfi_adjust_cfa_offset 8 ; .cfi_rel_offset %rbp, 0
+            \\        pushq %r12 ; .cfi_adjust_cfa_offset 8 ; .cfi_rel_offset %r12, 0
+            \\        pushq %r13 ; .cfi_adjust_cfa_offset 8 ; .cfi_rel_offset %r13, 0
+            \\        pushq %r14 ; .cfi_adjust_cfa_offset 8 ; .cfi_rel_offset %r14, 0
+            \\        pushq %r15 ; .cfi_adjust_cfa_offset 8 ; .cfi_rel_offset %r15, 0
+            \\        subq $488, %rsp ; .cfi_adjust_cfa_offset 488
+            \\        movq %rdi, 14*32(%rsp)
+            \\        movq %rdx, 15*32(%rsp)
+            \\        movq (%rsi), %r8
+            \\        movq 8(%rsi), %r9
+            \\        movq 16(%rsi), %r10
+            \\        movq 24(%rsi), %r11
+            \\        movq %r11, %rcx
+            \\        shrq $60, %rcx
+            \\        movq $0x5812631a5cf5d3ed, %rax
+            \\        mulq %rcx
+            \\        movq %rax, %r12
+            \\        movq %rdx, %r13
+            \\        movq $0x14def9dea2f79cd6, %rax
+            \\        mulq %rcx
+            \\        addq %rax, %r13
+            \\        adcq $0, %rdx
+            \\        shlq $60, %rcx
+            \\        subq %r12, %r8
+            \\        sbbq %r13, %r9
+            \\        sbbq %rdx, %r10
+            \\        sbbq %rcx, %r11
+            \\        sbbq %rax, %rax
+            \\        xorq %rax, %r8
+            \\        xorq %rax, %r9
+            \\        xorq %rax, %r10
+            \\        xorq %rax, %r11
+            \\        negq %rax
+            \\        adcq $0, %r8
+            \\        adcq $0, %r9
+            \\        adcq $0, %r10
+            \\        adcq $0, %r11
+            \\        shlq $63, %rax
+            \\        orq %rax, %r11
+            \\        movq %r8, 0(%rsp)
+            \\        movq %r9, 0 +8(%rsp)
+            \\        movq %r10, 0 +16(%rsp)
+            \\        btr $59, %r11
+            \\        movq %r11, 0 +24(%rsp)
+            \\        leaq Ledwards25519_scalarmulbase_0g(%rip), %r10
+            \\        leaq Ledwards25519_scalarmulbase_251g(%rip), %r11
+            \\        movq (%r10), %rax
+            \\        movq (%r11), %rcx
+            \\        cmovcq %rcx, %rax
+            \\        movq %rax, (10*32)(%rsp)
+            \\        movq 8*1(%r10), %rax
+            \\        movq 8*1(%r11), %rcx
+            \\        cmovcq %rcx, %rax
+            \\        movq %rax, (10*32)+8(%rsp)
+            \\        movq 8*2(%r10), %rax
+            \\        movq 8*2(%r11), %rcx
+            \\        cmovcq %rcx, %rax
+            \\        movq %rax, (10*32)+16(%rsp)
+            \\        movq 8*3(%r10), %rax
+            \\        movq 8*3(%r11), %rcx
+            \\        cmovcq %rcx, %rax
+            \\        movq %rax, (10*32)+24(%rsp)
+            \\        movq 8*4(%r10), %rax
+            \\        movq 8*4(%r11), %rcx
+            \\        cmovcq %rcx, %rax
+            \\        movq %rax, (10*32)+32(%rsp)
+            \\        movq 8*5(%r10), %rax
+            \\        movq 8*5(%r11), %rcx
+            \\        cmovcq %rcx, %rax
+            \\        movq %rax, (10*32)+40(%rsp)
+            \\        movq 8*6(%r10), %rax
+            \\        movq 8*6(%r11), %rcx
+            \\        cmovcq %rcx, %rax
+            \\        movq %rax, (10*32)+48(%rsp)
+            \\        movq 8*7(%r10), %rax
+            \\        movq 8*7(%r11), %rcx
+            \\        cmovcq %rcx, %rax
+            \\        movq %rax, (10*32)+56(%rsp)
+            \\        movl $1, %eax
+            \\        movq %rax, (10*32)+64(%rsp)
+            \\        movl $0, %eax
+            \\        movq %rax, (10*32)+72(%rsp)
+            \\        movq %rax, (10*32)+80(%rsp)
+            \\        movq %rax, (10*32)+88(%rsp)
+            \\        movq 8*8(%r10), %rax
+            \\        movq 8*8(%r11), %rcx
+            \\        cmovcq %rcx, %rax
+            \\        movq %rax, (10*32)+96(%rsp)
+            \\        movq 8*9(%r10), %rax
+            \\        movq 8*9(%r11), %rcx
+            \\        cmovcq %rcx, %rax
+            \\        movq %rax, (10*32)+104(%rsp)
+            \\        movq 8*10(%r10), %rax
+            \\        movq 8*10(%r11), %rcx
+            \\        cmovcq %rcx, %rax
+            \\        movq %rax, (10*32)+112(%rsp)
+            \\        movq 8*11(%r10), %rax
+            \\        movq 8*11(%r11), %rcx
+            \\        cmovcq %rcx, %rax
+            \\        movq %rax, (10*32)+120(%rsp)
+            \\        movq $0, 14*32 +8(%rsp)
+            \\        movq $0, 14*32 +16(%rsp)
+            \\Ledwards25519_scalarmulbase_scalarloop:
+            \\        movq 14*32 +8(%rsp), %rax
+            \\        movq %rax, %rcx
+            \\        shrq $3, %rax
+            \\        andq $7, %rcx
+            \\        movq (%rsp,%rax), %rax
+            \\        shrq %cl, %rax
+            \\        andq $31, %rax
+            \\        addq 14*32 +16(%rsp), %rax
+            \\        movq %rax, 14*32 +24(%rsp)
+            \\        cmpq $17, 14*32 +24(%rsp)
+            \\        sbbq %rax, %rax
+            \\        incq %rax
+            \\        movq %rax, 14*32 +16(%rsp)
+            \\        movq $32, %rdi
+            \\        subq 14*32 +24(%rsp), %rdi
+            \\        cmpq $0, 14*32 +16(%rsp)
+            \\        cmovzq 14*32 +24(%rsp), %rdi
+            \\        movq %rdi, 14*32 +24(%rsp)
+            \\        vpxor %ymm0, %ymm0, %ymm0
+            \\        movl $1, %eax
+            \\        vmovq %rax, %xmm0
+            \\        vmovdqa %ymm0, %ymm1
+            \\        vpxor %ymm2, %ymm2, %ymm2
+            \\        vmovq 14*32 +24(%rsp), %xmm5
+            \\        vpbroadcastq %xmm5, %ymm5
+            \\        vmovq %rax, %xmm6
+            \\        vpbroadcastq %xmm6, %ymm6
+            \\        vmovdqa %ymm6, %ymm7
+            \\        movq 15*32(%rsp), %rbp
+            \\        .rept 16
+            \\        vpcmpeqq %ymm6, %ymm5, %ymm3
+            \\        vmovdqu 0(%rbp), %ymm4
+            \\        vpblendvb %ymm3, %ymm4, %ymm0, %ymm0
+            \\        vmovdqu 32(%rbp), %ymm4
+            \\        vpblendvb %ymm3, %ymm4, %ymm1, %ymm1
+            \\        vmovdqu 64(%rbp), %ymm4
+            \\        vpblendvb %ymm3, %ymm4, %ymm2, %ymm2
+            \\        addq $96, %rbp
+            \\        vpaddq %ymm7, %ymm6, %ymm6
+            \\        .endr
+            \\        vmovq %xmm0, %rax
+            \\        vpextrq $1, %xmm0, %rbx
+            \\        vextracti128 $1, %ymm0, %xmm3
+            \\        vmovq %xmm3, %rcx
+            \\        vpextrq $1, %xmm3, %rdx
+            \\        vmovq %xmm1, %r8
+            \\        vpextrq $1, %xmm1, %r9
+            \\        vextracti128 $1, %ymm1, %xmm3
+            \\        vmovq %xmm3, %r10
+            \\        vpextrq $1, %xmm3, %r11
+            \\        vmovq %xmm2, %r12
+            \\        vpextrq $1, %xmm2, %r13
+            \\        vextracti128 $1, %ymm2, %xmm3
+            \\        vmovq %xmm3, %r14
+            \\        vpextrq $1, %xmm3, %r15
+            \\        movq %rbp, 15*32(%rsp)
+            \\        cmpq $0, 14*32 +16(%rsp)
+            \\        movq %rax, %rsi
+            \\        cmovnzq %r8, %rsi
+            \\        cmovnzq %rax, %r8
+            \\        movq %rsi, (1*32)(%rsp)
+            \\        movq %r8, (1*32)+32(%rsp)
+            \\        movq %rbx, %rsi
+            \\        cmovnzq %r9, %rsi
+            \\        cmovnzq %rbx, %r9
+            \\        movq %rsi, (1*32)+8(%rsp)
+            \\        movq %r9, (1*32)+40(%rsp)
+            \\        movq %rcx, %rsi
+            \\        cmovnzq %r10, %rsi
+            \\        cmovnzq %rcx, %r10
+            \\        movq %rsi, (1*32)+16(%rsp)
+            \\        movq %r10, (1*32)+48(%rsp)
+            \\        movq %rdx, %rsi
+            \\        cmovnzq %r11, %rsi
+            \\        cmovnzq %rdx, %r11
+            \\        movq %rsi, (1*32)+24(%rsp)
+            \\        movq %r11, (1*32)+56(%rsp)
+            \\        movq $-19, %rax
+            \\        movq $-1, %rbx
+            \\        movq $-1, %rcx
+            \\        movq $0x7fffffffffffffff, %rdx
+            \\        subq %r12, %rax
+            \\        sbbq %r13, %rbx
+            \\        sbbq %r14, %rcx
+            \\        sbbq %r15, %rdx
+            \\        movq 14*32 +24(%rsp), %r8
+            \\        movq 14*32 +16(%rsp), %r9
+            \\        testq %r8, %r8
+            \\        cmovzq %r8, %r9
+            \\        testq %r9, %r9
+            \\        cmovzq %r12, %rax
+            \\        cmovzq %r13, %rbx
+            \\        cmovzq %r14, %rcx
+            \\        cmovzq %r15, %rdx
+            \\        movq %rax, (1*32)+64(%rsp)
+            \\        movq %rbx, (1*32)+72(%rsp)
+            \\        movq %rcx, (1*32)+80(%rsp)
+            \\        movq %rdx, (1*32)+88(%rsp)
+            \\        movq (12*32)(%rsp), %r8 ; xorl %ecx, %ecx ; addq %r8, %r8 ; movq 0x8+(12*32)(%rsp), %r9 ; adcq %r9, %r9 ; movq 0x10+(12*32)(%rsp), %r10 ; adcq %r10, %r10 ; movq 0x18+(12*32)(%rsp), %r11 ; adcq %r11, %r11 ; movl $38, %eax ; cmovncq %rcx, %rax ; addq %rax, %r8 ; adcq %rcx, %r9 ; adcq %rcx, %r10 ; adcq %rcx, %r11 ; movq %r8, (4*32)(%rsp) ; movq %r9, 0x8+(4*32)(%rsp) ; movq %r10, 0x10+(4*32)(%rsp) ; movq %r11, 0x18+(4*32)(%rsp)
+            \\        movq (11*32)(%rsp), %r8 ; xorl %ebx, %ebx ; subq (10*32)(%rsp), %r8 ; movq 8+(11*32)(%rsp), %r9 ; sbbq 8+(10*32)(%rsp), %r9 ; movl $38, %ecx ; movq 16+(11*32)(%rsp), %r10 ; sbbq 16+(10*32)(%rsp), %r10 ; movq 24+(11*32)(%rsp), %rax ; sbbq 24+(10*32)(%rsp), %rax ; cmovncq %rbx, %rcx ; subq %rcx, %r8 ; sbbq %rbx, %r9 ; sbbq %rbx, %r10 ; sbbq %rbx, %rax ; movq %r8, (5*32)(%rsp) ; movq %r9, 8+(5*32)(%rsp) ; movq %r10, 16+(5*32)(%rsp) ; movq %rax, 24+(5*32)(%rsp)
+            \\        movq (11*32)(%rsp), %r8 ; xorl %ecx, %ecx ; addq (10*32)(%rsp), %r8 ; movq 0x8+(11*32)(%rsp), %r9 ; adcq 0x8+(10*32)(%rsp), %r9 ; movq 0x10+(11*32)(%rsp), %r10 ; adcq 0x10+(10*32)(%rsp), %r10 ; movq 0x18+(11*32)(%rsp), %r11 ; adcq 0x18+(10*32)(%rsp), %r11 ; movl $38, %eax ; cmovncq %rcx, %rax ; addq %rax, %r8 ; adcq %rcx, %r9 ; adcq %rcx, %r10 ; adcq %rcx, %r11 ; movq %r8, (6*32)(%rsp) ; movq %r9, 0x8+(6*32)(%rsp) ; movq %r10, 0x10+(6*32)(%rsp) ; movq %r11, 0x18+(6*32)(%rsp)
+            \\        xorl %ecx, %ecx ; movq (3*32)(%rsp), %rdx ; mulxq (13*32)(%rsp), %r8, %r9 ; mulxq 0x8+(13*32)(%rsp), %rax, %r10 ; addq %rax, %r9 ; mulxq 0x10+(13*32)(%rsp), %rax, %r11 ; adcq %rax, %r10 ; mulxq 0x18+(13*32)(%rsp), %rax, %r12 ; adcq %rax, %r11 ; adcq %rcx, %r12 ; xorl %ecx, %ecx ; movq 0x8+(3*32)(%rsp), %rdx ; mulxq (13*32)(%rsp), %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq 0x8+(13*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x10+(13*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x18+(13*32)(%rsp), %rax, %r13 ; adcxq %rax, %r12 ; adoxq %rcx, %r13 ; adcxq %rcx, %r13 ; xorl %ecx, %ecx ; movq 0x10+(3*32)(%rsp), %rdx ; mulxq (13*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x8+(13*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x10+(13*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x18+(13*32)(%rsp), %rax, %r14 ; adcxq %rax, %r13 ; adoxq %rcx, %r14 ; adcxq %rcx, %r14 ; xorl %ecx, %ecx ; movq 0x18+(3*32)(%rsp), %rdx ; mulxq (13*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x8+(13*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x10+(13*32)(%rsp), %rax, %rbx ; adcxq %rax, %r13 ; adoxq %rbx, %r14 ; mulxq 0x18+(13*32)(%rsp), %rax, %r15 ; adcxq %rax, %r14 ; adoxq %rcx, %r15 ; adcxq %rcx, %r15 ; movl $0x26, %edx ; xorl %ecx, %ecx ; mulxq %r12, %rax, %rbx ; adcxq %rax, %r8 ; adoxq %rbx, %r9 ; mulxq %r13, %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq %r14, %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq %r15, %rax, %r12 ; adcxq %rax, %r11 ; adoxq %rcx, %r12 ; adcxq %rcx, %r12 ; shldq $0x1, %r11, %r12 ; btr $0x3f, %r11 ; movl $0x13, %edx ; imulq %r12, %rdx ; addq %rdx, %r8 ; adcq %rcx, %r9 ; adcq %rcx, %r10 ; adcq %rcx, %r11 ; movq %r8, (7*32)(%rsp) ; movq %r9, 0x8+(7*32)(%rsp) ; movq %r10, 0x10+(7*32)(%rsp) ; movq %r11, 0x18+(7*32)(%rsp)
+            \\        xorl %ecx, %ecx ; movq (1*32)(%rsp), %rdx ; mulxq (5*32)(%rsp), %r8, %r9 ; mulxq 0x8+(5*32)(%rsp), %rax, %r10 ; addq %rax, %r9 ; mulxq 0x10+(5*32)(%rsp), %rax, %r11 ; adcq %rax, %r10 ; mulxq 0x18+(5*32)(%rsp), %rax, %r12 ; adcq %rax, %r11 ; adcq %rcx, %r12 ; xorl %ecx, %ecx ; movq 0x8+(1*32)(%rsp), %rdx ; mulxq (5*32)(%rsp), %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq 0x8+(5*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x10+(5*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x18+(5*32)(%rsp), %rax, %r13 ; adcxq %rax, %r12 ; adoxq %rcx, %r13 ; adcxq %rcx, %r13 ; xorl %ecx, %ecx ; movq 0x10+(1*32)(%rsp), %rdx ; mulxq (5*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x8+(5*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x10+(5*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x18+(5*32)(%rsp), %rax, %r14 ; adcxq %rax, %r13 ; adoxq %rcx, %r14 ; adcxq %rcx, %r14 ; xorl %ecx, %ecx ; movq 0x18+(1*32)(%rsp), %rdx ; mulxq (5*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x8+(5*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x10+(5*32)(%rsp), %rax, %rbx ; adcxq %rax, %r13 ; adoxq %rbx, %r14 ; mulxq 0x18+(5*32)(%rsp), %rax, %r15 ; adcxq %rax, %r14 ; adoxq %rcx, %r15 ; adcxq %rcx, %r15 ; movl $0x26, %edx ; xorl %ecx, %ecx ; mulxq %r12, %rax, %rbx ; adcxq %rax, %r8 ; adoxq %rbx, %r9 ; mulxq %r13, %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq %r14, %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq %r15, %rax, %r12 ; adcxq %rax, %r11 ; adoxq %rcx, %r12 ; adcxq %rcx, %r12 ; shldq $0x1, %r11, %r12 ; btr $0x3f, %r11 ; movl $0x13, %edx ; imulq %r12, %rdx ; addq %rdx, %r8 ; adcq %rcx, %r9 ; adcq %rcx, %r10 ; adcq %rcx, %r11 ; movq %r8, (5*32)(%rsp) ; movq %r9, 0x8+(5*32)(%rsp) ; movq %r10, 0x10+(5*32)(%rsp) ; movq %r11, 0x18+(5*32)(%rsp)
+            \\        xorl %ecx, %ecx ; movq (2*32)(%rsp), %rdx ; mulxq (6*32)(%rsp), %r8, %r9 ; mulxq 0x8+(6*32)(%rsp), %rax, %r10 ; addq %rax, %r9 ; mulxq 0x10+(6*32)(%rsp), %rax, %r11 ; adcq %rax, %r10 ; mulxq 0x18+(6*32)(%rsp), %rax, %r12 ; adcq %rax, %r11 ; adcq %rcx, %r12 ; xorl %ecx, %ecx ; movq 0x8+(2*32)(%rsp), %rdx ; mulxq (6*32)(%rsp), %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq 0x8+(6*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x10+(6*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x18+(6*32)(%rsp), %rax, %r13 ; adcxq %rax, %r12 ; adoxq %rcx, %r13 ; adcxq %rcx, %r13 ; xorl %ecx, %ecx ; movq 0x10+(2*32)(%rsp), %rdx ; mulxq (6*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x8+(6*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x10+(6*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x18+(6*32)(%rsp), %rax, %r14 ; adcxq %rax, %r13 ; adoxq %rcx, %r14 ; adcxq %rcx, %r14 ; xorl %ecx, %ecx ; movq 0x18+(2*32)(%rsp), %rdx ; mulxq (6*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x8+(6*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x10+(6*32)(%rsp), %rax, %rbx ; adcxq %rax, %r13 ; adoxq %rbx, %r14 ; mulxq 0x18+(6*32)(%rsp), %rax, %r15 ; adcxq %rax, %r14 ; adoxq %rcx, %r15 ; adcxq %rcx, %r15 ; movl $0x26, %edx ; xorl %ecx, %ecx ; mulxq %r12, %rax, %rbx ; adcxq %rax, %r8 ; adoxq %rbx, %r9 ; mulxq %r13, %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq %r14, %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq %r15, %rax, %r12 ; adcxq %rax, %r11 ; adoxq %rcx, %r12 ; adcxq %rcx, %r12 ; shldq $0x1, %r11, %r12 ; btr $0x3f, %r11 ; movl $0x13, %edx ; imulq %r12, %rdx ; addq %rdx, %r8 ; adcq %rcx, %r9 ; adcq %rcx, %r10 ; adcq %rcx, %r11 ; movq %r8, (6*32)(%rsp) ; movq %r9, 0x8+(6*32)(%rsp) ; movq %r10, 0x10+(6*32)(%rsp) ; movq %r11, 0x18+(6*32)(%rsp)
+            \\        movq (4*32)(%rsp), %r8 ; xorl %ebx, %ebx ; subq (7*32)(%rsp), %r8 ; movq 8+(4*32)(%rsp), %r9 ; sbbq 8+(7*32)(%rsp), %r9 ; movl $38, %ecx ; movq 16+(4*32)(%rsp), %r10 ; sbbq 16+(7*32)(%rsp), %r10 ; movq 24+(4*32)(%rsp), %rax ; sbbq 24+(7*32)(%rsp), %rax ; cmovncq %rbx, %rcx ; subq %rcx, %r8 ; sbbq %rbx, %r9 ; sbbq %rbx, %r10 ; sbbq %rbx, %rax ; movq %r8, (8*32)(%rsp) ; movq %r9, 8+(8*32)(%rsp) ; movq %r10, 16+(8*32)(%rsp) ; movq %rax, 24+(8*32)(%rsp)
+            \\        movq (4*32)(%rsp), %r8 ; xorl %ecx, %ecx ; addq (7*32)(%rsp), %r8 ; movq 0x8+(4*32)(%rsp), %r9 ; adcq 0x8+(7*32)(%rsp), %r9 ; movq 0x10+(4*32)(%rsp), %r10 ; adcq 0x10+(7*32)(%rsp), %r10 ; movq 0x18+(4*32)(%rsp), %r11 ; adcq 0x18+(7*32)(%rsp), %r11 ; movl $38, %eax ; cmovncq %rcx, %rax ; addq %rax, %r8 ; adcq %rcx, %r9 ; adcq %rcx, %r10 ; adcq %rcx, %r11 ; movq %r8, (4*32)(%rsp) ; movq %r9, 0x8+(4*32)(%rsp) ; movq %r10, 0x10+(4*32)(%rsp) ; movq %r11, 0x18+(4*32)(%rsp)
+            \\        movq (6*32)(%rsp), %r8 ; xorl %ebx, %ebx ; subq (5*32)(%rsp), %r8 ; movq 8+(6*32)(%rsp), %r9 ; sbbq 8+(5*32)(%rsp), %r9 ; movl $38, %ecx ; movq 16+(6*32)(%rsp), %r10 ; sbbq 16+(5*32)(%rsp), %r10 ; movq 24+(6*32)(%rsp), %rax ; sbbq 24+(5*32)(%rsp), %rax ; cmovncq %rbx, %rcx ; subq %rcx, %r8 ; sbbq %rbx, %r9 ; sbbq %rbx, %r10 ; sbbq %rbx, %rax ; movq %r8, (9*32)(%rsp) ; movq %r9, 8+(9*32)(%rsp) ; movq %r10, 16+(9*32)(%rsp) ; movq %rax, 24+(9*32)(%rsp)
+            \\        movq (6*32)(%rsp), %r8 ; xorl %ecx, %ecx ; addq (5*32)(%rsp), %r8 ; movq 0x8+(6*32)(%rsp), %r9 ; adcq 0x8+(5*32)(%rsp), %r9 ; movq 0x10+(6*32)(%rsp), %r10 ; adcq 0x10+(5*32)(%rsp), %r10 ; movq 0x18+(6*32)(%rsp), %r11 ; adcq 0x18+(5*32)(%rsp), %r11 ; movl $38, %eax ; cmovncq %rcx, %rax ; addq %rax, %r8 ; adcq %rcx, %r9 ; adcq %rcx, %r10 ; adcq %rcx, %r11 ; movq %r8, (5*32)(%rsp) ; movq %r9, 0x8+(5*32)(%rsp) ; movq %r10, 0x10+(5*32)(%rsp) ; movq %r11, 0x18+(5*32)(%rsp)
+            \\        xorl %ecx, %ecx ; movq (4*32)(%rsp), %rdx ; mulxq (8*32)(%rsp), %r8, %r9 ; mulxq 0x8+(8*32)(%rsp), %rax, %r10 ; addq %rax, %r9 ; mulxq 0x10+(8*32)(%rsp), %rax, %r11 ; adcq %rax, %r10 ; mulxq 0x18+(8*32)(%rsp), %rax, %r12 ; adcq %rax, %r11 ; adcq %rcx, %r12 ; xorl %ecx, %ecx ; movq 0x8+(4*32)(%rsp), %rdx ; mulxq (8*32)(%rsp), %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq 0x8+(8*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x10+(8*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x18+(8*32)(%rsp), %rax, %r13 ; adcxq %rax, %r12 ; adoxq %rcx, %r13 ; adcxq %rcx, %r13 ; xorl %ecx, %ecx ; movq 0x10+(4*32)(%rsp), %rdx ; mulxq (8*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x8+(8*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x10+(8*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x18+(8*32)(%rsp), %rax, %r14 ; adcxq %rax, %r13 ; adoxq %rcx, %r14 ; adcxq %rcx, %r14 ; xorl %ecx, %ecx ; movq 0x18+(4*32)(%rsp), %rdx ; mulxq (8*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x8+(8*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x10+(8*32)(%rsp), %rax, %rbx ; adcxq %rax, %r13 ; adoxq %rbx, %r14 ; mulxq 0x18+(8*32)(%rsp), %rax, %r15 ; adcxq %rax, %r14 ; adoxq %rcx, %r15 ; adcxq %rcx, %r15 ; movl $0x26, %edx ; xorl %ecx, %ecx ; mulxq %r12, %rax, %rbx ; adcxq %rax, %r8 ; adoxq %rbx, %r9 ; mulxq %r13, %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq %r14, %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq %r15, %rax, %r12 ; adcxq %rax, %r11 ; adoxq %rcx, %r12 ; adcxq %rcx, %r12 ; shldq $0x1, %r11, %r12 ; btr $0x3f, %r11 ; movl $0x13, %edx ; imulq %r12, %rdx ; addq %rdx, %r8 ; adcq %rcx, %r9 ; adcq %rcx, %r10 ; adcq %rcx, %r11 ; movq %r8, (12*32)(%rsp) ; movq %r9, 0x8+(12*32)(%rsp) ; movq %r10, 0x10+(12*32)(%rsp) ; movq %r11, 0x18+(12*32)(%rsp)
+            \\        xorl %ecx, %ecx ; movq (8*32)(%rsp), %rdx ; mulxq (9*32)(%rsp), %r8, %r9 ; mulxq 0x8+(9*32)(%rsp), %rax, %r10 ; addq %rax, %r9 ; mulxq 0x10+(9*32)(%rsp), %rax, %r11 ; adcq %rax, %r10 ; mulxq 0x18+(9*32)(%rsp), %rax, %r12 ; adcq %rax, %r11 ; adcq %rcx, %r12 ; xorl %ecx, %ecx ; movq 0x8+(8*32)(%rsp), %rdx ; mulxq (9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq 0x8+(9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x10+(9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x18+(9*32)(%rsp), %rax, %r13 ; adcxq %rax, %r12 ; adoxq %rcx, %r13 ; adcxq %rcx, %r13 ; xorl %ecx, %ecx ; movq 0x10+(8*32)(%rsp), %rdx ; mulxq (9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x8+(9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x10+(9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x18+(9*32)(%rsp), %rax, %r14 ; adcxq %rax, %r13 ; adoxq %rcx, %r14 ; adcxq %rcx, %r14 ; xorl %ecx, %ecx ; movq 0x18+(8*32)(%rsp), %rdx ; mulxq (9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x8+(9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x10+(9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r13 ; adoxq %rbx, %r14 ; mulxq 0x18+(9*32)(%rsp), %rax, %r15 ; adcxq %rax, %r14 ; adoxq %rcx, %r15 ; adcxq %rcx, %r15 ; movl $0x26, %edx ; xorl %ecx, %ecx ; mulxq %r12, %rax, %rbx ; adcxq %rax, %r8 ; adoxq %rbx, %r9 ; mulxq %r13, %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq %r14, %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq %r15, %rax, %r12 ; adcxq %rax, %r11 ; adoxq %rcx, %r12 ; adcxq %rcx, %r12 ; shldq $0x1, %r11, %r12 ; btr $0x3f, %r11 ; movl $0x13, %edx ; imulq %r12, %rdx ; addq %rdx, %r8 ; adcq %rcx, %r9 ; adcq %rcx, %r10 ; adcq %rcx, %r11 ; movq %r8, (10*32)(%rsp) ; movq %r9, 0x8+(10*32)(%rsp) ; movq %r10, 0x10+(10*32)(%rsp) ; movq %r11, 0x18+(10*32)(%rsp)
+            \\        xorl %ecx, %ecx ; movq (5*32)(%rsp), %rdx ; mulxq (4*32)(%rsp), %r8, %r9 ; mulxq 0x8+(4*32)(%rsp), %rax, %r10 ; addq %rax, %r9 ; mulxq 0x10+(4*32)(%rsp), %rax, %r11 ; adcq %rax, %r10 ; mulxq 0x18+(4*32)(%rsp), %rax, %r12 ; adcq %rax, %r11 ; adcq %rcx, %r12 ; xorl %ecx, %ecx ; movq 0x8+(5*32)(%rsp), %rdx ; mulxq (4*32)(%rsp), %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq 0x8+(4*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x10+(4*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x18+(4*32)(%rsp), %rax, %r13 ; adcxq %rax, %r12 ; adoxq %rcx, %r13 ; adcxq %rcx, %r13 ; xorl %ecx, %ecx ; movq 0x10+(5*32)(%rsp), %rdx ; mulxq (4*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x8+(4*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x10+(4*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x18+(4*32)(%rsp), %rax, %r14 ; adcxq %rax, %r13 ; adoxq %rcx, %r14 ; adcxq %rcx, %r14 ; xorl %ecx, %ecx ; movq 0x18+(5*32)(%rsp), %rdx ; mulxq (4*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x8+(4*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x10+(4*32)(%rsp), %rax, %rbx ; adcxq %rax, %r13 ; adoxq %rbx, %r14 ; mulxq 0x18+(4*32)(%rsp), %rax, %r15 ; adcxq %rax, %r14 ; adoxq %rcx, %r15 ; adcxq %rcx, %r15 ; movl $0x26, %edx ; xorl %ecx, %ecx ; mulxq %r12, %rax, %rbx ; adcxq %rax, %r8 ; adoxq %rbx, %r9 ; mulxq %r13, %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq %r14, %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq %r15, %rax, %r12 ; adcxq %rax, %r11 ; adoxq %rcx, %r12 ; adcxq %rcx, %r12 ; shldq $0x1, %r11, %r12 ; btr $0x3f, %r11 ; movl $0x13, %edx ; imulq %r12, %rdx ; addq %rdx, %r8 ; adcq %rcx, %r9 ; adcq %rcx, %r10 ; adcq %rcx, %r11 ; movq %r8, (11*32)(%rsp) ; movq %r9, 0x8+(11*32)(%rsp) ; movq %r10, 0x10+(11*32)(%rsp) ; movq %r11, 0x18+(11*32)(%rsp)
+            \\        xorl %ecx, %ecx ; movq (5*32)(%rsp), %rdx ; mulxq (9*32)(%rsp), %r8, %r9 ; mulxq 0x8+(9*32)(%rsp), %rax, %r10 ; addq %rax, %r9 ; mulxq 0x10+(9*32)(%rsp), %rax, %r11 ; adcq %rax, %r10 ; mulxq 0x18+(9*32)(%rsp), %rax, %r12 ; adcq %rax, %r11 ; adcq %rcx, %r12 ; xorl %ecx, %ecx ; movq 0x8+(5*32)(%rsp), %rdx ; mulxq (9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq 0x8+(9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x10+(9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x18+(9*32)(%rsp), %rax, %r13 ; adcxq %rax, %r12 ; adoxq %rcx, %r13 ; adcxq %rcx, %r13 ; xorl %ecx, %ecx ; movq 0x10+(5*32)(%rsp), %rdx ; mulxq (9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x8+(9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x10+(9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x18+(9*32)(%rsp), %rax, %r14 ; adcxq %rax, %r13 ; adoxq %rcx, %r14 ; adcxq %rcx, %r14 ; xorl %ecx, %ecx ; movq 0x18+(5*32)(%rsp), %rdx ; mulxq (9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x8+(9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x10+(9*32)(%rsp), %rax, %rbx ; adcxq %rax, %r13 ; adoxq %rbx, %r14 ; mulxq 0x18+(9*32)(%rsp), %rax, %r15 ; adcxq %rax, %r14 ; adoxq %rcx, %r15 ; adcxq %rcx, %r15 ; movl $0x26, %edx ; xorl %ecx, %ecx ; mulxq %r12, %rax, %rbx ; adcxq %rax, %r8 ; adoxq %rbx, %r9 ; mulxq %r13, %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq %r14, %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq %r15, %rax, %r12 ; adcxq %rax, %r11 ; adoxq %rcx, %r12 ; adcxq %rcx, %r12 ; shldq $0x1, %r11, %r12 ; btr $0x3f, %r11 ; movl $0x13, %edx ; imulq %r12, %rdx ; addq %rdx, %r8 ; adcq %rcx, %r9 ; adcq %rcx, %r10 ; adcq %rcx, %r11 ; movq %r8, (13*32)(%rsp) ; movq %r9, 0x8+(13*32)(%rsp) ; movq %r10, 0x10+(13*32)(%rsp) ; movq %r11, 0x18+(13*32)(%rsp)
+            \\        addq $5, 14*32 +8(%rsp)
+            \\        cmpq $255, 14*32 +8(%rsp)
+            \\        jc Ledwards25519_scalarmulbase_scalarloop
+            \\        movq (10*32)(%rsp), %r8
+            \\        movq (10*32)+8(%rsp), %r9
+            \\        movq (10*32)+16(%rsp), %r10
+            \\        movq (10*32)+24(%rsp), %r11
+            \\        movq $0xffffffffffffffda, %r12
+            \\        subq %r8, %r12
+            \\        movq $0xffffffffffffffff, %r13
+            \\        sbbq %r9, %r13
+            \\        movq $0xffffffffffffffff, %r14
+            \\        sbbq %r10, %r14
+            \\        movq $0xffffffffffffffff, %r15
+            \\        sbbq %r11, %r15
+            \\        movq 0 +24(%rsp), %rax
+            \\        btq $63, %rax
+            \\        cmovcq %r12, %r8
+            \\        cmovcq %r13, %r9
+            \\        cmovcq %r14, %r10
+            \\        cmovcq %r15, %r11
+            \\        movq %r8, (10*32)(%rsp)
+            \\        movq %r9, (10*32)+8(%rsp)
+            \\        movq %r10, (10*32)+16(%rsp)
+            \\        movq %r11, (10*32)+24(%rsp)
+            \\        leaq (13*32)(%rsp), %rdi
+            \\        leaq (12*32)(%rsp), %rsi
+            \\        movq %rdi, 0xc0(%rsp)
+            \\        xorl %eax, %eax
+            \\        leaq -0x13(%rax), %rcx
+            \\        notq %rax
+            \\        movq %rcx, (%rsp)
+            \\        movq %rax, 0x8(%rsp)
+            \\        movq %rax, 0x10(%rsp)
+            \\        btr $0x3f, %rax
+            \\        movq %rax, 0x18(%rsp)
+            \\        movq (%rsi), %rdx
+            \\        movq 0x8(%rsi), %rcx
+            \\        movq 0x10(%rsi), %r8
+            \\        movq 0x18(%rsi), %r9
+            \\        movl $0x1, %eax
+            \\        xorl %r10d, %r10d
+            \\        bts $0x3f, %r9
+            \\        adcq %r10, %rax
+            \\        imulq $0x13, %rax, %rax
+            \\        addq %rax, %rdx
+            \\        adcq %r10, %rcx
+            \\        adcq %r10, %r8
+            \\        adcq %r10, %r9
+            \\        movl $0x13, %eax
+            \\        cmovbq %r10, %rax
+            \\        subq %rax, %rdx
+            \\        sbbq %r10, %rcx
+            \\        sbbq %r10, %r8
+            \\        sbbq %r10, %r9
+            \\        btr $0x3f, %r9
+            \\        movq %rdx, 0x20(%rsp)
+            \\        movq %rcx, 0x28(%rsp)
+            \\        movq %r8, 0x30(%rsp)
+            \\        movq %r9, 0x38(%rsp)
+            \\        xorl %eax, %eax
+            \\        movq %rax, 0x40(%rsp)
+            \\        movq %rax, 0x48(%rsp)
+            \\        movq %rax, 0x50(%rsp)
+            \\        movq %rax, 0x58(%rsp)
+            \\        movabsq $0xa0f99e2375022099, %rax
+            \\        movq %rax, 0x60(%rsp)
+            \\        movabsq $0xa8c68f3f1d132595, %rax
+            \\        movq %rax, 0x68(%rsp)
+            \\        movabsq $0x6c6c893805ac5242, %rax
+            \\        movq %rax, 0x70(%rsp)
+            \\        movabsq $0x276508b241770615, %rax
+            \\        movq %rax, 0x78(%rsp)
+            \\        movq $0xa, 0x90(%rsp)
+            \\        movq $0x1, 0x98(%rsp)
+            \\        jmp Ledwards25519_scalarmulbase_midloop
+            \\Ledwards25519_scalarmulbase_inverseloop:
+            \\        movq %r8, %r9
+            \\        sarq $0x3f, %r9
+            \\        xorq %r9, %r8
+            \\        subq %r9, %r8
+            \\        movq %r10, %r11
+            \\        sarq $0x3f, %r11
+            \\        xorq %r11, %r10
+            \\        subq %r11, %r10
+            \\        movq %r12, %r13
+            \\        sarq $0x3f, %r13
+            \\        xorq %r13, %r12
+            \\        subq %r13, %r12
+            \\        movq %r14, %r15
+            \\        sarq $0x3f, %r15
+            \\        xorq %r15, %r14
+            \\        subq %r15, %r14
+            \\        movq %r8, %rax
+            \\        andq %r9, %rax
+            \\        movq %r10, %rdi
+            \\        andq %r11, %rdi
+            \\        addq %rax, %rdi
+            \\        movq %rdi, 0x80(%rsp)
+            \\        movq %r12, %rax
+            \\        andq %r13, %rax
+            \\        movq %r14, %rsi
+            \\        andq %r15, %rsi
+            \\        addq %rax, %rsi
+            \\        movq %rsi, 0x88(%rsp)
+            \\        xorl %ebx, %ebx
+            \\        movq (%rsp), %rax
+            \\        xorq %r9, %rax
+            \\        mulq %r8
+            \\        addq %rax, %rdi
+            \\        adcq %rdx, %rbx
+            \\        movq 0x20(%rsp), %rax
+            \\        xorq %r11, %rax
+            \\        mulq %r10
+            \\        addq %rax, %rdi
+            \\        adcq %rdx, %rbx
+            \\        xorl %ebp, %ebp
+            \\        movq (%rsp), %rax
+            \\        xorq %r13, %rax
+            \\        mulq %r12
+            \\        addq %rax, %rsi
+            \\        adcq %rdx, %rbp
+            \\        movq 0x20(%rsp), %rax
+            \\        xorq %r15, %rax
+            \\        mulq %r14
+            \\        addq %rax, %rsi
+            \\        adcq %rdx, %rbp
+            \\        xorl %ecx, %ecx
+            \\        movq 0x8(%rsp), %rax
+            \\        xorq %r9, %rax
+            \\        mulq %r8
+            \\        addq %rax, %rbx
+            \\        adcq %rdx, %rcx
+            \\        movq 0x28(%rsp), %rax
+            \\        xorq %r11, %rax
+            \\        mulq %r10
+            \\        addq %rax, %rbx
+            \\        adcq %rdx, %rcx
+            \\        shrdq $0x3b, %rbx, %rdi
+            \\        movq %rdi, (%rsp)
+            \\        xorl %edi, %edi
+            \\        movq 0x8(%rsp), %rax
+            \\        xorq %r13, %rax
+            \\        mulq %r12
+            \\        addq %rax, %rbp
+            \\        adcq %rdx, %rdi
+            \\        movq 0x28(%rsp), %rax
+            \\        xorq %r15, %rax
+            \\        mulq %r14
+            \\        addq %rax, %rbp
+            \\        adcq %rdx, %rdi
+            \\        shrdq $0x3b, %rbp, %rsi
+            \\        movq %rsi, 0x20(%rsp)
+            \\        xorl %esi, %esi
+            \\        movq 0x10(%rsp), %rax
+            \\        xorq %r9, %rax
+            \\        mulq %r8
+            \\        addq %rax, %rcx
+            \\        adcq %rdx, %rsi
+            \\        movq 0x30(%rsp), %rax
+            \\        xorq %r11, %rax
+            \\        mulq %r10
+            \\        addq %rax, %rcx
+            \\        adcq %rdx, %rsi
+            \\        shrdq $0x3b, %rcx, %rbx
+            \\        movq %rbx, 0x8(%rsp)
+            \\        xorl %ebx, %ebx
+            \\        movq 0x10(%rsp), %rax
+            \\        xorq %r13, %rax
+            \\        mulq %r12
+            \\        addq %rax, %rdi
+            \\        adcq %rdx, %rbx
+            \\        movq 0x30(%rsp), %rax
+            \\        xorq %r15, %rax
+            \\        mulq %r14
+            \\        addq %rax, %rdi
+            \\        adcq %rdx, %rbx
+            \\        shrdq $0x3b, %rdi, %rbp
+            \\        movq %rbp, 0x28(%rsp)
+            \\        movq 0x18(%rsp), %rax
+            \\        xorq %r9, %rax
+            \\        movq %rax, %rbp
+            \\        sarq $0x3f, %rbp
+            \\        andq %r8, %rbp
+            \\        negq %rbp
+            \\        mulq %r8
+            \\        addq %rax, %rsi
+            \\        adcq %rdx, %rbp
+            \\        movq 0x38(%rsp), %rax
+            \\        xorq %r11, %rax
+            \\        movq %rax, %rdx
+            \\        sarq $0x3f, %rdx
+            \\        andq %r10, %rdx
+            \\        subq %rdx, %rbp
+            \\        mulq %r10
+            \\        addq %rax, %rsi
+            \\        adcq %rdx, %rbp
+            \\        shrdq $0x3b, %rsi, %rcx
+            \\        movq %rcx, 0x10(%rsp)
+            \\        shrdq $0x3b, %rbp, %rsi
+            \\        movq 0x18(%rsp), %rax
+            \\        movq %rsi, 0x18(%rsp)
+            \\        xorq %r13, %rax
+            \\        movq %rax, %rsi
+            \\        sarq $0x3f, %rsi
+            \\        andq %r12, %rsi
+            \\        negq %rsi
+            \\        mulq %r12
+            \\        addq %rax, %rbx
+            \\        adcq %rdx, %rsi
+            \\        movq 0x38(%rsp), %rax
+            \\        xorq %r15, %rax
+            \\        movq %rax, %rdx
+            \\        sarq $0x3f, %rdx
+            \\        andq %r14, %rdx
+            \\        subq %rdx, %rsi
+            \\        mulq %r14
+            \\        addq %rax, %rbx
+            \\        adcq %rdx, %rsi
+            \\        shrdq $0x3b, %rbx, %rdi
+            \\        movq %rdi, 0x30(%rsp)
+            \\        shrdq $0x3b, %rsi, %rbx
+            \\        movq %rbx, 0x38(%rsp)
+            \\        movq 0x80(%rsp), %rbx
+            \\        movq 0x88(%rsp), %rbp
+            \\        xorl %ecx, %ecx
+            \\        movq 0x40(%rsp), %rax
+            \\        xorq %r9, %rax
+            \\        mulq %r8
+            \\        addq %rax, %rbx
+            \\        adcq %rdx, %rcx
+            \\        movq 0x60(%rsp), %rax
+            \\        xorq %r11, %rax
+            \\        mulq %r10
+            \\        addq %rax, %rbx
+            \\        adcq %rdx, %rcx
+            \\        xorl %esi, %esi
+            \\        movq 0x40(%rsp), %rax
+            \\        xorq %r13, %rax
+            \\        mulq %r12
+            \\        movq %rbx, 0x40(%rsp)
+            \\        addq %rax, %rbp
+            \\        adcq %rdx, %rsi
+            \\        movq 0x60(%rsp), %rax
+            \\        xorq %r15, %rax
+            \\        mulq %r14
+            \\        addq %rax, %rbp
+            \\        adcq %rdx, %rsi
+            \\        movq %rbp, 0x60(%rsp)
+            \\        xorl %ebx, %ebx
+            \\        movq 0x48(%rsp), %rax
+            \\        xorq %r9, %rax
+            \\        mulq %r8
+            \\        addq %rax, %rcx
+            \\        adcq %rdx, %rbx
+            \\        movq 0x68(%rsp), %rax
+            \\        xorq %r11, %rax
+            \\        mulq %r10
+            \\        addq %rax, %rcx
+            \\        adcq %rdx, %rbx
+            \\        xorl %ebp, %ebp
+            \\        movq 0x48(%rsp), %rax
+            \\        xorq %r13, %rax
+            \\        mulq %r12
+            \\        movq %rcx, 0x48(%rsp)
+            \\        addq %rax, %rsi
+            \\        adcq %rdx, %rbp
+            \\        movq 0x68(%rsp), %rax
+            \\        xorq %r15, %rax
+            \\        mulq %r14
+            \\        addq %rax, %rsi
+            \\        adcq %rdx, %rbp
+            \\        movq %rsi, 0x68(%rsp)
+            \\        xorl %ecx, %ecx
+            \\        movq 0x50(%rsp), %rax
+            \\        xorq %r9, %rax
+            \\        mulq %r8
+            \\        addq %rax, %rbx
+            \\        adcq %rdx, %rcx
+            \\        movq 0x70(%rsp), %rax
+            \\        xorq %r11, %rax
+            \\        mulq %r10
+            \\        addq %rax, %rbx
+            \\        adcq %rdx, %rcx
+            \\        xorl %esi, %esi
+            \\        movq 0x50(%rsp), %rax
+            \\        xorq %r13, %rax
+            \\        mulq %r12
+            \\        movq %rbx, 0x50(%rsp)
+            \\        addq %rax, %rbp
+            \\        adcq %rdx, %rsi
+            \\        movq 0x70(%rsp), %rax
+            \\        xorq %r15, %rax
+            \\        mulq %r14
+            \\        addq %rax, %rbp
+            \\        adcq %rdx, %rsi
+            \\        movq %rbp, 0x70(%rsp)
+            \\        movq 0x58(%rsp), %rax
+            \\        xorq %r9, %rax
+            \\        movq %r9, %rbx
+            \\        andq %r8, %rbx
+            \\        negq %rbx
+            \\        mulq %r8
+            \\        addq %rax, %rcx
+            \\        adcq %rdx, %rbx
+            \\        movq 0x78(%rsp), %rax
+            \\        xorq %r11, %rax
+            \\        movq %r11, %rdx
+            \\        andq %r10, %rdx
+            \\        subq %rdx, %rbx
+            \\        mulq %r10
+            \\        addq %rax, %rcx
+            \\        adcq %rbx, %rdx
+            \\        movq %rdx, %rbx
+            \\        shldq $0x1, %rcx, %rdx
+            \\        sarq $0x3f, %rbx
+            \\        addq %rbx, %rdx
+            \\        movl $0x13, %eax
+            \\        imulq %rdx
+            \\        movq 0x40(%rsp), %r8
+            \\        addq %rax, %r8
+            \\        movq %r8, 0x40(%rsp)
+            \\        movq 0x48(%rsp), %r8
+            \\        adcq %rdx, %r8
+            \\        movq %r8, 0x48(%rsp)
+            \\        movq 0x50(%rsp), %r8
+            \\        adcq %rbx, %r8
+            \\        movq %r8, 0x50(%rsp)
+            \\        adcq %rbx, %rcx
+            \\        shlq $0x3f, %rax
+            \\        addq %rax, %rcx
+            \\        movq 0x58(%rsp), %rax
+            \\        movq %rcx, 0x58(%rsp)
+            \\        xorq %r13, %rax
+            \\        movq %r13, %rcx
+            \\        andq %r12, %rcx
+            \\        negq %rcx
+            \\        mulq %r12
+            \\        addq %rax, %rsi
+            \\        adcq %rdx, %rcx
+            \\        movq 0x78(%rsp), %rax
+            \\        xorq %r15, %rax
+            \\        movq %r15, %rdx
+            \\        andq %r14, %rdx
+            \\        subq %rdx, %rcx
+            \\        mulq %r14
+            \\        addq %rax, %rsi
+            \\        adcq %rcx, %rdx
+            \\        movq %rdx, %rcx
+            \\        shldq $0x1, %rsi, %rdx
+            \\        sarq $0x3f, %rcx
+            \\        movl $0x13, %eax
+            \\        addq %rcx, %rdx
+            \\        imulq %rdx
+            \\        movq 0x60(%rsp), %r8
+            \\        addq %rax, %r8
+            \\        movq %r8, 0x60(%rsp)
+            \\        movq 0x68(%rsp), %r8
+            \\        adcq %rdx, %r8
+            \\        movq %r8, 0x68(%rsp)
+            \\        movq 0x70(%rsp), %r8
+            \\        adcq %rcx, %r8
+            \\        movq %r8, 0x70(%rsp)
+            \\        adcq %rcx, %rsi
+            \\        shlq $0x3f, %rax
+            \\        addq %rax, %rsi
+            \\        movq %rsi, 0x78(%rsp)
+            \\Ledwards25519_scalarmulbase_midloop:
+            \\        movq 0x98(%rsp), %rsi
+            \\        movq (%rsp), %rdx
+            \\        movq 0x20(%rsp), %rcx
+            \\        movq %rdx, %rbx
+            \\        andq $0xfffff, %rbx
+            \\        movabsq $0xfffffe0000000000, %rax
+            \\        orq %rax, %rbx
+            \\        andq $0xfffff, %rcx
+            \\        movabsq $0xc000000000000000, %rax
+            \\        orq %rax, %rcx
+            \\        movq $0xfffffffffffffffe, %rax
+            \\        xorl %ebp, %ebp
+            \\        movl $0x2, %edx
+            \\        movq %rbx, %rdi
+            \\        movq %rax, %r8
+            \\        testq %rsi, %rsi
+            \\        cmovs %rbp, %r8
+            \\        testq $0x1, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        sarq $1, %rcx
+            \\        movl $0x100000, %eax
+            \\        leaq (%rbx,%rax), %rdx
+            \\        leaq (%rcx,%rax), %rdi
+            \\        shlq $0x16, %rdx
+            \\        shlq $0x16, %rdi
+            \\        sarq $0x2b, %rdx
+            \\        sarq $0x2b, %rdi
+            \\        movabsq $0x20000100000, %rax
+            \\        leaq (%rbx,%rax), %rbx
+            \\        leaq (%rcx,%rax), %rcx
+            \\        sarq $0x2a, %rbx
+            \\        sarq $0x2a, %rcx
+            \\        movq %rdx, 0xa0(%rsp)
+            \\        movq %rbx, 0xa8(%rsp)
+            \\        movq %rdi, 0xb0(%rsp)
+            \\        movq %rcx, 0xb8(%rsp)
+            \\        movq (%rsp), %r12
+            \\        imulq %r12, %rdi
+            \\        imulq %rdx, %r12
+            \\        movq 0x20(%rsp), %r13
+            \\        imulq %r13, %rbx
+            \\        imulq %rcx, %r13
+            \\        addq %rbx, %r12
+            \\        addq %rdi, %r13
+            \\        sarq $0x14, %r12
+            \\        sarq $0x14, %r13
+            \\        movq %r12, %rbx
+            \\        andq $0xfffff, %rbx
+            \\        movabsq $0xfffffe0000000000, %rax
+            \\        orq %rax, %rbx
+            \\        movq %r13, %rcx
+            \\        andq $0xfffff, %rcx
+            \\        movabsq $0xc000000000000000, %rax
+            \\        orq %rax, %rcx
+            \\        movq $0xfffffffffffffffe, %rax
+            \\        movl $0x2, %edx
+            \\        movq %rbx, %rdi
+            \\        movq %rax, %r8
+            \\        testq %rsi, %rsi
+            \\        cmovs %rbp, %r8
+            \\        testq $0x1, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        sarq $1, %rcx
+            \\        movl $0x100000, %eax
+            \\        leaq (%rbx,%rax), %r8
+            \\        leaq (%rcx,%rax), %r10
+            \\        shlq $0x16, %r8
+            \\        shlq $0x16, %r10
+            \\        sarq $0x2b, %r8
+            \\        sarq $0x2b, %r10
+            \\        movabsq $0x20000100000, %rax
+            \\        leaq (%rbx,%rax), %r15
+            \\        leaq (%rcx,%rax), %r11
+            \\        sarq $0x2a, %r15
+            \\        sarq $0x2a, %r11
+            \\        movq %r13, %rbx
+            \\        movq %r12, %rcx
+            \\        imulq %r8, %r12
+            \\        imulq %r15, %rbx
+            \\        addq %rbx, %r12
+            \\        imulq %r11, %r13
+            \\        imulq %r10, %rcx
+            \\        addq %rcx, %r13
+            \\        sarq $0x14, %r12
+            \\        sarq $0x14, %r13
+            \\        movq %r12, %rbx
+            \\        andq $0xfffff, %rbx
+            \\        movabsq $0xfffffe0000000000, %rax
+            \\        orq %rax, %rbx
+            \\        movq %r13, %rcx
+            \\        andq $0xfffff, %rcx
+            \\        movabsq $0xc000000000000000, %rax
+            \\        orq %rax, %rcx
+            \\        movq 0xa0(%rsp), %rax
+            \\        imulq %r8, %rax
+            \\        movq 0xb0(%rsp), %rdx
+            \\        imulq %r15, %rdx
+            \\        imulq 0xa8(%rsp), %r8
+            \\        imulq 0xb8(%rsp), %r15
+            \\        addq %r8, %r15
+            \\        leaq (%rax,%rdx), %r9
+            \\        movq 0xa0(%rsp), %rax
+            \\        imulq %r10, %rax
+            \\        movq 0xb0(%rsp), %rdx
+            \\        imulq %r11, %rdx
+            \\        imulq 0xa8(%rsp), %r10
+            \\        imulq 0xb8(%rsp), %r11
+            \\        addq %r10, %r11
+            \\        leaq (%rax,%rdx), %r13
+            \\        movq $0xfffffffffffffffe, %rax
+            \\        movl $0x2, %edx
+            \\        movq %rbx, %rdi
+            \\        movq %rax, %r8
+            \\        testq %rsi, %rsi
+            \\        cmovs %rbp, %r8
+            \\        testq $0x1, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        cmovs %rbp, %r8
+            \\        movq %rbx, %rdi
+            \\        testq %rdx, %rcx
+            \\        cmoveq %rbp, %r8
+            \\        cmoveq %rbp, %rdi
+            \\        sarq $1, %rcx
+            \\        xorq %r8, %rdi
+            \\        xorq %r8, %rsi
+            \\        btq $0x3f, %r8
+            \\        cmovbq %rcx, %rbx
+            \\        movq %rax, %r8
+            \\        subq %rax, %rsi
+            \\        leaq (%rcx,%rdi), %rcx
+            \\        sarq $1, %rcx
+            \\        movl $0x100000, %eax
+            \\        leaq (%rbx,%rax), %r8
+            \\        leaq (%rcx,%rax), %r12
+            \\        shlq $0x15, %r8
+            \\        shlq $0x15, %r12
+            \\        sarq $0x2b, %r8
+            \\        sarq $0x2b, %r12
+            \\        movabsq $0x20000100000, %rax
+            \\        leaq (%rbx,%rax), %r10
+            \\        leaq (%rcx,%rax), %r14
+            \\        sarq $0x2b, %r10
+            \\        sarq $0x2b, %r14
+            \\        movq %r9, %rax
+            \\        imulq %r8, %rax
+            \\        movq %r13, %rdx
+            \\        imulq %r10, %rdx
+            \\        imulq %r15, %r8
+            \\        imulq %r11, %r10
+            \\        addq %r8, %r10
+            \\        leaq (%rax,%rdx), %r8
+            \\        movq %r9, %rax
+            \\        imulq %r12, %rax
+            \\        movq %r13, %rdx
+            \\        imulq %r14, %rdx
+            \\        imulq %r15, %r12
+            \\        imulq %r11, %r14
+            \\        addq %r12, %r14
+            \\        leaq (%rax,%rdx), %r12
+            \\        movq %rsi, 0x98(%rsp)
+            \\        decq 0x90(%rsp)
+            \\        jne Ledwards25519_scalarmulbase_inverseloop
+            \\        movq (%rsp), %rax
+            \\        movq 0x20(%rsp), %rcx
+            \\        imulq %r8, %rax
+            \\        imulq %r10, %rcx
+            \\        addq %rcx, %rax
+            \\        sarq $0x3f, %rax
+            \\        movq %r8, %r9
+            \\        sarq $0x3f, %r9
+            \\        xorq %r9, %r8
+            \\        subq %r9, %r8
+            \\        xorq %rax, %r9
+            \\        movq %r10, %r11
+            \\        sarq $0x3f, %r11
+            \\        xorq %r11, %r10
+            \\        subq %r11, %r10
+            \\        xorq %rax, %r11
+            \\        movq %r12, %r13
+            \\        sarq $0x3f, %r13
+            \\        xorq %r13, %r12
+            \\        subq %r13, %r12
+            \\        xorq %rax, %r13
+            \\        movq %r14, %r15
+            \\        sarq $0x3f, %r15
+            \\        xorq %r15, %r14
+            \\        subq %r15, %r14
+            \\        xorq %rax, %r15
+            \\        movq %r8, %rax
+            \\        andq %r9, %rax
+            \\        movq %r10, %r12
+            \\        andq %r11, %r12
+            \\        addq %rax, %r12
+            \\        xorl %r13d, %r13d
+            \\        movq 0x40(%rsp), %rax
+            \\        xorq %r9, %rax
+            \\        mulq %r8
+            \\        addq %rax, %r12
+            \\        adcq %rdx, %r13
+            \\        movq 0x60(%rsp), %rax
+            \\        xorq %r11, %rax
+            \\        mulq %r10
+            \\        addq %rax, %r12
+            \\        adcq %rdx, %r13
+            \\        xorl %r14d, %r14d
+            \\        movq 0x48(%rsp), %rax
+            \\        xorq %r9, %rax
+            \\        mulq %r8
+            \\        addq %rax, %r13
+            \\        adcq %rdx, %r14
+            \\        movq 0x68(%rsp), %rax
+            \\        xorq %r11, %rax
+            \\        mulq %r10
+            \\        addq %rax, %r13
+            \\        adcq %rdx, %r14
+            \\        xorl %r15d, %r15d
+            \\        movq 0x50(%rsp), %rax
+            \\        xorq %r9, %rax
+            \\        mulq %r8
+            \\        addq %rax, %r14
+            \\        adcq %rdx, %r15
+            \\        movq 0x70(%rsp), %rax
+            \\        xorq %r11, %rax
+            \\        mulq %r10
+            \\        addq %rax, %r14
+            \\        adcq %rdx, %r15
+            \\        movq 0x58(%rsp), %rax
+            \\        xorq %r9, %rax
+            \\        andq %r8, %r9
+            \\        negq %r9
+            \\        mulq %r8
+            \\        addq %rax, %r15
+            \\        adcq %rdx, %r9
+            \\        movq 0x78(%rsp), %rax
+            \\        xorq %r11, %rax
+            \\        movq %r11, %rdx
+            \\        andq %r10, %rdx
+            \\        subq %rdx, %r9
+            \\        mulq %r10
+            \\        addq %rax, %r15
+            \\        adcq %rdx, %r9
+            \\        movq %r9, %rax
+            \\        shldq $0x1, %r15, %rax
+            \\        sarq $0x3f, %r9
+            \\        movl $0x13, %ebx
+            \\        leaq 0x1(%rax,%r9,1), %rax
+            \\        imulq %rbx
+            \\        xorl %ebp, %ebp
+            \\        addq %rax, %r12
+            \\        adcq %rdx, %r13
+            \\        adcq %r9, %r14
+            \\        adcq %r9, %r15
+            \\        shlq $0x3f, %rax
+            \\        addq %rax, %r15
+            \\        cmovns %rbp, %rbx
+            \\        subq %rbx, %r12
+            \\        sbbq %rbp, %r13
+            \\        sbbq %rbp, %r14
+            \\        sbbq %rbp, %r15
+            \\        btr $0x3f, %r15
+            \\        movq 0xc0(%rsp), %rdi
+            \\        movq %r12, (%rdi)
+            \\        movq %r13, 0x8(%rdi)
+            \\        movq %r14, 0x10(%rdi)
+            \\        movq %r15, 0x18(%rdi)
+            \\        movq 14*32(%rsp), %rbp
+            \\        xorl %esi, %esi ; movq (13*32)(%rsp), %rdx ; mulxq (10*32)(%rsp), %r8, %r9 ; mulxq 0x8+(10*32)(%rsp), %rax, %r10 ; addq %rax, %r9 ; mulxq 0x10+(10*32)(%rsp), %rax, %r11 ; adcq %rax, %r10 ; mulxq 0x18+(10*32)(%rsp), %rax, %r12 ; adcq %rax, %r11 ; adcq %rsi, %r12 ; xorl %esi, %esi ; movq 0x8+(13*32)(%rsp), %rdx ; mulxq (10*32)(%rsp), %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq 0x8+(10*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x10+(10*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x18+(10*32)(%rsp), %rax, %r13 ; adcxq %rax, %r12 ; adoxq %rsi, %r13 ; adcxq %rsi, %r13 ; xorl %esi, %esi ; movq 0x10+(13*32)(%rsp), %rdx ; mulxq (10*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x8+(10*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x10+(10*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x18+(10*32)(%rsp), %rax, %r14 ; adcxq %rax, %r13 ; adoxq %rsi, %r14 ; adcxq %rsi, %r14 ; xorl %esi, %esi ; movq 0x18+(13*32)(%rsp), %rdx ; mulxq (10*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x8+(10*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x10+(10*32)(%rsp), %rax, %rbx ; adcxq %rax, %r13 ; adoxq %rbx, %r14 ; mulxq 0x18+(10*32)(%rsp), %rax, %r15 ; adcxq %rax, %r14 ; adoxq %rsi, %r15 ; adcxq %rsi, %r15 ; movl $0x26, %edx ; xorl %esi, %esi ; mulxq %r12, %rax, %rbx ; adcxq %rax, %r8 ; adoxq %rbx, %r9 ; mulxq %r13, %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq %r14, %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq %r15, %rax, %r12 ; adcxq %rax, %r11 ; adoxq %rsi, %r12 ; adcxq %rsi, %r12 ; shldq $0x1, %r11, %r12 ; movl $0x13, %edx ; incq %r12; bts $63, %r11 ; mulxq %r12, %rax, %rbx ; addq %rax, %r8 ; adcq %rbx, %r9 ; adcq %rsi, %r10 ; adcq %rsi, %r11 ; sbbq %rax, %rax ; notq %rax; andq %rdx, %rax ; subq %rax, %r8 ; sbbq %rsi, %r9 ; sbbq %rsi, %r10 ; sbbq %rsi, %r11 ; btr $63, %r11 ; movq %r8, (0*32)(%rbp) ; movq %r9, 0x8+(0*32)(%rbp) ; movq %r10, 0x10+(0*32)(%rbp) ; movq %r11, 0x18+(0*32)(%rbp)
+            \\        xorl %esi, %esi ; movq (13*32)(%rsp), %rdx ; mulxq (11*32)(%rsp), %r8, %r9 ; mulxq 0x8+(11*32)(%rsp), %rax, %r10 ; addq %rax, %r9 ; mulxq 0x10+(11*32)(%rsp), %rax, %r11 ; adcq %rax, %r10 ; mulxq 0x18+(11*32)(%rsp), %rax, %r12 ; adcq %rax, %r11 ; adcq %rsi, %r12 ; xorl %esi, %esi ; movq 0x8+(13*32)(%rsp), %rdx ; mulxq (11*32)(%rsp), %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq 0x8+(11*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x10+(11*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x18+(11*32)(%rsp), %rax, %r13 ; adcxq %rax, %r12 ; adoxq %rsi, %r13 ; adcxq %rsi, %r13 ; xorl %esi, %esi ; movq 0x10+(13*32)(%rsp), %rdx ; mulxq (11*32)(%rsp), %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq 0x8+(11*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x10+(11*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x18+(11*32)(%rsp), %rax, %r14 ; adcxq %rax, %r13 ; adoxq %rsi, %r14 ; adcxq %rsi, %r14 ; xorl %esi, %esi ; movq 0x18+(13*32)(%rsp), %rdx ; mulxq (11*32)(%rsp), %rax, %rbx ; adcxq %rax, %r11 ; adoxq %rbx, %r12 ; mulxq 0x8+(11*32)(%rsp), %rax, %rbx ; adcxq %rax, %r12 ; adoxq %rbx, %r13 ; mulxq 0x10+(11*32)(%rsp), %rax, %rbx ; adcxq %rax, %r13 ; adoxq %rbx, %r14 ; mulxq 0x18+(11*32)(%rsp), %rax, %r15 ; adcxq %rax, %r14 ; adoxq %rsi, %r15 ; adcxq %rsi, %r15 ; movl $0x26, %edx ; xorl %esi, %esi ; mulxq %r12, %rax, %rbx ; adcxq %rax, %r8 ; adoxq %rbx, %r9 ; mulxq %r13, %rax, %rbx ; adcxq %rax, %r9 ; adoxq %rbx, %r10 ; mulxq %r14, %rax, %rbx ; adcxq %rax, %r10 ; adoxq %rbx, %r11 ; mulxq %r15, %rax, %r12 ; adcxq %rax, %r11 ; adoxq %rsi, %r12 ; adcxq %rsi, %r12 ; shldq $0x1, %r11, %r12 ; movl $0x13, %edx ; incq %r12; bts $63, %r11 ; mulxq %r12, %rax, %rbx ; addq %rax, %r8 ; adcq %rbx, %r9 ; adcq %rsi, %r10 ; adcq %rsi, %r11 ; sbbq %rax, %rax ; notq %rax; andq %rdx, %rax ; subq %rax, %r8 ; sbbq %rsi, %r9 ; sbbq %rsi, %r10 ; sbbq %rsi, %r11 ; btr $63, %r11 ; movq %r8, (1*32)(%rbp) ; movq %r9, 0x8+(1*32)(%rbp) ; movq %r10, 0x10+(1*32)(%rbp) ; movq %r11, 0x18+(1*32)(%rbp)
+            \\        vpxor %ymm0, %ymm0, %ymm0
+            \\        .irp offset, 0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448
+            \\        vmovdqu %ymm0, \offset(%rsp)
+            \\        .endr
+            \\        movq $0, 480(%rsp)
+            \\        vzeroall
+            \\        addq $488, %rsp ; .cfi_adjust_cfa_offset -488
+            \\        popq %r15 ; .cfi_adjust_cfa_offset -8 ; .cfi_restore %r15
+            \\        popq %r14 ; .cfi_adjust_cfa_offset -8 ; .cfi_restore %r14
+            \\        popq %r13 ; .cfi_adjust_cfa_offset -8 ; .cfi_restore %r13
+            \\        popq %r12 ; .cfi_adjust_cfa_offset -8 ; .cfi_restore %r12
+            \\        popq %rbp ; .cfi_adjust_cfa_offset -8 ; .cfi_restore %rbp
+            \\        popq %rbx ; .cfi_adjust_cfa_offset -8 ; .cfi_restore %rbx
+            \\        retq ; .cfi_endproc
+            \\.size vailEd25519BaseAdx, .-vailEd25519BaseAdx
+            \\Ledwards25519_scalarmulbase_0g:
+            \\        .quad 0x0000000000000000
+            \\        .quad 0x0000000000000000
+            \\        .quad 0x0000000000000000
+            \\        .quad 0x0000000000000000
+            \\        .quad 0x0000000000000001
+            \\        .quad 0x0000000000000000
+            \\        .quad 0x0000000000000000
+            \\        .quad 0x0000000000000000
+            \\        .quad 0x0000000000000000
+            \\        .quad 0x0000000000000000
+            \\        .quad 0x0000000000000000
+            \\        .quad 0x0000000000000000
+            \\Ledwards25519_scalarmulbase_251g:
+            \\        .quad 0x525f946d7c7220e7
+            \\        .quad 0x4636b0b2f1e35444
+            \\        .quad 0x796e9d70e892ae0f
+            \\        .quad 0x03dec05fa937adb1
+            \\        .quad 0x6d1c271cc6375515
+            \\        .quad 0x462588c4a4ca4f14
+            \\        .quad 0x691129fee55afc39
+            \\        .quad 0x15949f784d8472f5
+            \\        .quad 0xbd89e510afad0049
+            \\        .quad 0x4d1f08c073b9860e
+            \\        .quad 0x07716e8b2d00af9d
+            \\        .quad 0x70d685f68f859714
+        );
+    }
+}
+
+test "Ed25519 fixed-base table matches Zig std" {
+    const Curve = std.crypto.ecc.Edwards25519;
+    const Fe = Curve.Fe;
+    const cases = [_]struct { window: usize, entry: usize }{
+        .{ .window = 0, .entry = 0 },
+        .{ .window = 0, .entry = base_table.table[0].len - 1 },
+        .{ .window = 1, .entry = 0 },
+        .{ .window = base_table.table.len / 2, .entry = 7 },
+        .{
+            .window = base_table.table.len - 1,
+            .entry = base_table.table[0].len - 1,
+        },
+    };
+    for (cases) |case| {
+        var basis = Curve.basePoint;
+        for (0..case.window * base_table.window_bits) |_| basis = basis.dbl();
+        var point = Curve.identityElement;
+        for (0..case.entry + 1) |_| point = point.add(basis);
+        const inverse = point.z.invert();
+        const x = point.x.mul(inverse);
+        const y = point.y.mul(inverse);
+        const expected = [3]Fe{
+            y.sub(x),
+            y.add(x),
+            x.mul(y).mul(Fe.edwards25519d2),
+        };
+        inline for (0..expected.len) |coordinate| {
+            const bytes = expected[coordinate].toBytes();
+            inline for (0..4) |limb| {
+                try std.testing.expectEqual(
+                    std.mem.readInt(
+                        u64,
+                        bytes[limb * 8 ..][0..8],
+                        .little,
+                    ),
+                    base_table.table[case.window][case.entry][
+                        coordinate * 4 + limb
+                    ],
+                );
+            }
+        }
+    }
+}

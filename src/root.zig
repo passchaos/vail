@@ -12,14 +12,17 @@ pub const quic = @import("quic/mod.zig");
 test {
     _ = crypto.aes_gcm;
     _ = crypto.chacha20_poly1305;
+    _ = crypto.ed25519;
     _ = crypto.hpke;
     _ = crypto.mac;
     _ = crypto.memory;
+    _ = crypto.p256;
     _ = crypto.rsa;
     _ = crypto.sha256;
     _ = crypto.sm2;
     _ = crypto.sm3;
     _ = crypto.sm4;
+    _ = crypto.x25519;
     _ = quic.initial;
     _ = quic.retry;
     _ = quic.tls_handshake;

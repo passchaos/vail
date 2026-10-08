@@ -7,9 +7,10 @@
 
 const std = @import("std");
 const common = @import("common.zig");
+const fast_sha2 = @import("../../crypto/sha512.zig");
 
-const Sha384 = std.crypto.hash.sha2.Sha384;
-const HmacSha384 = std.crypto.auth.hmac.sha2.HmacSha384;
+const Sha384 = fast_sha2.Sha384;
+const HmacSha384 = std.crypto.auth.hmac.Hmac(Sha384);
 const HkdfSha384 = std.crypto.kdf.hkdf.Hkdf(HmacSha384);
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 
@@ -34,29 +35,13 @@ pub const Keys = struct {
     hp: [key_len]u8,
 
     pub fn derive(secret: [secret_len]u8, labels: Labels) Keys {
+        var expander = fast_sha2.PreparedHmac(Sha384).init(&secret);
+        defer expander.deinit();
         return .{
             .secret = secret,
-            .key = std.crypto.tls.hkdfExpandLabel(
-                HkdfSha384,
-                secret,
-                labels.key,
-                "",
-                key_len,
-            ),
-            .iv = std.crypto.tls.hkdfExpandLabel(
-                HkdfSha384,
-                secret,
-                labels.iv,
-                "",
-                iv_len,
-            ),
-            .hp = std.crypto.tls.hkdfExpandLabel(
-                HkdfSha384,
-                secret,
-                labels.hp,
-                "",
-                key_len,
-            ),
+            .key = expander.expandLabel(labels.key, "", key_len),
+            .iv = expander.expandLabel(labels.iv, "", iv_len),
+            .hp = expander.expandLabel(labels.hp, "", key_len),
         };
     }
 

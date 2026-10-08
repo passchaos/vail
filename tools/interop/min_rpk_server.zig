@@ -7,23 +7,38 @@ const vectors = vail.crypto.testing.rsa_signing;
 const private_key_der = decodeHex(vectors.private_key_pkcs8_hex);
 const public_key_spki = decodeHex(vectors.public_key_spki_hex);
 const MlDsa44 = std.crypto.sign.mldsa.MLDSA44;
+const MlDsa65 = std.crypto.sign.mldsa.MLDSA65;
+const MlDsa87 = std.crypto.sign.mldsa.MLDSA87;
 const ml_dsa_44_oid = [_]u8{ 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x11 };
+const ml_dsa_65_oid = [_]u8{ 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x12 };
+const ml_dsa_87_oid = [_]u8{ 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x13 };
+
+const IdentityMode = enum { rsa, ml_dsa_44, ml_dsa_65, ml_dsa_87 };
+const MlDsaKeyPair = union(IdentityMode) {
+    rsa: void,
+    ml_dsa_44: MlDsa44.KeyPair,
+    ml_dsa_65: MlDsa65.KeyPair,
+    ml_dsa_87: MlDsa87.KeyPair,
+};
+const MlDsaSpki = union(IdentityMode) {
+    rsa: void,
+    ml_dsa_44: [22 + MlDsa44.PublicKey.encoded_length]u8,
+    ml_dsa_65: [22 + MlDsa65.PublicKey.encoded_length]u8,
+    ml_dsa_87: [22 + MlDsa87.PublicKey.encoded_length]u8,
+};
 
 pub fn main(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(init.gpa);
     defer args.deinit();
     _ = args.next();
-    const mldsa = if (args.next()) |mode|
-        if (std.mem.eql(u8, mode, "mldsa44")) true else return error.InvalidArguments
-    else
-        false;
+    const mode = try parseMode(args.next());
     if (args.next() != null) return error.InvalidArguments;
     const listener = try sysSocket();
     defer _ = linux.close(listener);
     try sysReuseAddr(listener);
     var address = std.mem.zeroes(linux.sockaddr.in);
     address.family = linux.AF.INET;
-    address.port = std.mem.nativeToBig(u16, if (mldsa) 24468 else 24452);
+    address.port = std.mem.nativeToBig(u16, modePort(mode));
     address.addr = std.mem.nativeToBig(u32, 0x7f000001);
     try sysBind(listener, @ptrCast(&address), @sizeOf(linux.sockaddr.in));
     try sysListen(listener, 1);
@@ -35,27 +50,61 @@ pub fn main(init: std.process.Init) !void {
     );
     var prepared_key = try private_key.prepare();
     defer prepared_key.deinit();
-    var ml_dsa_key_pair = try MlDsa44.KeyPair.generateDeterministic(
-        [_]u8{0x5a} ** MlDsa44.KeyPair.seed_length,
-    );
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&ml_dsa_key_pair));
-    const ml_dsa_spki = mlDsa44SubjectPublicKeyInfo(
-        ml_dsa_key_pair.public_key.toBytes(),
-    );
-    const signer: vail.tls.auth.Signer = if (mldsa)
-        .{ .ml_dsa_44 = .{
-            .key_pair = &ml_dsa_key_pair,
-            .noise = [_]u8{0x5b} ** MlDsa44.noise_length,
-        } }
-    else
-        .{ .rsa_pss = .{
+    var ml_dsa_key_pair: MlDsaKeyPair = switch (mode) {
+        .rsa => .{ .rsa = {} },
+        .ml_dsa_44 => .{ .ml_dsa_44 = try MlDsa44.KeyPair.generateDeterministic(
+            [_]u8{0x5a} ** MlDsa44.KeyPair.seed_length,
+        ) },
+        .ml_dsa_65 => .{ .ml_dsa_65 = try MlDsa65.KeyPair.generateDeterministic(
+            [_]u8{0x5a} ** MlDsa65.KeyPair.seed_length,
+        ) },
+        .ml_dsa_87 => .{ .ml_dsa_87 = try MlDsa87.KeyPair.generateDeterministic(
+            [_]u8{0x5a} ** MlDsa87.KeyPair.seed_length,
+        ) },
+    };
+    defer wipeMlDsaKeyPair(&ml_dsa_key_pair);
+    var ml_dsa_spki: MlDsaSpki = switch (ml_dsa_key_pair) {
+        .rsa => .{ .rsa = {} },
+        .ml_dsa_44 => |*key_pair| .{ .ml_dsa_44 = mlDsaSubjectPublicKeyInfo(
+            MlDsa44,
+            &ml_dsa_44_oid,
+            key_pair.public_key.toBytes(),
+        ) },
+        .ml_dsa_65 => |*key_pair| .{ .ml_dsa_65 = mlDsaSubjectPublicKeyInfo(
+            MlDsa65,
+            &ml_dsa_65_oid,
+            key_pair.public_key.toBytes(),
+        ) },
+        .ml_dsa_87 => |*key_pair| .{ .ml_dsa_87 = mlDsaSubjectPublicKeyInfo(
+            MlDsa87,
+            &ml_dsa_87_oid,
+            key_pair.public_key.toBytes(),
+        ) },
+    };
+    const signer: vail.tls.auth.Signer = switch (ml_dsa_key_pair) {
+        .rsa => .{ .rsa_pss = .{
             .prepared_key = &prepared_key,
             .io = init.io,
-        } };
-    const peer_spki: []const u8 = if (mldsa)
-        &ml_dsa_spki
-    else
-        &public_key_spki;
+        } },
+        .ml_dsa_44 => |*key_pair| .{ .ml_dsa_44 = .{
+            .key_pair = key_pair,
+            .noise = [_]u8{0x5b} ** MlDsa44.noise_length,
+        } },
+        .ml_dsa_65 => |*key_pair| .{ .ml_dsa_65 = .{
+            .key_pair = key_pair,
+            .noise = [_]u8{0x5b} ** MlDsa65.noise_length,
+        } },
+        .ml_dsa_87 => |*key_pair| .{ .ml_dsa_87 = .{
+            .key_pair = key_pair,
+            .noise = [_]u8{0x5b} ** MlDsa87.noise_length,
+        } },
+    };
+    const peer_spki: []const u8 = switch (ml_dsa_spki) {
+        .rsa => &public_key_spki,
+        .ml_dsa_44 => |*spki| spki,
+        .ml_dsa_65 => |*spki| spki,
+        .ml_dsa_87 => |*spki| spki,
+    };
     var key_material = vail.tls.key_exchange.ServerKeyMaterial{
         .x25519 = [_]u8{0x81} ** vail.tls.key_exchange.secret_len,
     };
@@ -149,8 +198,43 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print(
         "Vail server verified mutual RFC 7250 RPK scheme={s}\n",
-        .{if (mldsa) "ML_DSA_44" else "RSA_PSS_SHA256"},
+        .{modeLabel(mode)},
     );
+}
+
+fn parseMode(value: ?[]const u8) !IdentityMode {
+    const name = value orelse return .rsa;
+    if (std.mem.eql(u8, name, "mldsa44")) return .ml_dsa_44;
+    if (std.mem.eql(u8, name, "mldsa65")) return .ml_dsa_65;
+    if (std.mem.eql(u8, name, "mldsa87")) return .ml_dsa_87;
+    return error.InvalidArguments;
+}
+
+fn modePort(mode: IdentityMode) u16 {
+    return switch (mode) {
+        .rsa => 24452,
+        .ml_dsa_44 => 24468,
+        .ml_dsa_65 => 24470,
+        .ml_dsa_87 => 24472,
+    };
+}
+
+fn modeLabel(mode: IdentityMode) []const u8 {
+    return switch (mode) {
+        .rsa => "RSA_PSS_SHA256",
+        .ml_dsa_44 => "ML_DSA_44",
+        .ml_dsa_65 => "ML_DSA_65",
+        .ml_dsa_87 => "ML_DSA_87",
+    };
+}
+
+fn wipeMlDsaKeyPair(key_pair: *MlDsaKeyPair) void {
+    switch (key_pair.*) {
+        .rsa => {},
+        .ml_dsa_44 => |*value| std.crypto.secureZero(u8, std.mem.asBytes(value)),
+        .ml_dsa_65 => |*value| std.crypto.secureZero(u8, std.mem.asBytes(value)),
+        .ml_dsa_87 => |*value| std.crypto.secureZero(u8, std.mem.asBytes(value)),
+    }
 }
 
 const SocketDriver = struct {
@@ -272,21 +356,23 @@ fn decodeHex(comptime encoded: []const u8) [encoded.len / 2]u8 {
     return result;
 }
 
-fn mlDsa44SubjectPublicKeyInfo(
-    public_key: [MlDsa44.PublicKey.encoded_length]u8,
-) [22 + MlDsa44.PublicKey.encoded_length]u8 {
-    var spki: [22 + MlDsa44.PublicKey.encoded_length]u8 = undefined;
+fn mlDsaSubjectPublicKeyInfo(
+    comptime MlDsa: type,
+    comptime oid: []const u8,
+    public_key: [MlDsa.PublicKey.encoded_length]u8,
+) [22 + MlDsa.PublicKey.encoded_length]u8 {
+    var spki: [22 + MlDsa.PublicKey.encoded_length]u8 = undefined;
     spki[0] = 0x30;
     spki[1] = 0x82;
-    std.mem.writeInt(u16, spki[2..4], 18 + MlDsa44.PublicKey.encoded_length, .big);
+    std.mem.writeInt(u16, spki[2..4], 18 + MlDsa.PublicKey.encoded_length, .big);
     spki[4] = 0x30;
     spki[5] = 0x0b;
     spki[6] = 0x06;
-    spki[7] = ml_dsa_44_oid.len;
-    @memcpy(spki[8..17], &ml_dsa_44_oid);
+    spki[7] = oid.len;
+    @memcpy(spki[8..17], oid);
     spki[17] = 0x03;
     spki[18] = 0x82;
-    std.mem.writeInt(u16, spki[19..21], 1 + MlDsa44.PublicKey.encoded_length, .big);
+    std.mem.writeInt(u16, spki[19..21], 1 + MlDsa.PublicKey.encoded_length, .big);
     spki[21] = 0;
     @memcpy(spki[22..], &public_key);
     return spki;

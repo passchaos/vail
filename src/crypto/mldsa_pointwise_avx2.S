@@ -1,0 +1,236 @@
+# Copyright (c) The mldsa-native project authors
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
+# Vendored from mldsa-native/s2n-bignum's formally verified AVX2 pointwise
+# multiplication schedules and preprocessed for the ELF x86_64 SysV ABI.
+.pushsection ".note.gnu.property", "a"
+ .p2align 3
+ .long 1f - 0f
+ .long 4f - 1f
+ .long 5
+0:
+ .asciz "GNU"
+1:
+ .p2align 3
+ .long 0xc0000002
+ .long 3f - 2f
+2:
+ .long (0x1 | 0x2)
+3:
+ .p2align 3
+4:
+ .popsection
+.text
+.balign 4
+        .globl vailMldsaPointwise
+       
+vailMldsaPointwise:
+        .cfi_startproc
+        vmovdqa 0x20(%rdx), %ymm0
+        vmovdqa (%rdx), %ymm1
+        xorl %eax, %eax
+Lmld_pointwise_avx2_looptop1:
+        vmovdqa (%rdi), %ymm2
+        vmovdqa 0x20(%rdi), %ymm4
+        vmovdqa 0x40(%rdi), %ymm6
+        vmovdqa (%rsi), %ymm10
+        vmovdqa 0x20(%rsi), %ymm12
+        vmovdqa 0x40(%rsi), %ymm14
+        vpsrlq $0x20, %ymm2, %ymm3
+        vpsrlq $0x20, %ymm4, %ymm5
+        vmovshdup %ymm6, %ymm7 # ymm7 = ymm6[1,1,3,3,5,5,7,7]
+        vpsrlq $0x20, %ymm10, %ymm11
+        vpsrlq $0x20, %ymm12, %ymm13
+        vmovshdup %ymm14, %ymm15 # ymm15 = ymm14[1,1,3,3,5,5,7,7]
+        vpmuldq %ymm10, %ymm2, %ymm2
+        vpmuldq %ymm11, %ymm3, %ymm3
+        vpmuldq %ymm12, %ymm4, %ymm4
+        vpmuldq %ymm13, %ymm5, %ymm5
+        vpmuldq %ymm14, %ymm6, %ymm6
+        vpmuldq %ymm15, %ymm7, %ymm7
+        vpmuldq %ymm2, %ymm0, %ymm10
+        vpmuldq %ymm3, %ymm0, %ymm11
+        vpmuldq %ymm4, %ymm0, %ymm12
+        vpmuldq %ymm5, %ymm0, %ymm13
+        vpmuldq %ymm6, %ymm0, %ymm14
+        vpmuldq %ymm7, %ymm0, %ymm15
+        vpmuldq %ymm10, %ymm1, %ymm10
+        vpmuldq %ymm11, %ymm1, %ymm11
+        vpmuldq %ymm12, %ymm1, %ymm12
+        vpmuldq %ymm13, %ymm1, %ymm13
+        vpmuldq %ymm14, %ymm1, %ymm14
+        vpmuldq %ymm15, %ymm1, %ymm15
+        vpsubq %ymm10, %ymm2, %ymm2
+        vpsubq %ymm11, %ymm3, %ymm3
+        vpsubq %ymm12, %ymm4, %ymm4
+        vpsubq %ymm13, %ymm5, %ymm5
+        vpsubq %ymm14, %ymm6, %ymm6
+        vpsubq %ymm15, %ymm7, %ymm7
+        vpsrlq $0x20, %ymm2, %ymm2
+        vpsrlq $0x20, %ymm4, %ymm4
+        vmovshdup %ymm6, %ymm6 # ymm6 = ymm6[1,1,3,3,5,5,7,7]
+        vpblendd $0xaa, %ymm3, %ymm2, %ymm2 # ymm2 = ymm2[0],ymm3[1],ymm2[2],ymm3[3],ymm2[4],ymm3[5],ymm2[6],ymm3[7]
+        vpblendd $0xaa, %ymm5, %ymm4, %ymm4 # ymm4 = ymm4[0],ymm5[1],ymm4[2],ymm5[3],ymm4[4],ymm5[5],ymm4[6],ymm5[7]
+        vpblendd $0xaa, %ymm7, %ymm6, %ymm6 # ymm6 = ymm6[0],ymm7[1],ymm6[2],ymm7[3],ymm6[4],ymm7[5],ymm6[6],ymm7[7]
+        vmovdqa %ymm2, (%rdi)
+        vmovdqa %ymm4, 0x20(%rdi)
+        vmovdqa %ymm6, 0x40(%rdi)
+        addq $0x60, %rdi
+        addq $0x60, %rsi
+        addl $0x1, %eax
+        cmpl $0xa, %eax
+        jb Lmld_pointwise_avx2_looptop1
+        vmovdqa (%rdi), %ymm2
+        vmovdqa 0x20(%rdi), %ymm4
+        vmovdqa (%rsi), %ymm10
+        vmovdqa 0x20(%rsi), %ymm12
+        vpsrlq $0x20, %ymm2, %ymm3
+        vpsrlq $0x20, %ymm4, %ymm5
+        vmovshdup %ymm10, %ymm11 # ymm11 = ymm10[1,1,3,3,5,5,7,7]
+        vmovshdup %ymm12, %ymm13 # ymm13 = ymm12[1,1,3,3,5,5,7,7]
+        vpmuldq %ymm10, %ymm2, %ymm2
+        vpmuldq %ymm11, %ymm3, %ymm3
+        vpmuldq %ymm12, %ymm4, %ymm4
+        vpmuldq %ymm13, %ymm5, %ymm5
+        vpmuldq %ymm2, %ymm0, %ymm10
+        vpmuldq %ymm3, %ymm0, %ymm11
+        vpmuldq %ymm4, %ymm0, %ymm12
+        vpmuldq %ymm5, %ymm0, %ymm13
+        vpmuldq %ymm10, %ymm1, %ymm10
+        vpmuldq %ymm11, %ymm1, %ymm11
+        vpmuldq %ymm12, %ymm1, %ymm12
+        vpmuldq %ymm13, %ymm1, %ymm13
+        vpsubq %ymm10, %ymm2, %ymm2
+        vpsubq %ymm11, %ymm3, %ymm3
+        vpsubq %ymm12, %ymm4, %ymm4
+        vpsubq %ymm13, %ymm5, %ymm5
+        vpsrlq $0x20, %ymm2, %ymm2
+        vmovshdup %ymm4, %ymm4 # ymm4 = ymm4[1,1,3,3,5,5,7,7]
+        vpblendd $0x55, %ymm2, %ymm3, %ymm2 # ymm2 = ymm2[0],ymm3[1],ymm2[2],ymm3[3],ymm2[4],ymm3[5],ymm2[6],ymm3[7]
+        vpblendd $0x55, %ymm4, %ymm5, %ymm4 # ymm4 = ymm4[0],ymm5[1],ymm4[2],ymm5[3],ymm4[4],ymm5[5],ymm4[6],ymm5[7]
+        vmovdqa %ymm2, (%rdi)
+        vmovdqa %ymm4, 0x20(%rdi)
+        retq
+        .cfi_endproc
+.size vailMldsaPointwise, .-vailMldsaPointwise
+.section .note.GNU-stack,"",%progbits
+.pushsection ".note.gnu.property", "a"
+ .p2align 3
+ .long 1f - 0f
+ .long 4f - 1f
+ .long 5
+0:
+ .asciz "GNU"
+1:
+ .p2align 3
+ .long 0xc0000002
+ .long 3f - 2f
+2:
+ .long (0x1 | 0x2)
+3:
+ .p2align 3
+4:
+ .popsection
+.text
+.balign 4
+        .globl vailMldsaPointwiseAccL4
+       
+vailMldsaPointwiseAccL4:
+        .cfi_startproc
+        vmovdqa 0x20(%rcx), %ymm0
+        vmovdqa (%rcx), %ymm1
+        xorl %eax, %eax
+Lmld_pointwise_acc_l4_avx2_looptop2:
+        vmovdqa (%rsi), %ymm6
+        vmovdqa 0x20(%rsi), %ymm8
+        vmovdqa (%rdx), %ymm10
+        vmovdqa 0x20(%rdx), %ymm12
+        vpsrlq $0x20, %ymm6, %ymm7
+        vpsrlq $0x20, %ymm8, %ymm9
+        vmovshdup %ymm10, %ymm11 # ymm11 = ymm10[1,1,3,3,5,5,7,7]
+        vmovshdup %ymm12, %ymm13 # ymm13 = ymm12[1,1,3,3,5,5,7,7]
+        vpmuldq %ymm10, %ymm6, %ymm6
+        vpmuldq %ymm11, %ymm7, %ymm7
+        vpmuldq %ymm12, %ymm8, %ymm8
+        vpmuldq %ymm13, %ymm9, %ymm9
+        vmovdqa %ymm6, %ymm2
+        vmovdqa %ymm7, %ymm3
+        vmovdqa %ymm8, %ymm4
+        vmovdqa %ymm9, %ymm5
+        vmovdqa 0x400(%rsi), %ymm6
+        vmovdqa 0x420(%rsi), %ymm8
+        vmovdqa 0x400(%rdx), %ymm10
+        vmovdqa 0x420(%rdx), %ymm12
+        vpsrlq $0x20, %ymm6, %ymm7
+        vpsrlq $0x20, %ymm8, %ymm9
+        vmovshdup %ymm10, %ymm11 # ymm11 = ymm10[1,1,3,3,5,5,7,7]
+        vmovshdup %ymm12, %ymm13 # ymm13 = ymm12[1,1,3,3,5,5,7,7]
+        vpmuldq %ymm10, %ymm6, %ymm6
+        vpmuldq %ymm11, %ymm7, %ymm7
+        vpmuldq %ymm12, %ymm8, %ymm8
+        vpmuldq %ymm13, %ymm9, %ymm9
+        vpaddq %ymm2, %ymm6, %ymm2
+        vpaddq %ymm3, %ymm7, %ymm3
+        vpaddq %ymm4, %ymm8, %ymm4
+        vpaddq %ymm5, %ymm9, %ymm5
+        vmovdqa 0x800(%rsi), %ymm6
+        vmovdqa 0x820(%rsi), %ymm8
+        vmovdqa 0x800(%rdx), %ymm10
+        vmovdqa 0x820(%rdx), %ymm12
+        vpsrlq $0x20, %ymm6, %ymm7
+        vpsrlq $0x20, %ymm8, %ymm9
+        vmovshdup %ymm10, %ymm11 # ymm11 = ymm10[1,1,3,3,5,5,7,7]
+        vmovshdup %ymm12, %ymm13 # ymm13 = ymm12[1,1,3,3,5,5,7,7]
+        vpmuldq %ymm10, %ymm6, %ymm6
+        vpmuldq %ymm11, %ymm7, %ymm7
+        vpmuldq %ymm12, %ymm8, %ymm8
+        vpmuldq %ymm13, %ymm9, %ymm9
+        vpaddq %ymm2, %ymm6, %ymm2
+        vpaddq %ymm3, %ymm7, %ymm3
+        vpaddq %ymm4, %ymm8, %ymm4
+        vpaddq %ymm5, %ymm9, %ymm5
+        vmovdqa 0xc00(%rsi), %ymm6
+        vmovdqa 0xc20(%rsi), %ymm8
+        vmovdqa 0xc00(%rdx), %ymm10
+        vmovdqa 0xc20(%rdx), %ymm12
+        vpsrlq $0x20, %ymm6, %ymm7
+        vpsrlq $0x20, %ymm8, %ymm9
+        vmovshdup %ymm10, %ymm11 # ymm11 = ymm10[1,1,3,3,5,5,7,7]
+        vmovshdup %ymm12, %ymm13 # ymm13 = ymm12[1,1,3,3,5,5,7,7]
+        vpmuldq %ymm10, %ymm6, %ymm6
+        vpmuldq %ymm11, %ymm7, %ymm7
+        vpmuldq %ymm12, %ymm8, %ymm8
+        vpmuldq %ymm13, %ymm9, %ymm9
+        vpaddq %ymm2, %ymm6, %ymm2
+        vpaddq %ymm3, %ymm7, %ymm3
+        vpaddq %ymm4, %ymm8, %ymm4
+        vpaddq %ymm5, %ymm9, %ymm5
+        vpmuldq %ymm2, %ymm0, %ymm6
+        vpmuldq %ymm3, %ymm0, %ymm7
+        vpmuldq %ymm4, %ymm0, %ymm8
+        vpmuldq %ymm5, %ymm0, %ymm9
+        vpmuldq %ymm6, %ymm1, %ymm6
+        vpmuldq %ymm7, %ymm1, %ymm7
+        vpmuldq %ymm8, %ymm1, %ymm8
+        vpmuldq %ymm9, %ymm1, %ymm9
+        vpsubq %ymm6, %ymm2, %ymm2
+        vpsubq %ymm7, %ymm3, %ymm3
+        vpsubq %ymm8, %ymm4, %ymm4
+        vpsubq %ymm9, %ymm5, %ymm5
+        vpsrlq $0x20, %ymm2, %ymm2
+        vmovshdup %ymm4, %ymm4 # ymm4 = ymm4[1,1,3,3,5,5,7,7]
+        vpblendd $0xaa, %ymm3, %ymm2, %ymm2 # ymm2 = ymm2[0],ymm3[1],ymm2[2],ymm3[3],ymm2[4],ymm3[5],ymm2[6],ymm3[7]
+        vpblendd $0xaa, %ymm5, %ymm4, %ymm4 # ymm4 = ymm4[0],ymm5[1],ymm4[2],ymm5[3],ymm4[4],ymm5[5],ymm4[6],ymm5[7]
+        vmovdqa %ymm2, (%rdi)
+        vmovdqa %ymm4, 0x20(%rdi)
+        addq $0x40, %rsi
+        addq $0x40, %rdx
+        addq $0x40, %rdi
+        addl $0x1, %eax
+        cmpl $0x10, %eax
+        jb Lmld_pointwise_acc_l4_avx2_looptop2
+        retq
+        .cfi_endproc
+.size vailMldsaPointwiseAccL4, .-vailMldsaPointwiseAccL4
+.section .note.GNU-stack,"",%progbits
+

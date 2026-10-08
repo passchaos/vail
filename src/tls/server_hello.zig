@@ -9,6 +9,7 @@ const application_settings = @import("application_settings.zig");
 const auth = @import("auth.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const ech = @import("ech.zig");
+const extension_set = @import("extension_set.zig");
 const record_size_limit = @import("record_size_limit.zig");
 
 pub const handshake_type_server_hello: u8 = 0x02;
@@ -116,14 +117,14 @@ pub fn parseHelloRetryRequest(
     var cookie: ?[]const u8 = null;
     var ech_confirmation: ?[]const u8 = null;
     var saw_version = false;
-    var seen = std.StaticBitSet(65536).initEmpty();
+    var seen: extension_set.Set = undefined;
+    seen.reset();
     var ext_pos: usize = 0;
     while (ext_pos < extensions.len) {
         const typ = try readInt(u16, extensions, &ext_pos);
         const payload_len = try readInt(u16, extensions, &ext_pos);
         const payload = try readSlice(extensions, &ext_pos, payload_len);
-        if (seen.isSet(typ)) return error.InvalidServerHello;
-        seen.set(typ);
+        if (seen.containsOrInsert(typ)) return error.InvalidServerHello;
         switch (typ) {
             ext_supported_versions => {
                 if (payload.len != 2 or
@@ -253,7 +254,8 @@ pub fn parseServerHello(
     var key_share_group: ?u16 = null;
     var key_share: ?[]const u8 = null;
     var selected_psk_identity: ?u16 = null;
-    var seen = std.StaticBitSet(65536).initEmpty();
+    var seen: extension_set.Set = undefined;
+    seen.reset();
     var ext_pos: usize = 0;
     while (ext_pos < extensions.len) {
         const typ = try readInt(u16, extensions, &ext_pos);
@@ -263,8 +265,7 @@ pub fn parseServerHello(
             &ext_pos,
             payload_len,
         );
-        if (seen.isSet(typ)) return error.InvalidServerHello;
-        seen.set(typ);
+        if (seen.containsOrInsert(typ)) return error.InvalidServerHello;
         switch (typ) {
             ext_supported_versions => {
                 if (payload.len != 2 or
@@ -354,6 +355,7 @@ pub fn writeServerHello(
 }
 
 pub const EncryptedExtensions = struct {
+    server_name_acknowledged: bool = false,
     alpn_protocol: ?[]const u8 = null,
     quic_transport_parameters: ?[]const u8 = null,
     accept_early_data: bool = false,
@@ -367,6 +369,7 @@ pub const EncryptedExtensions = struct {
 };
 
 pub const ParsedEncryptedExtensions = struct {
+    server_name_acknowledged: bool = false,
     alpn_protocol: ?[]const u8 = null,
     quic_transport_parameters: ?[]const u8 = null,
     supported_groups: []const u8 = &.{},
@@ -397,14 +400,14 @@ pub fn parseEncryptedExtensions(
     if (pos != bytes.len) return error.InvalidEncryptedExtensions;
 
     var result = ParsedEncryptedExtensions{};
-    var seen = std.StaticBitSet(65536).initEmpty();
+    var seen: extension_set.Set = undefined;
+    seen.reset();
     var ext_pos: usize = 0;
     while (ext_pos < extensions.len) {
         const typ = try readInt(u16, extensions, &ext_pos);
         const len = try readInt(u16, extensions, &ext_pos);
         const payload = try readSlice(extensions, &ext_pos, len);
-        if (seen.isSet(typ)) return error.InvalidEncryptedExtensions;
-        seen.set(typ);
+        if (seen.containsOrInsert(typ)) return error.InvalidEncryptedExtensions;
         if (typ == ext_application_layer_protocol_negotiation) {
             var alpn_pos: usize = 0;
             const names_len = try readInt(u16, payload, &alpn_pos);
@@ -426,6 +429,7 @@ pub fn parseEncryptedExtensions(
             if (payload.len != 0) {
                 return error.InvalidEncryptedExtensions;
             }
+            result.server_name_acknowledged = true;
         } else if (typ == ext_supported_groups) {
             var groups_pos: usize = 0;
             const groups_len = try readInt(u16, payload, &groups_pos);
@@ -493,6 +497,14 @@ pub fn writeEncryptedExtensions(
 ) Error!void {
     var extension_bytes: std.ArrayList(u8) = .empty;
     defer extension_bytes.deinit(allocator);
+    if (extensions.server_name_acknowledged) {
+        try appendExtensionHeader(
+            &extension_bytes,
+            allocator,
+            ext_server_name,
+            0,
+        );
+    }
     if (extensions.alpn_protocol) |protocol| {
         if (protocol.len == 0 or protocol.len > std.math.maxInt(u8)) {
             return error.InvalidEncryptedExtensions;
@@ -766,6 +778,7 @@ test "ServerHello and EncryptedExtensions encode TLS 1.3 extensions" {
 
     out.clearRetainingCapacity();
     try writeEncryptedExtensions(&out, std.testing.allocator, .{
+        .server_name_acknowledged = true,
         .alpn_protocol = "h2",
         .quic_transport_parameters = &.{ 0x00, 0x01, 0x00 },
         .client_certificate_type = .raw_public_key,
@@ -781,6 +794,9 @@ test "ServerHello and EncryptedExtensions encode TLS 1.3 extensions" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, &.{ 0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, 'h', '2' }) != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, &.{ 0x00, 0x39, 0x00, 0x03, 0x00, 0x01, 0x00 }) != null);
     const parsed_quic_extensions = try parseEncryptedExtensions(out.items);
+    try std.testing.expect(
+        parsed_quic_extensions.server_name_acknowledged,
+    );
     try std.testing.expectEqualSlices(
         u8,
         &.{ 0x00, 0x01, 0x00 },

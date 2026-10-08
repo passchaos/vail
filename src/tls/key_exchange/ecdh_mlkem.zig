@@ -69,11 +69,10 @@ pub fn Group(comptime params: Params) type {
             mlkem_seed: [mlkem_seed_len]u8,
         ) Error!ClientStart {
             const curve_public = try publicKey(curve_secret);
-            var key_pair = MLKem.KeyPair.generateDeterministic(
+            const public_key = MLKem.PublicKey.generateDeterministic(
                 mlkem_seed,
             ) catch return error.InvalidSecretKey;
-            defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
-            const mlkem_public = key_pair.public_key.toBytes();
+            const mlkem_public = public_key.toBytes();
 
             var share: [client_share_len]u8 = undefined;
             @memcpy(share[0..curve_public_len], &curve_public);
@@ -149,11 +148,11 @@ pub fn Group(comptime params: Params) type {
                 .affineCoordinates().x.toBytes(.big);
             defer std.crypto.secureZero(u8, &curve_shared);
 
-            var key_pair = MLKem.KeyPair.generateDeterministic(
+            var secret_key = MLKem.SecretKey.generateDeterministic(
                 secret.mlkem_seed,
             ) catch return error.InvalidSecretKey;
-            defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
-            var mlkem_shared = key_pair.secret_key.decaps(
+            defer secret_key.wipe();
+            var mlkem_shared = secret_key.decaps(
                 server_share[curve_public_len..][0..mlkem_ciphertext_len],
             ) catch return error.KeyExchangeFailed;
             defer std.crypto.secureZero(u8, &mlkem_shared);

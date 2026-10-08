@@ -10,6 +10,7 @@ const std = @import("std");
 
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
+const sha256 = @import("../crypto/sha256.zig");
 const common = @import("traffic_crypto/common.zig");
 const traffic = @import("traffic_crypto.zig");
 const tls_secret = @import("../tls/secret.zig");
@@ -107,15 +108,20 @@ pub fn deriveSecrets(
         config.salt,
         destination_connection_id,
     );
+    var expander: sha256.PreparedHmac = undefined;
+    expander.initInto(&initial_secret);
+    defer expander.deinit();
     return .{
         .initial_secret = initial_secret,
-        .client = .fromSha256(deriveDirectionalSecret(
-            initial_secret,
-            .client,
+        .client = .fromSha256(expander.expandLabel(
+            Direction.client.label(),
+            "",
+            HkdfSha256.prk_length,
         )),
-        .server = .fromSha256(deriveDirectionalSecret(
-            initial_secret,
-            .server,
+        .server = .fromSha256(expander.expandLabel(
+            Direction.server.label(),
+            "",
+            HkdfSha256.prk_length,
         )),
     };
 }
@@ -151,19 +157,6 @@ pub fn deriveServerKeysForVersion(
     destination_connection_id: []const u8,
 ) Error!traffic.Keys {
     return (try deriveKeysForVersion(version, destination_connection_id)).server;
-}
-
-fn deriveDirectionalSecret(
-    initial_secret: [HkdfSha256.prk_length]u8,
-    direction: Direction,
-) [HkdfSha256.prk_length]u8 {
-    return std.crypto.tls.hkdfExpandLabel(
-        HkdfSha256,
-        initial_secret,
-        direction.label(),
-        "",
-        HkdfSha256.prk_length,
-    );
 }
 
 comptime {

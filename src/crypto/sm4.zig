@@ -1,15 +1,22 @@
-//! SM4 block cipher and SM4-GCM AEAD support (GB/T 32907-2016).
+//! SM4 block cipher plus SM4-GCM and SM4-CCM AEAD support.
 //!
 //! This module provides a compact portable implementation with the same
 //! fixed-size, allocation-free calling style as Zig's AES-GCM primitives.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const ccm = @import("aes_ccm.zig");
+const ghash_accelerated = @import("ghash.zig");
 
 pub const key_len = 16;
 pub const block_len = 16;
 pub const rounds = 32;
 pub const Key = [key_len]u8;
 pub const Block = [block_len]u8;
+
+const wide8_enabled = builtin.cpu.arch == .x86_64 and
+    builtin.zig_backend != .stage2_x86_64 and
+    builtin.cpu.has(.x86, .avx2);
 
 pub const KeySchedule = struct {
     round_keys: [rounds]u32,
@@ -33,14 +40,104 @@ pub const KeySchedule = struct {
         return .{ .round_keys = round_keys };
     }
 
-    pub fn encryptBlock(self: KeySchedule, plaintext: Block) Block {
-        return cryptBlock(self.round_keys, plaintext, .encrypt);
+    pub fn encryptBlock(self: *const KeySchedule, plaintext: Block) Block {
+        return cryptBlock(&self.round_keys, plaintext, .encrypt);
     }
 
-    pub fn decryptBlock(self: KeySchedule, ciphertext: Block) Block {
-        return cryptBlock(self.round_keys, ciphertext, .decrypt);
+    pub fn decryptBlock(self: *const KeySchedule, ciphertext: Block) Block {
+        return cryptBlock(&self.round_keys, ciphertext, .decrypt);
+    }
+
+    pub fn encryptWide2(
+        self: *const KeySchedule,
+        output: *[2 * block_len]u8,
+        input: *const [2 * block_len]u8,
+    ) void {
+        self.encryptWide(2, output, input);
+    }
+
+    pub fn encryptWide4(
+        self: *const KeySchedule,
+        output: *[4 * block_len]u8,
+        input: *const [4 * block_len]u8,
+    ) void {
+        self.encryptWide(4, output, input);
+    }
+
+    pub fn encryptWide8(
+        self: *const KeySchedule,
+        output: *[8 * block_len]u8,
+        input: *const [8 * block_len]u8,
+    ) void {
+        self.encryptWide(8, output, input);
+    }
+
+    inline fn encryptWide(
+        self: *const KeySchedule,
+        comptime degree: usize,
+        output: *[degree * block_len]u8,
+        input: *const [degree * block_len]u8,
+    ) void {
+        const Lane = @Vector(degree, u32);
+        var x0: Lane = undefined;
+        var x1: Lane = undefined;
+        var x2: Lane = undefined;
+        var x3: Lane = undefined;
+        inline for (0..degree) |lane| {
+            const offset = lane * block_len;
+            x0[lane] = std.mem.readInt(u32, input[offset..][0..4], .big);
+            x1[lane] = std.mem.readInt(u32, input[offset + 4 ..][0..4], .big);
+            x2[lane] = std.mem.readInt(u32, input[offset + 8 ..][0..4], .big);
+            x3[lane] = std.mem.readInt(u32, input[offset + 12 ..][0..4], .big);
+        }
+        for (self.round_keys) |round_key| {
+            const next = x0 ^ roundTransformWide(
+                degree,
+                x1 ^ x2 ^ x3 ^ @as(Lane, @splat(round_key)),
+            );
+            x0 = x1;
+            x1 = x2;
+            x2 = x3;
+            x3 = next;
+        }
+        inline for (0..degree) |lane| {
+            const offset = lane * block_len;
+            std.mem.writeInt(u32, output[offset..][0..4], x3[lane], .big);
+            std.mem.writeInt(u32, output[offset + 4 ..][0..4], x2[lane], .big);
+            std.mem.writeInt(u32, output[offset + 8 ..][0..4], x1[lane], .big);
+            std.mem.writeInt(u32, output[offset + 12 ..][0..4], x0[lane], .big);
+        }
     }
 };
+
+const CcmBlockCipher = struct {
+    pub const key_length = key_len;
+
+    schedule: KeySchedule,
+
+    pub fn init(key: Key) CcmBlockCipher {
+        return .{ .schedule = KeySchedule.init(key) };
+    }
+
+    pub inline fn encryptBlock(
+        self: *const CcmBlockCipher,
+        output: *Block,
+        input: *const Block,
+    ) void {
+        output.* = self.schedule.encryptBlock(input.*);
+    }
+
+    pub inline fn encryptPair(
+        self: *const CcmBlockCipher,
+        output: *[2 * block_len]u8,
+        input: *const [2 * block_len]u8,
+    ) void {
+        self.schedule.encryptWide2(output, input);
+    }
+};
+
+/// RFC 8998 AEAD_SM4_CCM with a 12-byte nonce and 16-byte tag.
+pub const Ccm = ccm.Ccm(CcmBlockCipher, 16);
 
 pub fn encryptBlock(key: Key, plaintext: Block) Block {
     return KeySchedule.init(key).encryptBlock(plaintext);
@@ -50,103 +147,78 @@ pub fn decryptBlock(key: Key, ciphertext: Block) Block {
     return KeySchedule.init(key).decryptBlock(ciphertext);
 }
 
-pub const Gcm = struct {
+pub const GcmContext = struct {
     pub const key_length = key_len;
     pub const nonce_length = 12;
     pub const tag_length = 16;
 
+    schedule: KeySchedule,
+    ghash: Ghash,
+
+    pub fn init(key: Key) GcmContext {
+        const schedule = KeySchedule.init(key);
+        var hash_subkey = schedule.encryptBlock([_]u8{0} ** block_len);
+        defer std.crypto.secureZero(u8, &hash_subkey);
+        return .{
+            .schedule = schedule,
+            .ghash = Ghash.init(&hash_subkey),
+        };
+    }
+
+    pub fn deinit(self: *GcmContext) void {
+        std.crypto.secureZero(u8, std.mem.asBytes(self));
+        self.* = undefined;
+    }
+
     pub fn encrypt(
+        self: *const GcmContext,
         ciphertext: []u8,
         tag: *[tag_length]u8,
         plaintext: []const u8,
         associated_data: []const u8,
         nonce: [nonce_length]u8,
-        key: Key,
     ) void {
         std.debug.assert(ciphertext.len == plaintext.len);
 
-        const schedule = KeySchedule.init(key);
-        const hash_subkey = schedule.encryptBlock([_]u8{0} ** block_len);
         var j0: Block = undefined;
         j0[0..nonce_length].* = nonce;
         std.mem.writeInt(u32, j0[nonce_length..][0..4], 1, .big);
-        const tag_mask = schedule.encryptBlock(j0);
-
-        const block_count =
-            (std.math.divCeil(usize, associated_data.len, Ghash.block_length) catch unreachable) +
-            (std.math.divCeil(usize, plaintext.len, Ghash.block_length) catch unreachable) +
-            1;
-        var mac = Ghash.initForBlockCount(&hash_subkey, block_count);
-        mac.update(associated_data);
-        mac.pad();
+        const tag_mask = self.schedule.encryptBlock(j0);
 
         var counter = j0;
         incrementGcmCounter(&counter);
-        ctrXor(schedule, ciphertext, plaintext, counter);
-        mac.update(ciphertext);
-        mac.pad();
-
-        var final_block: Block = undefined;
-        std.mem.writeInt(
-            u64,
-            final_block[0..8],
-            @as(u64, associated_data.len) * 8,
-            .big,
+        ctrXor(&self.schedule, ciphertext, plaintext, counter);
+        ghash_accelerated.create(
+            &self.ghash,
+            tag,
+            associated_data,
+            ciphertext,
         );
-        std.mem.writeInt(
-            u64,
-            final_block[8..16],
-            @as(u64, plaintext.len) * 8,
-            .big,
-        );
-        mac.update(&final_block);
-        mac.final(tag);
         for (tag_mask, 0..) |byte, index| tag[index] ^= byte;
     }
 
     pub fn decrypt(
+        self: *const GcmContext,
         plaintext: []u8,
         ciphertext: []const u8,
         tag: [tag_length]u8,
         associated_data: []const u8,
         nonce: [nonce_length]u8,
-        key: Key,
     ) std.crypto.errors.AuthenticationError!void {
         std.debug.assert(plaintext.len == ciphertext.len);
 
-        const schedule = KeySchedule.init(key);
-        const hash_subkey = schedule.encryptBlock([_]u8{0} ** block_len);
         var j0: Block = undefined;
         j0[0..nonce_length].* = nonce;
         std.mem.writeInt(u32, j0[nonce_length..][0..4], 1, .big);
-        const tag_mask = schedule.encryptBlock(j0);
+        const tag_mask = self.schedule.encryptBlock(j0);
 
-        const block_count =
-            (std.math.divCeil(usize, associated_data.len, Ghash.block_length) catch unreachable) +
-            (std.math.divCeil(usize, ciphertext.len, Ghash.block_length) catch unreachable) +
-            1;
-        var mac = Ghash.initForBlockCount(&hash_subkey, block_count);
-        mac.update(associated_data);
-        mac.pad();
-        mac.update(ciphertext);
-        mac.pad();
-
-        var final_block: Block = undefined;
-        std.mem.writeInt(
-            u64,
-            final_block[0..8],
-            @as(u64, associated_data.len) * 8,
-            .big,
-        );
-        std.mem.writeInt(
-            u64,
-            final_block[8..16],
-            @as(u64, ciphertext.len) * 8,
-            .big,
-        );
-        mac.update(&final_block);
         var computed_tag: [tag_length]u8 = undefined;
-        mac.final(&computed_tag);
+        ghash_accelerated.create(
+            &self.ghash,
+            &computed_tag,
+            associated_data,
+            ciphertext,
+        );
         for (tag_mask, 0..) |byte, index| computed_tag[index] ^= byte;
 
         if (!std.crypto.timing_safe.eql([tag_length]u8, computed_tag, tag)) {
@@ -157,14 +229,56 @@ pub const Gcm = struct {
 
         var counter = j0;
         incrementGcmCounter(&counter);
-        ctrXor(schedule, plaintext, ciphertext, counter);
+        ctrXor(&self.schedule, plaintext, ciphertext, counter);
+    }
+};
+
+pub const Gcm = struct {
+    pub const key_length = GcmContext.key_length;
+    pub const nonce_length = GcmContext.nonce_length;
+    pub const tag_length = GcmContext.tag_length;
+
+    pub fn encrypt(
+        ciphertext: []u8,
+        tag: *[tag_length]u8,
+        plaintext: []const u8,
+        associated_data: []const u8,
+        nonce: [nonce_length]u8,
+        key: Key,
+    ) void {
+        var context = GcmContext.init(key);
+        defer context.deinit();
+        context.encrypt(ciphertext, tag, plaintext, associated_data, nonce);
+    }
+
+    pub fn decrypt(
+        plaintext: []u8,
+        ciphertext: []const u8,
+        tag: [tag_length]u8,
+        associated_data: []const u8,
+        nonce: [nonce_length]u8,
+        key: Key,
+    ) std.crypto.errors.AuthenticationError!void {
+        var context = GcmContext.init(key);
+        defer context.deinit();
+        return context.decrypt(
+            plaintext,
+            ciphertext,
+            tag,
+            associated_data,
+            nonce,
+        );
     }
 };
 
 const Direction = enum { encrypt, decrypt };
 const Ghash = std.crypto.onetimeauth.Ghash;
 
-fn cryptBlock(round_keys: [rounds]u32, input: Block, direction: Direction) Block {
+fn cryptBlock(
+    round_keys: *const [rounds]u32,
+    input: Block,
+    direction: Direction,
+) Block {
     var x0 = std.mem.readInt(u32, input[0..4], .big);
     var x1 = std.mem.readInt(u32, input[4..8], .big);
     var x2 = std.mem.readInt(u32, input[8..12], .big);
@@ -191,7 +305,7 @@ fn cryptBlock(round_keys: [rounds]u32, input: Block, direction: Direction) Block
 }
 
 fn ctrXor(
-    schedule: KeySchedule,
+    schedule: *const KeySchedule,
     destination: []u8,
     source: []const u8,
     initial_counter: Block,
@@ -200,6 +314,54 @@ fn ctrXor(
 
     var counter = initial_counter;
     var offset: usize = 0;
+    if (comptime wide8_enabled) {
+        while (offset + 8 * block_len <= source.len) : (offset += 8 * block_len) {
+            var counters: [8 * block_len]u8 = undefined;
+            inline for (0..8) |index| {
+                counters[index * block_len ..][0..block_len].* = counter;
+                incrementGcmCounter(&counter);
+            }
+            var streams: [8 * block_len]u8 = undefined;
+            schedule.encryptWide8(&streams, &counters);
+            const Bytes = @Vector(8 * block_len, u8);
+            destination[offset..][0 .. 8 * block_len].* = @bitCast(
+                @as(Bytes, @bitCast(source[offset..][0 .. 8 * block_len].*)) ^
+                    @as(Bytes, @bitCast(streams)),
+            );
+        }
+    }
+    while (offset + 4 * block_len <= source.len) : (offset += 4 * block_len) {
+        var counter1 = counter;
+        incrementGcmCounter(&counter1);
+        var counter2 = counter1;
+        incrementGcmCounter(&counter2);
+        var counter3 = counter2;
+        incrementGcmCounter(&counter3);
+        const counters = counter ++ counter1 ++ counter2 ++ counter3;
+        var streams: [4 * block_len]u8 = undefined;
+        schedule.encryptWide4(&streams, &counters);
+        const Bytes = @Vector(4 * block_len, u8);
+        destination[offset..][0 .. 4 * block_len].* = @bitCast(
+            @as(Bytes, @bitCast(source[offset..][0 .. 4 * block_len].*)) ^
+                @as(Bytes, @bitCast(streams)),
+        );
+        counter = counter3;
+        incrementGcmCounter(&counter);
+    }
+    while (offset + 2 * block_len <= source.len) : (offset += 2 * block_len) {
+        var next_counter = counter;
+        incrementGcmCounter(&next_counter);
+        const counters = counter ++ next_counter;
+        var streams: [2 * block_len]u8 = undefined;
+        schedule.encryptWide2(&streams, &counters);
+        const Bytes = @Vector(2 * block_len, u8);
+        destination[offset..][0 .. 2 * block_len].* = @bitCast(
+            @as(Bytes, @bitCast(source[offset..][0 .. 2 * block_len].*)) ^
+                @as(Bytes, @bitCast(streams)),
+        );
+        counter = next_counter;
+        incrementGcmCounter(&counter);
+    }
     while (offset + block_len <= source.len) : (offset += block_len) {
         const stream = schedule.encryptBlock(counter);
         for (0..block_len) |index| {
@@ -224,6 +386,20 @@ fn incrementGcmCounter(counter: *Block) void {
 fn roundTransform(x: u32) u32 {
     const y = tau(x);
     return y ^ rotl(y, 2) ^ rotl(y, 10) ^ rotl(y, 18) ^ rotl(y, 24);
+}
+
+fn roundTransformWide(
+    comptime degree: usize,
+    x: @Vector(degree, u32),
+) @Vector(degree, u32) {
+    const Lane = @Vector(degree, u32);
+    var substituted: Lane = undefined;
+    inline for (0..degree) |lane| substituted[lane] = tau(x[lane]);
+    return substituted ^
+        std.math.rotl(Lane, substituted, 2) ^
+        std.math.rotl(Lane, substituted, 10) ^
+        std.math.rotl(Lane, substituted, 18) ^
+        std.math.rotl(Lane, substituted, 24);
 }
 
 fn keyTransform(x: u32) u32 {
@@ -311,6 +487,47 @@ test "SM4 block cipher official vector" {
     try std.testing.expectEqualSlices(u8, &plaintext, &opened);
 }
 
+test "SM4 wide encryption matches independent block calls" {
+    const key = decodeHex("0123456789abcdeffedcba9876543210");
+    const input = decodeHex(
+        "0123456789abcdeffedcba9876543210" ++
+            "00112233445566778899aabbccddeeff",
+    );
+    const schedule = KeySchedule.init(key);
+    var output: [2 * block_len]u8 = undefined;
+    schedule.encryptWide2(&output, &input);
+    try std.testing.expectEqual(
+        schedule.encryptBlock(input[0..block_len].*),
+        output[0..block_len].*,
+    );
+    try std.testing.expectEqual(
+        schedule.encryptBlock(input[block_len..][0..block_len].*),
+        output[block_len..][0..block_len].*,
+    );
+
+    const wide_input = input ++ input;
+    var wide_output: [4 * block_len]u8 = undefined;
+    schedule.encryptWide4(&wide_output, &wide_input);
+    inline for (0..4) |index| {
+        const offset = index * block_len;
+        try std.testing.expectEqual(
+            schedule.encryptBlock(wide_input[offset..][0..block_len].*),
+            wide_output[offset..][0..block_len].*,
+        );
+    }
+
+    const widest_input = wide_input ++ wide_input;
+    var widest_output: [8 * block_len]u8 = undefined;
+    schedule.encryptWide8(&widest_output, &widest_input);
+    inline for (0..8) |index| {
+        const offset = index * block_len;
+        try std.testing.expectEqual(
+            schedule.encryptBlock(widest_input[offset..][0..block_len].*),
+            widest_output[offset..][0..block_len].*,
+        );
+    }
+}
+
 test "SM4-GCM matches OpenSSL 3.6 SM4-GCM vector" {
     const key = [_]u8{0} ** key_len;
     const nonce = [_]u8{0} ** Gcm.nonce_length;
@@ -335,4 +552,74 @@ test "SM4-GCM matches OpenSSL 3.6 SM4-GCM vector" {
         error.AuthenticationFailed,
         Gcm.decrypt(&opened, &ciphertext, bad_tag, aad, nonce, key),
     );
+}
+
+test "SM4-CCM matches RFC 8998 appendix A.2" {
+    const key = decodeHex("0123456789abcdeffedcba9876543210");
+    const nonce = decodeHex("00001234567800000000abcd");
+    const plaintext = decodeHex(
+        "aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb" ++
+            "ccccccccccccccccdddddddddddddddd" ++
+            "eeeeeeeeeeeeeeeeffffffffffffffff" ++
+            "eeeeeeeeeeeeeeeeaaaaaaaaaaaaaaaa",
+    );
+    const associated_data = decodeHex(
+        "feedfacedeadbeeffeedfacedeadbeefabaddad2",
+    );
+    const expected_ciphertext = decodeHex(
+        "48af93501fa62adbcd414cce6034d895" ++
+            "dda1bf8f132f042098661572e7483094" ++
+            "fd12e518ce062c98acee28d95df4416b" ++
+            "ed31a2f04476c18bb40c84a74b97dc5b",
+    );
+    const expected_tag = decodeHex("16842d4fa186f56ab33256971fa110f4");
+
+    var ciphertext: [plaintext.len]u8 = undefined;
+    var tag: [Ccm.tag_length]u8 = undefined;
+    Ccm.encryptOneShot(
+        &ciphertext,
+        &tag,
+        &plaintext,
+        &associated_data,
+        nonce,
+        key,
+    );
+    try std.testing.expectEqual(expected_ciphertext, ciphertext);
+    try std.testing.expectEqual(expected_tag, tag);
+
+    var opened: [plaintext.len]u8 = undefined;
+    try Ccm.decryptOneShot(
+        &opened,
+        &ciphertext,
+        tag,
+        &associated_data,
+        nonce,
+        key,
+    );
+    try std.testing.expectEqual(plaintext, opened);
+    var in_place = ciphertext;
+    try Ccm.decryptOneShot(
+        &in_place,
+        &in_place,
+        tag,
+        &associated_data,
+        nonce,
+        key,
+    );
+    try std.testing.expectEqual(plaintext, in_place);
+
+    var bad_tag = tag;
+    bad_tag[0] ^= 1;
+    try std.testing.expectError(
+        error.AuthenticationFailed,
+        Ccm.decryptOneShot(
+            &opened,
+            &ciphertext,
+            bad_tag,
+            &associated_data,
+            nonce,
+            key,
+        ),
+    );
+    try std.testing.expectEqual([_]u8{0} ** plaintext.len, opened);
 }

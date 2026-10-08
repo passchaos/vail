@@ -5,8 +5,9 @@
 //! extension while computing the binder over the correctly truncated message.
 
 const std = @import("std");
+const sha256 = @import("../crypto/sha256.zig");
 
-const Sha256 = std.crypto.hash.sha2.Sha256;
+const Sha256 = sha256.Hash;
 const Sha384 = std.crypto.hash.sha2.Sha384;
 const Sm3 = @import("../crypto/sm3.zig").Hash;
 const key_schedule = @import("key_schedule.zig");

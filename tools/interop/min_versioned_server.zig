@@ -68,11 +68,16 @@ pub fn main(init: std.process.Init) !void {
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(std.heap.smp_allocator);
     var input: [64 * 1024]u8 = undefined;
+    var established: AutoServer.Established = undefined;
     while (true) {
         const received_len = try readSocket(client_fd, &input);
         var offset: usize = 0;
         while (offset < received_len) {
-            const result = try server.receive(input[offset..received_len], &output);
+            const result = try server.receiveInto(
+                input[offset..received_len],
+                &output,
+                &established,
+            );
             offset += result.consumed;
             if (output.items.len != 0) {
                 try writeAll(client_fd, output.items);
@@ -80,21 +85,35 @@ pub fn main(init: std.process.Init) !void {
             }
             if (result.event) |event| switch (event) {
                 .tls13 => |tls13_event| switch (tls13_event) {
-                    .established => |established| {
-                        var value = established;
-                        defer value.deinit();
+                    .established => {
+                        defer established.deinit();
                         std.debug.print("versioned server selected TLS 1.3\n", .{});
-                        return serveTls13(client_fd, &value, &input);
+                        return switch (established) {
+                            .tls13 => |*value| serveTls13(
+                                client_fd,
+                                value,
+                                &input,
+                                input[offset..received_len],
+                            ),
+                            .tls12 => error.UnexpectedProtocol,
+                        };
                     },
                     .peer_alert => return error.PeerAbortedHandshake,
                     else => {},
                 },
                 .tls12 => |tls12_event| switch (tls12_event) {
-                    .established => |established| {
-                        var value = established;
-                        defer value.deinit();
+                    .established => {
+                        defer established.deinit();
                         std.debug.print("versioned server selected TLS 1.2\n", .{});
-                        return serveTls12(client_fd, &value, &input);
+                        return switch (established) {
+                            .tls13 => error.UnexpectedProtocol,
+                            .tls12 => |*value| serveTls12(
+                                client_fd,
+                                value,
+                                &input,
+                                input[offset..received_len],
+                            ),
+                        };
                     },
                     .peer_alert => return error.PeerAbortedHandshake,
                     else => {},
@@ -108,13 +127,19 @@ fn serveTls13(
     fd: i32,
     established: anytype,
     input: []u8,
+    initial: []const u8,
 ) !void {
+    var pending = initial;
     while (true) {
-        const received_len = try readSocket(fd, input);
+        const chunk = if (pending.len != 0) blk: {
+            const bytes = pending;
+            pending = &.{};
+            break :blk bytes;
+        } else input[0..try readSocket(fd, input)];
         var offset: usize = 0;
-        while (offset < received_len) {
+        while (offset < chunk.len) {
             const result = try established.application.receive(
-                input[offset..received_len],
+                chunk[offset..],
             );
             offset += result.consumed;
             if (result.event) |event| switch (event) {
@@ -138,12 +163,18 @@ fn serveTls12(
     fd: i32,
     established: anytype,
     input: []u8,
+    initial: []const u8,
 ) !void {
+    var pending = initial;
     while (true) {
-        const received_len = try readSocket(fd, input);
+        const chunk = if (pending.len != 0) blk: {
+            const bytes = pending;
+            pending = &.{};
+            break :blk bytes;
+        } else input[0..try readSocket(fd, input)];
         var offset: usize = 0;
-        while (offset < received_len) {
-            const result = try established.receive(input[offset..received_len]);
+        while (offset < chunk.len) {
+            const result = try established.receive(chunk[offset..]);
             offset += result.consumed;
             if (result.event) |event| switch (event) {
                 .application_data => |data| if (data.len != 0) {

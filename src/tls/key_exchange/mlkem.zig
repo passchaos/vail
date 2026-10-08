@@ -48,12 +48,11 @@ pub fn Group(comptime params: Params) type {
         };
 
         pub fn clientStart(seed: [seed_len]u8) Error!ClientStart {
-            var key_pair = MLKem.KeyPair.generateDeterministic(seed) catch
+            const public_key = MLKem.PublicKey.generateDeterministic(seed) catch
                 return error.InvalidSecretKey;
-            defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
             return .{
                 .secret = .{ .seed = seed },
-                .share = key_pair.public_key.toBytes(),
+                .share = public_key.toBytes(),
             };
         }
 
@@ -82,11 +81,11 @@ pub fn Group(comptime params: Params) type {
             if (server_share.len != server_share_len) {
                 return error.InvalidServerShare;
             }
-            var key_pair = MLKem.KeyPair.generateDeterministic(
+            var secret_key = MLKem.SecretKey.generateDeterministic(
                 secret.seed,
             ) catch return error.InvalidSecretKey;
-            defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
-            return key_pair.secret_key.decaps(
+            defer secret_key.wipe();
+            return secret_key.decaps(
                 server_share[0..server_share_len],
             ) catch return error.KeyExchangeFailed;
         }

@@ -7,9 +7,11 @@ pub fn main(init: std.process.Init) !void {
     const plaintext = [_]u8{0x51} ** 1200;
     inline for (.{
         vail.tls.cipher_suite.Suite.aes_128_gcm_sha256,
+        vail.tls.cipher_suite.Suite.aes_128_ccm_sha256,
         vail.tls.cipher_suite.Suite.aes_256_gcm_sha384,
         vail.tls.cipher_suite.Suite.chacha20_poly1305_sha256,
         vail.tls.cipher_suite.Suite.sm4_gcm_sm3,
+        vail.tls.cipher_suite.Suite.sm4_ccm_sm3,
     }) |suite| {
         const traffic_secret = switch (suite.hash()) {
             .sha256 => vail.tls.secret.Secret.fromSha256(

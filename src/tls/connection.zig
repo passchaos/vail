@@ -65,7 +65,26 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
             read_secret: secret.Secret,
             write_secret: secret.Secret,
         ) Error!Self {
-            return initWithRecordSizeLimits(suite, read_secret, write_secret, null, null);
+            var result: Self = undefined;
+            try result.initInto(suite, read_secret, write_secret);
+            return result;
+        }
+
+        /// Initialize caller-owned storage without returning the inline record
+        /// and handshake buffers through an error union.
+        pub fn initInto(
+            self: *Self,
+            suite: cipher_suite.Suite,
+            read_secret: secret.Secret,
+            write_secret: secret.Secret,
+        ) Error!void {
+            return self.initIntoWithRecordSizeLimits(
+                suite,
+                read_secret,
+                write_secret,
+                null,
+                null,
+            );
         }
 
         pub fn initWithRecordSizeLimits(
@@ -75,24 +94,55 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
             local_limit: ?u16,
             peer_limit: ?u16,
         ) Error!Self {
+            var result: Self = undefined;
+            try result.initIntoWithRecordSizeLimits(
+                suite,
+                read_secret,
+                write_secret,
+                local_limit,
+                peer_limit,
+            );
+            return result;
+        }
+
+        /// Initialize caller-owned storage with explicit record-size limits.
+        pub fn initIntoWithRecordSizeLimits(
+            self: *Self,
+            suite: cipher_suite.Suite,
+            read_secret: secret.Secret,
+            write_secret: secret.Secret,
+            local_limit: ?u16,
+            peer_limit: ?u16,
+        ) Error!void {
             if (local_limit) |limit| _ = try record_size_limit.validate(limit);
             if (peer_limit) |limit| _ = try record_size_limit.validate(limit);
-            var result = Self{
-                .suite = suite,
-                .traffic = try key_update.Duplex.init(
-                    suite,
-                    read_secret,
-                    write_secret,
-                ),
-                .local_record_size_limit = local_limit,
-                .peer_record_size_limit = peer_limit,
-            };
-            if (local_limit) |limit| {
-                result.receiver.setMaxCiphertextFragmentLen(
-                    try record_size_limit.maxCiphertextFragment(limit),
-                );
-            }
-            return result;
+            const max_ciphertext_fragment_len = if (local_limit) |limit|
+                try record_size_limit.maxCiphertextFragmentWithTag(
+                    limit,
+                    suite.tagLen(),
+                )
+            else
+                record.max_ciphertext_len;
+            self.*.suite = suite;
+            self.*.traffic = try key_update.Duplex.init(
+                suite,
+                read_secret,
+                write_secret,
+            );
+            self.*.receiver.records.buffered = 0;
+            self.*.receiver.handshakes.buffered = 0;
+            self.*.receiver.max_ciphertext_fragment_len =
+                max_ciphertext_fragment_len;
+            self.*.receiver.pending_start = 0;
+            self.*.receiver.pending_end = 0;
+            self.*.receiver.peer_closed = false;
+            self.*.receiver.failed = false;
+            self.*.local_record_size_limit = local_limit;
+            self.*.peer_record_size_limit = peer_limit;
+            self.*.local_closed = false;
+            self.*.close_response_pending = false;
+            self.*.failed = false;
+            self.*.secrets_extracted = false;
         }
 
         pub fn deinit(self: *Self) void {
@@ -340,6 +390,56 @@ pub fn ApplicationConnection(comptime max_handshake_message_len: usize) type {
     };
 }
 
+test "application connection caller-owned initialization matches returned initialization" {
+    const std = @import("std");
+    const Connection = ApplicationConnection(256);
+    const read_secret = secret.Secret.fromSha256([_]u8{0x41} ** 32);
+    const write_secret = secret.Secret.fromSha256([_]u8{0x51} ** 32);
+
+    var returned = try Connection.initWithRecordSizeLimits(
+        .aes_128_gcm_sha256,
+        read_secret,
+        write_secret,
+        1_200,
+        1_300,
+    );
+    defer returned.deinit();
+    var caller_owned: Connection = undefined;
+    try caller_owned.initIntoWithRecordSizeLimits(
+        .aes_128_gcm_sha256,
+        read_secret,
+        write_secret,
+        1_200,
+        1_300,
+    );
+    defer caller_owned.deinit();
+
+    var returned_wire: [64]u8 = undefined;
+    var caller_owned_wire: [64]u8 = undefined;
+    const returned_len = try returned.sealApplicationData(
+        "caller-owned",
+        &returned_wire,
+    );
+    const caller_owned_len = try caller_owned.sealApplicationData(
+        "caller-owned",
+        &caller_owned_wire,
+    );
+    try std.testing.expectEqual(returned_len, caller_owned_len);
+    try std.testing.expectEqualSlices(
+        u8,
+        returned_wire[0..returned_len],
+        caller_owned_wire[0..caller_owned_len],
+    );
+    try std.testing.expectEqual(
+        returned.local_record_size_limit,
+        caller_owned.local_record_size_limit,
+    );
+    try std.testing.expectEqual(
+        returned.peer_record_size_limit,
+        caller_owned.peer_record_size_limit,
+    );
+}
+
 test "application connection handles fragmented data and bidirectional close" {
     const std = @import("std");
     const client_secret = secret.Secret.fromSha256([_]u8{0x21} ** 32);
@@ -572,9 +672,12 @@ test "application connection extracts directional record secrets atomically" {
 
     inline for ([_]cipher_suite.Suite{
         .aes_128_gcm_sha256,
+        .aes_128_ccm_sha256,
+        .aes_128_ccm_8_sha256,
         .aes_256_gcm_sha384,
         .chacha20_poly1305_sha256,
         .sm4_gcm_sm3,
+        .sm4_ccm_sm3,
     }) |suite| {
         const client_secret = switch (suite.hash()) {
             .sha256 => secret.Secret.fromSha256([_]u8{0xa1} ** 32),

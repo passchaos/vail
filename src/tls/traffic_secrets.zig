@@ -10,13 +10,16 @@ pub const Version = enum {
 
 pub const Algorithm = enum {
     aes_128_gcm,
+    aes_128_ccm,
+    aes_128_ccm_8,
     aes_256_gcm,
     chacha20_poly1305,
     sm4_gcm,
+    sm4_ccm,
 
     pub fn keyLen(self: Algorithm) usize {
         return switch (self) {
-            .aes_128_gcm, .sm4_gcm => 16,
+            .aes_128_gcm, .aes_128_ccm, .aes_128_ccm_8, .sm4_gcm, .sm4_ccm => 16,
             .aes_256_gcm, .chacha20_poly1305 => 32,
         };
     }

@@ -54,6 +54,18 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "chacha")
     else
         false;
+    const use_ccm = if (mode) |argument|
+        std.mem.eql(u8, argument, "ccm")
+    else
+        false;
+    const use_ccm8 = if (mode) |argument|
+        std.mem.eql(u8, argument, "ccm8")
+    else
+        false;
+    const use_sm4_ccm = if (mode) |argument|
+        std.mem.eql(u8, argument, "sm4-ccm")
+    else
+        false;
     const use_ca_hints = if (mode) |argument|
         std.mem.eql(u8, argument, "ca-hints")
     else
@@ -75,19 +87,62 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "certificate-signatures-mtls")
     else
         false;
+    const use_p521 = if (mode) |argument|
+        std.mem.eql(u8, argument, "p521") or
+            std.mem.eql(u8, argument, "p521-all")
+    else
+        false;
+    const use_p521_kx = if (mode) |argument|
+        std.mem.eql(u8, argument, "p521-kx") or
+            std.mem.eql(u8, argument, "p521-all")
+    else
+        false;
+    const port = if (args.next()) |encoded|
+        try std.fmt.parseUnsigned(u16, encoded, 10)
+    else
+        24444;
+    const p521_private_hex = args.next();
+    const p521_certificate_hex = args.next();
     if (args.next() != null) return error.InvalidArguments;
+    if (use_p521 != (p521_private_hex != null and
+        p521_certificate_hex != null))
+    {
+        return error.InvalidArguments;
+    }
+    var p521_private_der: ?[]u8 = null;
+    defer if (p521_private_der) |bytes| {
+        std.crypto.secureZero(u8, bytes);
+        init.gpa.free(bytes);
+    };
+    var p521_certificate_der: ?[]u8 = null;
+    defer if (p521_certificate_der) |bytes| init.gpa.free(bytes);
+    if (use_p521) {
+        p521_private_der = try decodeHexAlloc(
+            init.gpa,
+            p521_private_hex.?,
+        );
+        p521_certificate_der = try decodeHexAlloc(
+            init.gpa,
+            p521_certificate_hex.?,
+        );
+    }
     const fd = try sysSocket();
     defer _ = linux.close(fd);
     try sysReuseAddr(fd);
     var addr = std.mem.zeroes(linux.sockaddr.in);
     addr.family = linux.AF.INET;
-    addr.port = std.mem.nativeToBig(u16, 24444);
+    addr.port = std.mem.nativeToBig(u16, port);
     addr.addr = std.mem.nativeToBig(u32, 0x7f000001);
     try sysBind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
     try sysListen(fd, 1);
     const client = try sysAccept(fd);
     defer _ = linux.close(client);
-    var key_material = if (use_ech and !force_ech_hrr)
+    var key_material = if (use_p521_kx)
+        vail.tls.key_exchange.ServerKeyMaterial{
+            .secp521r1 = [_]u8{0} **
+                (vail.tls.key_exchange.p521.secret_len - 1) ++ .{2},
+        }
+    else if (use_ech and !force_ech_hrr)
         vail.tls.key_exchange.ServerKeyMaterial{
             .x25519 = [_]u8{0x71} ** vail.tls.key_exchange.secret_len,
         }
@@ -96,7 +151,9 @@ pub fn main(init: std.process.Init) !void {
             .secp256r1 = [_]u8{0} **
                 (vail.tls.key_exchange.p256.secret_len - 1) ++ .{1},
         };
-    const selected_certificate: []const u8 = if (use_constrained_pss)
+    const selected_certificate: []const u8 = if (use_p521)
+        p521_certificate_der.?
+    else if (use_constrained_pss)
         vail.x509.testing.rsa_pss_constrained_leaf
     else
         &rsa_cert_der;
@@ -109,16 +166,29 @@ pub fn main(init: std.process.Init) !void {
     );
     var prepared_private_key = try private_key.prepare();
     defer prepared_private_key.deinit();
-    const signer = vail.tls.auth.Signer{
-        .rsa_pss = .{
-            .prepared_key = &prepared_private_key,
-            .signature_scheme = if (use_constrained_pss)
-                vail.tls.auth.signature_scheme_rsa_pss_pss_sha384
-            else
-                vail.tls.auth.signature_scheme_rsa_pss_rsae_sha256,
+    var p521_key: vail.crypto.p521.KeyPair = undefined;
+    var p521_key_initialized = false;
+    defer if (p521_key_initialized) p521_key.deinit();
+    if (use_p521) {
+        p521_key = try vail.crypto.p521.KeyPair.fromDer(p521_private_der.?);
+        p521_key_initialized = true;
+    }
+    const signer = if (use_p521)
+        vail.tls.auth.Signer{ .ecdsa_p521_sha512 = .{
+            .key_pair = &p521_key,
             .io = init.io,
-        },
-    };
+        } }
+    else
+        vail.tls.auth.Signer{
+            .rsa_pss = .{
+                .prepared_key = &prepared_private_key,
+                .signature_scheme = if (use_constrained_pss)
+                    vail.tls.auth.signature_scheme_rsa_pss_pss_sha384
+                else
+                    vail.tls.auth.signature_scheme_rsa_pss_rsae_sha256,
+                .io = init.io,
+            },
+        };
     var certificate_message: std.ArrayList(u8) = .empty;
     defer certificate_message.deinit(std.heap.smp_allocator);
     try vail.tls.auth.writeCertificate(
@@ -185,7 +255,10 @@ pub fn main(init: std.process.Init) !void {
         try vail.tls.ech.parseConfig(ech_config_bytes.items)
     else
         null;
-    const regular_groups = [_]u16{vail.tls.key_exchange.named_group_secp256r1};
+    const regular_groups = [_]u16{if (use_p521_kx)
+        vail.tls.key_exchange.named_group_secp521r1
+    else
+        vail.tls.key_exchange.named_group_secp256r1};
     const ech_groups = [_]u16{vail.tls.key_exchange.named_group_x25519};
     const ca_identity_set = vail.tls.server_connection.IdentitySet{
         .entries = &.{.{
@@ -203,6 +276,12 @@ pub fn main(init: std.process.Init) !void {
         .policy = .{
             .cipher_suites = if (use_chacha)
                 &.{.chacha20_poly1305_sha256}
+            else if (use_ccm)
+                &.{.aes_128_ccm_sha256}
+            else if (use_ccm8)
+                &.{.aes_128_ccm_8_sha256}
+            else if (use_sm4_ccm)
+                &.{.sm4_ccm_sm3}
             else
                 &.{.aes_128_gcm_sha256},
             .groups = if (use_ech and !force_ech_hrr)
@@ -292,6 +371,9 @@ pub fn main(init: std.process.Init) !void {
     };
     defer established.deinit();
     std.debug.print("client finished verified\n", .{});
+    if (use_p521_kx) {
+        std.debug.print("P-521 ECDH negotiated\n", .{});
+    }
     if (use_constrained_pss) {
         std.debug.print("constrained RSA-PSS server verified\n", .{});
     }
@@ -331,6 +413,37 @@ pub fn main(init: std.process.Init) !void {
         printTrafficSecret("client", &secrets.rx);
         printTrafficSecret("server", &secrets.tx);
         return;
+    }
+    if (use_sm4_ccm) {
+        while (true) {
+            const event = try driver.nextApplication(&established.application);
+            switch (event) {
+                .application_data => |bytes| {
+                    if (bytes.len == 0) continue;
+                    if (!std.mem.eql(u8, bytes, "GET / HTTP/1.0\r\n\r\n")) {
+                        return error.UnexpectedApplicationData;
+                    }
+                    break;
+                },
+                .post_handshake => {},
+                .key_update => {
+                    if (established.application.keyUpdateResponseRequired()) {
+                        var response: [64]u8 = undefined;
+                        const response_len = try established.application
+                            .sealKeyUpdateResponse(&response);
+                        try writeAll(client, response[0..response_len]);
+                    }
+                },
+                .alert => return error.PeerAbortedHandshake,
+            }
+        }
+        std.debug.print("client application data verified\n", .{});
+        var response_record: [256]u8 = undefined;
+        const response_len = try established.application.sealApplicationData(
+            "HTTP/1.0 200 OK\r\n\r\n",
+            &response_record,
+        );
+        try writeAll(client, response_record[0..response_len]);
     }
     var close_record: [64]u8 = undefined;
     const close_len = try established.application.sealCloseNotify(
@@ -445,6 +558,33 @@ const SocketHandshakeDriver = struct {
             self.end = rc;
         }
     }
+
+    fn nextApplication(
+        self: *SocketHandshakeDriver,
+        application: anytype,
+    ) !vail.tls.connection.Event {
+        while (true) {
+            const drained = try application.receive("");
+            if (drained.event) |event| return event;
+            if (self.start < self.end) {
+                const result = try application.receive(
+                    self.buffer[self.start..self.end],
+                );
+                self.start += result.consumed;
+                if (result.event) |event| return event;
+            }
+            if (self.start != self.end) return error.ServerDriverStalled;
+            const rc = linux.read(
+                self.fd,
+                &self.buffer,
+                self.buffer.len,
+            );
+            if (linux.errno(rc) != .SUCCESS) return error.ReadFailed;
+            if (rc == 0) return error.EndOfStream;
+            self.start = 0;
+            self.end = rc;
+        }
+    }
 };
 
 fn writeAll(fd: i32, bytes: []const u8) !void {
@@ -470,5 +610,19 @@ fn decodeHex(comptime encoded: []const u8) [encoded.len / 2]u8 {
     @setEvalBranchQuota(10_000);
     var result: [encoded.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&result, encoded) catch unreachable;
+    return result;
+}
+
+fn decodeHexAlloc(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) ![]u8 {
+    if (encoded.len == 0 or encoded.len % 2 != 0) {
+        return error.InvalidArguments;
+    }
+    const result = try allocator.alloc(u8, encoded.len / 2);
+    errdefer allocator.free(result);
+    _ = std.fmt.hexToBytes(result, encoded) catch
+        return error.InvalidArguments;
     return result;
 }

@@ -13,8 +13,8 @@
 
 const std = @import("std");
 
-const MLKem768 = std.crypto.kem.ml_kem.MLKem768;
-const X25519 = std.crypto.dh.X25519;
+const MLKem768 = @import("../../crypto/mlkem.zig").nist.MLKem768;
+const X25519 = @import("../../crypto/x25519.zig").X25519;
 
 pub const named_group: u16 = 0x11ec;
 
@@ -72,10 +72,9 @@ pub fn clientStart(
 ) Error!ClientStart {
     const x25519_public = X25519.recoverPublicKey(x25519_secret) catch
         return error.InvalidSecretKey;
-    var key_pair = MLKem768.KeyPair.generateDeterministic(mlkem_seed) catch
+    const public_key = MLKem768.PublicKey.generateDeterministic(mlkem_seed) catch
         return error.InvalidSecretKey;
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
-    const mlkem_public = key_pair.public_key.toBytes();
+    const mlkem_public = public_key.toBytes();
 
     var share: [client_share_len]u8 = undefined;
     @memcpy(share[0..mlkem_public_len], &mlkem_public);
@@ -109,9 +108,11 @@ pub fn serverRespond(
     );
 
     const client_x25519 = client_share[mlkem_public_len..][0..x25519_public_len].*;
-    var x25519_shared = X25519.scalarmult(
-        x25519_secret,
-        client_x25519,
+    var x25519_shared: [X25519.shared_length]u8 = undefined;
+    X25519.scalarmultInto(
+        &x25519_shared,
+        &x25519_secret,
+        &client_x25519,
     ) catch return error.InvalidClientShare;
     defer std.crypto.secureZero(u8, &x25519_shared);
     const x25519_public = X25519.recoverPublicKey(x25519_secret) catch
@@ -138,20 +139,22 @@ pub fn clientSharedSecret(
         return error.InvalidServerShare;
     }
 
-    var key_pair = MLKem768.KeyPair.generateDeterministic(
+    var secret_key = MLKem768.SecretKey.generateDeterministic(
         secret.mlkem_seed,
     ) catch return error.InvalidSecretKey;
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
-    var mlkem_shared = key_pair.secret_key.decaps(
+    defer secret_key.wipe();
+    var mlkem_shared = secret_key.decaps(
         server_share[0..mlkem_ciphertext_len],
     ) catch return error.KeyExchangeFailed;
     defer std.crypto.secureZero(u8, &mlkem_shared);
 
     const server_x25519 =
         server_share[mlkem_ciphertext_len..][0..x25519_public_len].*;
-    var x25519_shared = X25519.scalarmult(
-        secret.x25519_secret,
-        server_x25519,
+    var x25519_shared: [X25519.shared_length]u8 = undefined;
+    X25519.scalarmultInto(
+        &x25519_shared,
+        &secret.x25519_secret,
+        &server_x25519,
     ) catch return error.InvalidServerShare;
     defer std.crypto.secureZero(u8, &x25519_shared);
     return combine(mlkem_shared, x25519_shared);

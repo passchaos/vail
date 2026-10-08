@@ -290,8 +290,10 @@ pub fn verifyServerAndWriteClientFlight(
         );
         defer certificate.deinit(allocator);
         if (negotiated_server_certificate_type == .raw_public_key) {
-            if (certificate.ocsp_response != null) {
-                return error.InvalidServerFlight;
+            if (certificate.ocsp_responses) |responses| {
+                for (responses) |response| {
+                    if (response != null) return error.InvalidServerFlight;
+                }
             }
             try options.server_verifier.verifyRawPublicKey(
                 options.server_name,
@@ -303,11 +305,19 @@ pub fn verifyServerAndWriteClientFlight(
             )) {
                 return error.UnsupportedSignatureScheme;
             }
-            try options.server_verifier.verifyTrustWithOcsp(
-                options.server_name,
-                certificate.entries,
-                certificate.ocsp_response,
-            );
+            if (certificate.ocsp_responses) |responses| {
+                try options.server_verifier.verifyTrustWithOcspResponses(
+                    options.server_name,
+                    certificate.entries,
+                    responses,
+                );
+            } else {
+                try options.server_verifier.verifyTrustWithOcsp(
+                    options.server_name,
+                    certificate.entries,
+                    certificate.ocsp_response,
+                );
+            }
         }
         state.update(certificate_wire);
         const parsed_certificate_verify = try auth.parseCertificateVerify(
@@ -315,10 +325,11 @@ pub fn verifyServerAndWriteClientFlight(
                 return error.InvalidServerFlight,
         );
         const certificate_hash = state.digest();
-        try auth.verifyCertificateVerify(
+        try options.server_verifier.verifyPeerCertificateVerify(
             certificate.entries[0],
             parsed_certificate_verify,
             certificate_hash.bytes(),
+            .server,
         );
         state.update(flight.certificate_verify.?);
         const authenticated_chain = try copyCertificateChain(
@@ -596,6 +607,7 @@ fn requestSupportsSigner(
         auth.signature_scheme_ed25519 => request.supports_ed25519,
         auth.signature_scheme_ecdsa_secp256r1_sha256 => request.supports_ecdsa_p256_sha256,
         auth.signature_scheme_ecdsa_secp384r1_sha384 => request.supports_ecdsa_p384_sha384,
+        auth.signature_scheme_ecdsa_secp521r1_sha512 => request.supports_ecdsa_p521_sha512,
         auth.signature_scheme_sm2sig_sm3 => request.supports_sm2sig_sm3,
         auth.signature_scheme_ml_dsa_44 => request.supports_ml_dsa_44,
         auth.signature_scheme_ml_dsa_65 => request.supports_ml_dsa_65,

@@ -1,6 +1,10 @@
 //! TLS 1.3 classical and post-quantum hybrid key-exchange primitives.
 
 const std = @import("std");
+const crypto_p256 = @import("../crypto/p256.zig");
+const crypto_p384 = @import("../crypto/p384.zig");
+const crypto_p521 = @import("../crypto/p521.zig");
+const X25519 = @import("../crypto/x25519.zig").X25519;
 
 pub const x25519_mlkem768 =
     @import("key_exchange/x25519_mlkem768.zig");
@@ -11,9 +15,9 @@ pub const secp256r1_mlkem768 =
 pub const secp384r1_mlkem1024 =
     @import("key_exchange/secp384r1_mlkem1024.zig").implementation;
 
-pub const secret_len = std.crypto.dh.X25519.secret_length;
-pub const public_len = std.crypto.dh.X25519.public_length;
-pub const shared_len = std.crypto.dh.X25519.shared_length;
+pub const secret_len = X25519.secret_length;
+pub const public_len = X25519.public_length;
+pub const shared_len = X25519.shared_length;
 
 pub const Error = error{
     InvalidSecretKey,
@@ -24,9 +28,10 @@ pub const Error = error{
 pub const named_group_x25519: u16 = 0x001d;
 pub const named_group_secp256r1: u16 = 0x0017;
 pub const named_group_secp384r1: u16 = 0x0018;
+pub const named_group_secp521r1: u16 = 0x0019;
 
 pub fn publicKey(secret_key: [secret_len]u8) Error![public_len]u8 {
-    return std.crypto.dh.X25519.recoverPublicKey(secret_key) catch
+    return X25519.recoverPublicKey(secret_key) catch
         return error.KeyExchangeFailed;
 }
 
@@ -40,41 +45,31 @@ pub const p256 = struct {
     pub fn publicKey(
         secret_key: [p256.secret_len]u8,
     ) Error![p256.public_len]u8 {
-        try validateSecret(secret_key);
-        const public = Curve.basePoint.mul(
-            secret_key,
-            .big,
-        ) catch return error.KeyExchangeFailed;
-        return public.toUncompressedSec1();
+        return crypto_p256.ecdhPublicKey(secret_key) catch |err| switch (err) {
+            error.InvalidSecretKey => error.InvalidSecretKey,
+            error.InvalidPublicKey,
+            error.KeyAgreementFailed,
+            => error.KeyExchangeFailed,
+        };
     }
 
     pub fn sharedSecret(
         secret_key: [p256.secret_len]u8,
         peer_public_key: []const u8,
     ) Error![p256.shared_len]u8 {
-        try validateSecret(secret_key);
         if (peer_public_key.len != p256.public_len or
             peer_public_key[0] != 0x04)
         {
             return error.InvalidPublicKey;
         }
-        const peer = Curve.fromSec1(peer_public_key) catch
-            return error.InvalidPublicKey;
-        // `mul` uses the constant-time table path; `mulPublic` is for public
-        // signature scalars and must not be used with an ECDH private key.
-        const shared = peer.mul(secret_key, .big) catch
-            return error.KeyExchangeFailed;
-        return shared.affineCoordinates().x.toBytes(.big);
-    }
-
-    fn validateSecret(
-        secret_key: [p256.secret_len]u8,
-    ) Error!void {
-        const scalar = Curve.scalar.Scalar.fromBytes(
+        return crypto_p256.ecdhSharedSecret(
             secret_key,
-            .big,
-        ) catch return error.InvalidSecretKey;
-        if (scalar.isZero()) return error.InvalidSecretKey;
+            peer_public_key,
+        ) catch |err| switch (err) {
+            error.InvalidSecretKey => error.InvalidSecretKey,
+            error.InvalidPublicKey => error.InvalidPublicKey,
+            error.KeyAgreementFailed => error.KeyExchangeFailed,
+        };
     }
 };
 
@@ -88,41 +83,65 @@ pub const p384 = struct {
     pub fn publicKey(
         secret_key: [p384.secret_len]u8,
     ) Error![p384.public_len]u8 {
-        try validateSecret(secret_key);
-        const public = Curve.basePoint.mul(
-            secret_key,
-            .big,
-        ) catch return error.KeyExchangeFailed;
-        return public.toUncompressedSec1();
+        return crypto_p384.ecdhPublicKey(secret_key) catch |err| switch (err) {
+            error.InvalidSecretKey => error.InvalidSecretKey,
+            error.InvalidPublicKey,
+            error.KeyAgreementFailed,
+            => error.KeyExchangeFailed,
+        };
     }
 
     pub fn sharedSecret(
         secret_key: [p384.secret_len]u8,
         peer_public_key: []const u8,
     ) Error![p384.shared_len]u8 {
-        try validateSecret(secret_key);
         if (peer_public_key.len != p384.public_len or
             peer_public_key[0] != 0x04)
         {
             return error.InvalidPublicKey;
         }
-        const peer = Curve.fromSec1(peer_public_key) catch
-            return error.InvalidPublicKey;
-        // `mul` takes the constant-time path required for private ECDH
-        // scalars; the public-scalar multiplication API is not appropriate.
-        const shared = peer.mul(secret_key, .big) catch
-            return error.KeyExchangeFailed;
-        return shared.affineCoordinates().x.toBytes(.big);
+        return crypto_p384.ecdhSharedSecret(
+            secret_key,
+            peer_public_key,
+        ) catch |err| switch (err) {
+            error.InvalidSecretKey => error.InvalidSecretKey,
+            error.InvalidPublicKey => error.InvalidPublicKey,
+            error.KeyAgreementFailed => error.KeyExchangeFailed,
+        };
+    }
+};
+
+pub const p521 = struct {
+    pub const secret_len = crypto_p521.secret_key_encoded_length;
+    pub const public_len = crypto_p521.uncompressed_sec1_encoded_length;
+    pub const shared_len = crypto_p521.secret_key_encoded_length;
+
+    pub fn publicKey(secret_key: [p521.secret_len]u8) Error![p521.public_len]u8 {
+        return crypto_p521.ecdhPublicKey(secret_key) catch |err| switch (err) {
+            error.InvalidSecretKey => error.InvalidSecretKey,
+            error.InvalidPublicKey,
+            error.KeyAgreementFailed,
+            => error.KeyExchangeFailed,
+        };
     }
 
-    fn validateSecret(
-        secret_key: [p384.secret_len]u8,
-    ) Error!void {
-        const scalar = Curve.scalar.Scalar.fromBytes(
+    pub fn sharedSecret(
+        secret_key: [p521.secret_len]u8,
+        peer_public_key: []const u8,
+    ) Error![p521.shared_len]u8 {
+        if (peer_public_key.len != p521.public_len or
+            peer_public_key[0] != 0x04)
+        {
+            return error.InvalidPublicKey;
+        }
+        return crypto_p521.ecdhSharedSecret(
             secret_key,
-            .big,
-        ) catch return error.InvalidSecretKey;
-        if (scalar.isZero()) return error.InvalidSecretKey;
+            peer_public_key,
+        ) catch |err| switch (err) {
+            error.InvalidSecretKey => error.InvalidSecretKey,
+            error.InvalidPublicKey => error.InvalidPublicKey,
+            error.KeyAgreementFailed => error.KeyExchangeFailed,
+        };
     }
 };
 
@@ -133,10 +152,15 @@ pub fn sharedSecret(
     if (peer_public_key.len != public_len) {
         return error.InvalidPublicKey;
     }
-    return std.crypto.dh.X25519.scalarmult(
-        secret_key,
-        peer_public_key[0..public_len].*,
+    var owned_secret = secret_key;
+    defer std.crypto.secureZero(u8, &owned_secret);
+    var shared_secret: [shared_len]u8 = undefined;
+    X25519.scalarmultInto(
+        &shared_secret,
+        &owned_secret,
+        peer_public_key[0..public_len],
     ) catch return error.KeyExchangeFailed;
+    return shared_secret;
 }
 
 pub const max_server_share_len = secp384r1_mlkem1024.server_share_len;
@@ -148,6 +172,7 @@ pub const ClientKeyMaterial = union(enum) {
     x25519: [secret_len]u8,
     secp256r1: [p256.secret_len]u8,
     secp384r1: [p384.secret_len]u8,
+    secp521r1: [p521.secret_len]u8,
     mlkem768: [mlkem768.seed_len]u8,
     mlkem1024: [mlkem1024.seed_len]u8,
     x25519_mlkem768: struct {
@@ -168,6 +193,7 @@ pub const ClientKeyMaterial = union(enum) {
             .x25519 => named_group_x25519,
             .secp256r1 => named_group_secp256r1,
             .secp384r1 => named_group_secp384r1,
+            .secp521r1 => named_group_secp521r1,
             .mlkem768 => mlkem768.named_group,
             .mlkem1024 => mlkem1024.named_group,
             .x25519_mlkem768 => x25519_mlkem768.named_group,
@@ -194,6 +220,9 @@ pub const ClientKeyMaterial = union(enum) {
             ),
             .secp384r1 => |private| result.setShare(
                 &(try p384.publicKey(private)),
+            ),
+            .secp521r1 => |private| result.setShare(
+                &(try p521.publicKey(private)),
             ),
             .mlkem768 => |seed| {
                 var started = mlkem768.clientStart(seed) catch |err|
@@ -273,6 +302,11 @@ pub const ClientExchange = struct {
             },
             .secp384r1 => |private| blk: {
                 var shared = try p384.sharedSecret(private, server_share);
+                defer std.crypto.secureZero(u8, &shared);
+                break :blk SharedSecret.init(&shared);
+            },
+            .secp521r1 => |private| blk: {
+                var shared = try p521.sharedSecret(private, server_share);
                 defer std.crypto.secureZero(u8, &shared);
                 break :blk SharedSecret.init(&shared);
             },
@@ -380,6 +414,7 @@ pub const ServerKeyMaterial = union(enum) {
     x25519: [secret_len]u8,
     secp256r1: [p256.secret_len]u8,
     secp384r1: [p384.secret_len]u8,
+    secp521r1: [p521.secret_len]u8,
     mlkem768: [mlkem768.encaps_seed_len]u8,
     mlkem1024: [mlkem1024.encaps_seed_len]u8,
     x25519_mlkem768: struct {
@@ -400,6 +435,7 @@ pub const ServerKeyMaterial = union(enum) {
             .x25519 => named_group_x25519,
             .secp256r1 => named_group_secp256r1,
             .secp384r1 => named_group_secp384r1,
+            .secp521r1 => named_group_secp521r1,
             .mlkem768 => mlkem768.named_group,
             .mlkem1024 => mlkem1024.named_group,
             .x25519_mlkem768 => x25519_mlkem768.named_group,
@@ -428,6 +464,12 @@ pub const ServerKeyMaterial = union(enum) {
             .secp384r1 => |private| blk: {
                 const public = try p384.publicKey(private);
                 var shared = try p384.sharedSecret(private, client_share);
+                defer std.crypto.secureZero(u8, &shared);
+                break :blk ServerExchange.init(&public, &shared);
+            },
+            .secp521r1 => |private| blk: {
+                const public = try p521.publicKey(private);
+                var shared = try p521.sharedSecret(private, client_share);
                 defer std.crypto.secureZero(u8, &shared);
                 break :blk ServerExchange.init(&public, &shared);
             },
@@ -585,6 +627,33 @@ test "server key material owns classical and hybrid response construction" {
         u8,
         &hybrid_shared,
         hybrid_response.sharedSecretBytes(),
+    );
+}
+
+test "generic key material completes P-521 ECDH" {
+    var client_secret = [_]u8{0} ** p521.secret_len;
+    client_secret[client_secret.len - 1] = 7;
+    var client_material = ClientKeyMaterial{ .secp521r1 = client_secret };
+    var client = try client_material.start();
+    errdefer client.deinit();
+
+    var server_secret = [_]u8{0} ** p521.secret_len;
+    server_secret[server_secret.len - 1] = 11;
+    var server_material = ServerKeyMaterial{ .secp521r1 = server_secret };
+    defer server_material.wipe();
+    var response = try server_material.respond(client.clientShare());
+    defer response.deinit();
+    try std.testing.expectEqual(named_group_secp521r1, client.namedGroup());
+    try std.testing.expectEqual(named_group_secp521r1, server_material.namedGroup());
+    try std.testing.expectEqual(@as(usize, p521.public_len), client.clientShare().len);
+    try std.testing.expectEqual(@as(usize, p521.public_len), response.serverShare().len);
+    var client_shared = try client.complete(response.serverShare());
+    defer client_shared.deinit();
+
+    try std.testing.expectEqualSlices(
+        u8,
+        response.sharedSecretBytes(),
+        client_shared.bytes(),
     );
 }
 

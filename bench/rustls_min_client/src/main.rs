@@ -13,6 +13,7 @@ use std::time::Duration;
 #[derive(Debug)]
 struct NoVerifier {
     root_hints: Option<Vec<DistinguishedName>>,
+    p521: bool,
 }
 
 #[derive(Debug)]
@@ -78,26 +79,43 @@ impl ServerCertVerifier for NoVerifier {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        if self.p521 && dss.scheme != SignatureScheme::ECDSA_NISTP521_SHA512 {
+            return Err(Error::General("unexpected TLS 1.3 signature scheme".into()));
+        }
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        if self.p521 {
+            return vec![SignatureScheme::ECDSA_NISTP521_SHA512];
+        }
         vec![
             SignatureScheme::ECDSA_NISTP256_SHA256,
             SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
             SignatureScheme::ED25519,
             SignatureScheme::RSA_PSS_SHA256,
         ]
@@ -105,13 +123,21 @@ impl ServerCertVerifier for NoVerifier {
 }
 
 fn main() {
-    let mode = std::env::args().nth(1);
+    let mut args = std::env::args();
+    let _exe = args.next();
+    let mode = args.next();
+    let port = args
+        .next()
+        .map(|value| value.parse::<u16>().expect("valid port"))
+        .unwrap_or(24444);
+    assert!(args.next().is_none(), "unexpected argument");
     let ech_enabled = mode.as_deref() == Some("ech");
     let zstd_enabled = mode.as_deref() == Some("zstd");
     let key_log_enabled = mode.as_deref() == Some("keylog");
     let extract_secrets = mode.as_deref() == Some("extract-secrets");
     let ca_hints_enabled = mode.as_deref() == Some("ca-hints");
     let ticket_request_enabled = mode.as_deref() == Some("ticket-request");
+    let p521_enabled = mode.as_deref() == Some("p521");
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let builder = ClientConfig::builder_with_provider(provider);
     let builder = if ech_enabled {
@@ -138,6 +164,7 @@ fn main() {
             } else {
                 None
             },
+            p521: p521_enabled,
         }));
     config.alpn_protocols.push(b"h2".to_vec());
     if zstd_enabled {
@@ -156,7 +183,7 @@ fn main() {
 
     let name = ServerName::try_from("localhost").unwrap();
     let mut conn = ClientConnection::new(Arc::new(config), name).unwrap();
-    let mut sock = TcpStream::connect("127.0.0.1:24444").unwrap();
+    let mut sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
     sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     sock.set_write_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -192,6 +219,9 @@ fn main() {
         conn.alpn_protocol(),
         conn.ech_status(),
     );
+    if p521_enabled {
+        println!("rustls P-521 TLS 1.3 signature verified");
+    }
 }
 
 fn print_traffic_secret(direction: &str, (sequence, secret): (u64, ConnectionTrafficSecrets)) {

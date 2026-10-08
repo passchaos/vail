@@ -41,7 +41,16 @@ pub fn maxApplicationData(value: u16) Error!usize {
 }
 
 pub fn maxCiphertextFragment(value: u16) Error!usize {
-    return @as(usize, try validate(value)) + tls13_tag_len;
+    return maxCiphertextFragmentWithTag(value, tls13_tag_len);
+}
+
+/// Convert an RFC 8449 TLSInnerPlaintext limit to the corresponding
+/// TLSCiphertext fragment limit for the negotiated AEAD tag size.
+pub fn maxCiphertextFragmentWithTag(
+    value: u16,
+    tag_length: usize,
+) Error!usize {
+    return @as(usize, try validate(value)) + tag_length;
 }
 
 test "RFC 8449 record size limit validates exact wire bounds" {
@@ -50,6 +59,10 @@ test "RFC 8449 record size limit validates exact wire bounds" {
     try std.testing.expectEqualSlices(u8, &.{ 0x04, 0x00 }, &(try encode(1024)));
     try std.testing.expectEqual(@as(usize, 1023), try maxApplicationData(1024));
     try std.testing.expectEqual(@as(usize, 1040), try maxCiphertextFragment(1024));
+    try std.testing.expectEqual(
+        @as(usize, 1032),
+        try maxCiphertextFragmentWithTag(1024, 8),
+    );
     try std.testing.expectError(error.InvalidRecordSizeLimit, parse(&.{0}));
     try std.testing.expectError(error.InvalidRecordSizeLimit, parse(&.{ 0, 63 }));
     try std.testing.expectError(

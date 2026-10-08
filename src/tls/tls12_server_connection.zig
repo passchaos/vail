@@ -1,8 +1,8 @@
 //! Incremental TLS 1.2 ECDHE server state.
 //!
 //! The state supports the modern ECDHE-RSA/ECDHE-ECDSA AES-GCM and ChaCha20
-//! suites over P-256/P-384, optional or required client authentication, and
-//! mandatory RFC 7627 Extended Master Secret by default. No legacy CBC,
+//! suites over P-256/P-384/P-521, optional or required client authentication,
+//! and mandatory RFC 7627 Extended Master Secret by default. No legacy CBC,
 //! static RSA key exchange, or renegotiation is accepted.
 
 const std = @import("std");
@@ -55,6 +55,8 @@ pub const Config = struct {
     server_private_key: ?*[key_exchange.p256.secret_len]u8 = null,
     /// Single-use P-384 scalar required when secp384r1 is selected.
     server_private_key_p384: ?*[key_exchange.p384.secret_len]u8 = null,
+    /// Single-use P-521 scalar required when secp521r1 is selected.
+    server_private_key_p521: ?*[key_exchange.p521.secret_len]u8 = null,
     certificate_chain: []const []const u8,
     signer: auth.Signer,
     client_auth_policy: ?client_auth.ServerPolicy = null,
@@ -96,6 +98,19 @@ pub const ReceiveResult = struct {
     event: ?Event,
 };
 
+pub const ReceiveIntoEvent = union(enum) {
+    server_flight: void,
+    client_key_exchange: void,
+    change_cipher_spec: void,
+    peer_alert: alert.Alert,
+    established: void,
+};
+
+pub const ReceiveIntoResult = struct {
+    consumed: usize,
+    event: ?ReceiveIntoEvent,
+};
+
 pub const ApplicationReceiveResult = struct {
     consumed: usize,
     event: ?Established.ApplicationEvent,
@@ -105,6 +120,7 @@ const PrivateKey = union(enum) {
     none,
     secp256r1: [key_exchange.p256.secret_len]u8,
     secp384r1: [key_exchange.p384.secret_len]u8,
+    secp521r1: [key_exchange.p521.secret_len]u8,
 
     fn wipe(self: *PrivateKey) void {
         std.crypto.secureZero(u8, std.mem.asBytes(self));
@@ -328,14 +344,29 @@ pub fn ServerConnection(
         stage: Stage = .client_hello,
         p256_private_key_consumed: bool = false,
         p384_private_key_consumed: bool = false,
+        p521_private_key_consumed: bool = false,
         records: stream.RecordDeframer = .{},
         messages: stream.HandshakeReassembler(
             @max(max_client_hello_len, max_handshake_message_len),
         ) = .{},
-        pending: ?Pending = null,
+        pending: Pending = undefined,
 
         pub fn init(config: Config) Self {
-            return .{ .config = config };
+            var result: Self = undefined;
+            result.initInto(config);
+            return result;
+        }
+
+        /// Initialize caller-owned storage without touching inactive inline
+        /// record and handshake buffers.
+        pub fn initInto(self: *Self, config: Config) void {
+            self.*.config = config;
+            self.*.stage = .client_hello;
+            self.*.p256_private_key_consumed = false;
+            self.*.p384_private_key_consumed = false;
+            self.*.p521_private_key_consumed = false;
+            self.*.records.buffered = 0;
+            self.*.messages.buffered = 0;
         }
 
         pub fn deinit(self: *Self) void {
@@ -348,8 +379,38 @@ pub fn ServerConnection(
             input: []const u8,
             output: *std.ArrayList(u8),
         ) Error!ReceiveResult {
+            var established: Established = undefined;
+            const result = try self.receiveInto(
+                input,
+                output,
+                &established,
+            );
+            return .{
+                .consumed = result.consumed,
+                .event = if (result.event) |event| switch (event) {
+                    .server_flight => .{ .server_flight = {} },
+                    .client_key_exchange => .{ .client_key_exchange = {} },
+                    .change_cipher_spec => .{ .change_cipher_spec = {} },
+                    .peer_alert => |received| .{ .peer_alert = received },
+                    .established => .{ .established = established },
+                } else null,
+            };
+        }
+
+        /// Feed transport bytes and write an established connection directly
+        /// into caller-owned storage when the returned event is `.established`.
+        pub fn receiveInto(
+            self: *Self,
+            input: []const u8,
+            output: *std.ArrayList(u8),
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
             if (self.stage == .failed) return error.ConnectionFailed;
-            return self.receiveInner(input, output) catch |err| {
+            return self.receiveInner(
+                input,
+                output,
+                established_output,
+            ) catch |err| {
                 self.fail();
                 return err;
             };
@@ -359,18 +420,21 @@ pub fn ServerConnection(
             self: *Self,
             input: []const u8,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
             const framed_result = try self.records.push(input);
             const framed = framed_result.framed orelse return .{
                 .consumed = framed_result.consumed,
                 .event = null,
             };
-            if (self.stage != .client_finished) {
-                if (self.pending) |*pending| {
-                    if (pending.selection.local_record_size_limit) |limit| {
-                        if (framed.fragment.len > limit) {
-                            return error.RecordSizeLimitExceeded;
-                        }
+            if (self.stage != .client_hello and
+                self.stage != .client_finished and
+                self.stage != .established and
+                self.stage != .failed)
+            {
+                if (self.pending.selection.local_record_size_limit) |limit| {
+                    if (framed.fragment.len > limit) {
+                        return error.RecordSizeLimitExceeded;
                     }
                 }
             }
@@ -400,6 +464,7 @@ pub fn ServerConnection(
                     framed_result.consumed,
                     framed,
                     output,
+                    established_output,
                 ),
                 .established => error.AlreadyEstablished,
                 .failed => error.ConnectionFailed,
@@ -411,7 +476,7 @@ pub fn ServerConnection(
             consumed: usize,
             framed: stream.FramedRecord,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
+        ) Error!ReceiveIntoResult {
             if (framed.content_type != 22) return error.UnexpectedRecord;
             const message_result = try self.messages.push(framed.fragment);
             const message = message_result.message orelse return .{
@@ -470,7 +535,7 @@ pub fn ServerConnection(
                 policy,
             );
             var private_key: PrivateKey = undefined;
-            var public_key_storage: [key_exchange.p384.public_len]u8 = undefined;
+            var public_key_storage: [key_exchange.p521.public_len]u8 = undefined;
             const public_key_len: usize = switch (selection.group) {
                 key_exchange.named_group_secp256r1 => blk: {
                     const configured = self.config.server_private_key orelse
@@ -490,6 +555,17 @@ pub fn ServerConnection(
                     self.consumeP384PrivateKey();
                     const public = try key_exchange.p384.publicKey(
                         private_key.secp384r1,
+                    );
+                    public_key_storage[0..public.len].* = public;
+                    break :blk public.len;
+                },
+                key_exchange.named_group_secp521r1 => blk: {
+                    const configured = self.config.server_private_key_p521 orelse
+                        return error.NoSupportedGroup;
+                    private_key = .{ .secp521r1 = configured.* };
+                    self.consumeP521PrivateKey();
+                    const public = try key_exchange.p521.publicKey(
+                        private_key.secp521r1,
                     );
                     public_key_storage = public;
                     break :blk public.len;
@@ -557,7 +633,7 @@ pub fn ServerConnection(
             parsed: client_hello.Parsed,
             policy: handshake.Policy,
             output: *std.ArrayList(u8),
-        ) Error!?ReceiveResult {
+        ) Error!?ReceiveIntoResult {
             if (self.config.client_auth_policy != null) return null;
             var ticket_session: ?tls12.Session = null;
             defer if (ticket_session) |*session| session.deinit();
@@ -740,7 +816,7 @@ pub fn ServerConnection(
             self: *Self,
             consumed: usize,
             framed: stream.FramedRecord,
-        ) Error!ReceiveResult {
+        ) Error!ReceiveIntoResult {
             if (framed.content_type != 22) return error.UnexpectedRecord;
             const message_result = try self.messages.push(framed.fragment);
             const message = message_result.message orelse return .{
@@ -762,13 +838,13 @@ pub fn ServerConnection(
                 }
             } else {
                 try policy.verifier.verifyTrust(null, certificate.entries);
-                const pending = &(self.pending orelse unreachable);
+                const pending = &self.pending;
                 pending.peer_certificate_chain = try copyCertificateChain(
                     self.config.allocator,
                     certificate.entries,
                 );
             }
-            const pending = &(self.pending orelse unreachable);
+            const pending = &self.pending;
             pending.transcript_state.update(message);
             try pending.transcript_bytes.appendSlice(
                 self.config.allocator,
@@ -783,7 +859,7 @@ pub fn ServerConnection(
             self: *Self,
             consumed: usize,
             framed: stream.FramedRecord,
-        ) Error!ReceiveResult {
+        ) Error!ReceiveIntoResult {
             if (framed.content_type != 22) return error.UnexpectedRecord;
             const message_result = try self.messages.push(framed.fragment);
             const message = message_result.message orelse return .{
@@ -794,8 +870,8 @@ pub fn ServerConnection(
                 return error.UnexpectedHandshakeMessage;
             }
             const client_public = try handshake.parseClientKeyExchange(message);
-            const pending = &(self.pending orelse unreachable);
-            var shared_storage = [_]u8{0} ** key_exchange.p384.shared_len;
+            const pending = &self.pending;
+            var shared_storage = [_]u8{0} ** key_exchange.p521.shared_len;
             const shared_secret: []u8 = switch (pending.selection.group) {
                 key_exchange.named_group_secp256r1 => blk: {
                     if (pending.server_private_key != .secp256r1) {
@@ -814,6 +890,17 @@ pub fn ServerConnection(
                     }
                     const shared = try key_exchange.p384.sharedSecret(
                         pending.server_private_key.secp384r1,
+                        client_public,
+                    );
+                    shared_storage[0..shared.len].* = shared;
+                    break :blk shared_storage[0..shared.len];
+                },
+                key_exchange.named_group_secp521r1 => blk: {
+                    if (pending.server_private_key != .secp521r1) {
+                        return error.NoSupportedGroup;
+                    }
+                    const shared = try key_exchange.p521.sharedSecret(
+                        pending.server_private_key.secp521r1,
                         client_public,
                     );
                     shared_storage = shared;
@@ -874,7 +961,7 @@ pub fn ServerConnection(
             self: *Self,
             consumed: usize,
             framed: stream.FramedRecord,
-        ) Error!ReceiveResult {
+        ) Error!ReceiveIntoResult {
             if (framed.content_type != 22) return error.UnexpectedRecord;
             const message_result = try self.messages.push(framed.fragment);
             const message = message_result.message orelse return .{
@@ -884,7 +971,7 @@ pub fn ServerConnection(
             if (message_result.consumed != framed.fragment.len) {
                 return error.UnexpectedHandshakeMessage;
             }
-            const pending = &(self.pending orelse unreachable);
+            const pending = &self.pending;
             const chain = pending.peer_certificate_chain orelse
                 return error.UnexpectedHandshakeMessage;
             try handshake.verifyCertificateVerify(
@@ -906,7 +993,7 @@ pub fn ServerConnection(
             self: *Self,
             consumed: usize,
             framed: stream.FramedRecord,
-        ) Error!ReceiveResult {
+        ) Error!ReceiveIntoResult {
             if (framed.content_type != stream.content_type_change_cipher_spec or
                 !std.mem.eql(u8, framed.fragment, &.{1}))
             {
@@ -924,8 +1011,9 @@ pub fn ServerConnection(
             consumed: usize,
             framed: stream.FramedRecord,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
-            const pending = &(self.pending orelse unreachable);
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
+            const pending = &self.pending;
             var plaintext: [64]u8 = undefined;
             const opened = try pending.client_traffic.?.open(
                 framed.bytes,
@@ -950,9 +1038,10 @@ pub fn ServerConnection(
             pending.transcript_state.update(finished_message);
 
             if (pending.resumed) {
+                self.establishInto(established_output);
                 return .{
                     .consumed = consumed,
-                    .event = .{ .established = self.establish() },
+                    .event = .{ .established = {} },
                 };
             }
 
@@ -1004,9 +1093,10 @@ pub fn ServerConnection(
                 self.config.allocator,
                 encrypted_finished[0..encrypted_len],
             );
+            self.establishInto(established_output);
             return .{
                 .consumed = consumed,
-                .event = .{ .established = self.establish() },
+                .event = .{ .established = {} },
             };
         }
 
@@ -1038,8 +1128,11 @@ pub fn ServerConnection(
             );
         }
 
-        fn establish(self: *Self) Established {
-            const pending = &(self.pending orelse unreachable);
+        fn establishInto(
+            self: *Self,
+            established_output: *Established,
+        ) void {
+            const pending = &self.pending;
             const selected_alpn: []const u8 =
                 pending.selection.alpn_protocol orelse "";
             key_log.emit(
@@ -1048,31 +1141,35 @@ pub fn ServerConnection(
                 &pending.client_random,
                 &pending.master_secret.?,
             );
-            const established = Established{
-                .allocator = self.config.allocator,
-                .read = pending.client_traffic.?,
-                .write = pending.server_traffic.?,
-                .master_secret = pending.master_secret.?,
-                .client_random = pending.client_random,
-                .server_random = self.config.server_random,
-                .suite = pending.selection.suite,
-                .peer_certificate_chain = pending.peer_certificate_chain,
-                .resumed = pending.resumed,
-                .session_id = pending.session_id,
-                .session_id_len = pending.session_id_len,
-                .alpn_storage = copyAlpn(selected_alpn),
-                .alpn_len = @intCast(selected_alpn.len),
-                .local_record_size_limit = pending.selection.local_record_size_limit,
-                .peer_record_size_limit = pending.selection.peer_record_size_limit,
-            };
+            established_output.*.allocator = self.config.allocator;
+            established_output.*.read = pending.client_traffic.?;
+            established_output.*.write = pending.server_traffic.?;
+            established_output.*.master_secret = pending.master_secret.?;
+            established_output.*.client_random = pending.client_random;
+            established_output.*.server_random = self.config.server_random;
+            established_output.*.suite = pending.selection.suite;
+            established_output.*.peer_certificate_chain =
+                pending.peer_certificate_chain;
+            established_output.*.resumed = pending.resumed;
+            established_output.*.session_id = pending.session_id;
+            established_output.*.session_id_len = pending.session_id_len;
+            established_output.*.alpn_storage = copyAlpn(selected_alpn);
+            established_output.*.alpn_len = @intCast(selected_alpn.len);
+            established_output.*.local_record_size_limit =
+                pending.selection.local_record_size_limit;
+            established_output.*.peer_record_size_limit =
+                pending.selection.peer_record_size_limit;
+            established_output.*.records.buffered = 0;
+            established_output.*.local_closed = false;
+            established_output.*.peer_closed = false;
+            established_output.*.failed = false;
+            established_output.*.secrets_extracted = false;
             pending.client_traffic = null;
             pending.server_traffic = null;
             pending.master_secret = null;
             pending.peer_certificate_chain = null;
             pending.deinit();
-            self.pending = null;
             self.stage = .established;
-            return established;
         }
 
         fn consumeP256PrivateKey(self: *Self) void {
@@ -1091,16 +1188,32 @@ pub fn ServerConnection(
             self.p384_private_key_consumed = true;
         }
 
+        fn consumeP521PrivateKey(self: *Self) void {
+            if (self.p521_private_key_consumed) return;
+            if (self.config.server_private_key_p521) |private_key| {
+                std.crypto.secureZero(u8, private_key);
+            }
+            self.p521_private_key_consumed = true;
+        }
+
         fn fail(self: *Self) void {
             self.cleanup();
             self.stage = .failed;
         }
 
         fn cleanup(self: *Self) void {
-            if (self.pending) |*pending| pending.deinit();
-            self.pending = null;
+            switch (self.stage) {
+                .client_certificate,
+                .client_key_exchange,
+                .client_certificate_verify,
+                .change_cipher_spec,
+                .client_finished,
+                => self.pending.deinit(),
+                .client_hello, .established, .failed => {},
+            }
             if (!self.p256_private_key_consumed) self.consumeP256PrivateKey();
             if (!self.p384_private_key_consumed) self.consumeP384PrivateKey();
+            if (!self.p521_private_key_consumed) self.consumeP521PrivateKey();
         }
     };
 }

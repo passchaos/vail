@@ -20,7 +20,148 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(vail.crypto, "mac"));
     try std.testing.expect(@hasDecl(vail.crypto, "memory"));
+    try std.testing.expect(@hasDecl(vail.crypto, "p256"));
+    try std.testing.expect(@hasDecl(vail.crypto.p256, "verify"));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p256,
+        "PreparedVerifier",
+    ));
+    try std.testing.expect(@hasDecl(vail.crypto, "p521"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521, "verify"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521, "PublicKey"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521, "SecretKey"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521, "KeyPair"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521, "Signature"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521, "PreparedNonce"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521, "SigningError"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521, "GenerateError"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521, "KeyAgreementError"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521, "ecdhPublicKey"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521, "ecdhSharedSecret"));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521.SecretKey,
+        "fromBytes",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521.KeyPair,
+        "fromSecretKey",
+    ));
+    try std.testing.expect(@hasDecl(vail.crypto.p521.KeyPair, "fromDer"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521.KeyPair, "generate"));
+    try std.testing.expect(@hasDecl(vail.crypto.p521.KeyPair, "sign"));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521.KeyPair,
+        "prepareNonce",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521.KeyPair,
+        "prepareRandomNonce",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521.KeyPair,
+        "prepareNonceBatch",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521.KeyPair,
+        "prepareRandomNonceBatch",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521.KeyPair,
+        "signPrepared",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521.Signature,
+        "toDer",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521.PublicKey,
+        "fromSec1",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521.PublicKey,
+        "verify",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521,
+        "PreparedVerifier",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521,
+        "ThroughputPreparedVerifier",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521,
+        "CompactPreparedVerifier",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.p521,
+        "validatePublicKey",
+    ));
     try std.testing.expect(@hasDecl(vail.crypto, "rsa"));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PrivateKey,
+        "signPssSha3_256",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PrivateKey,
+        "signPkcs1v15Sha3_256",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PreparedPrivateKey,
+        "signPssSha3_512",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PreparedPrivateKey,
+        "signPkcs1v15Sha3_512",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PrivateKey,
+        "signPssSha512_224",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PrivateKey,
+        "signPssSha512_256",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PrivateKey,
+        "signPkcs1v15Sha512_224",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PrivateKey,
+        "signPkcs1v15Sha512_256",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PreparedPrivateKey,
+        "signPssSha512_224",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PreparedPrivateKey,
+        "signPssSha512_256",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PreparedPrivateKey,
+        "signPkcs1v15Sha512_224",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PreparedPrivateKey,
+        "signPkcs1v15Sha512_256",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PrivateKey,
+        "signPssShake128",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PrivateKey,
+        "signPssShake256",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PreparedPrivateKey,
+        "signPssShake128",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.crypto.rsa.PreparedPrivateKey,
+        "signPssShake256",
+    ));
     try std.testing.expect(@hasDecl(vail.crypto, "sha256"));
     try std.testing.expect(@hasDecl(vail.crypto, "sm2"));
     try std.testing.expect(@hasDecl(vail.crypto, "sm3"));
@@ -99,10 +240,26 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(vail.tls.auth.Signer, "ml_dsa_44"));
     try std.testing.expect(@hasField(vail.tls.auth.Signer, "ml_dsa_65"));
     try std.testing.expect(@hasField(vail.tls.auth.Signer, "ml_dsa_87"));
+    try std.testing.expect(@hasField(
+        vail.tls.auth.Signer,
+        "ecdsa_p521_sha512",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.auth.Signer,
+        "ecdsa_p521_sha512_prepared",
+    ));
     try std.testing.expectEqual(
         @as(u16, 0x0904),
         vail.tls.auth.signature_scheme_ml_dsa_44,
     );
+    try std.testing.expectEqual(
+        @as(u16, 0x0603),
+        vail.tls.auth.signature_scheme_ecdsa_secp521r1_sha512,
+    );
+    try std.testing.expect(@hasField(
+        vail.tls.auth.ClientVerifier,
+        "pinned_ecdsa_p521_public_key",
+    ));
     try std.testing.expect(@hasDecl(vail.tls, "certificate_compression"));
     try std.testing.expect(
         vail.tls.certificate_compression.Algorithm.brotli.supported(),
@@ -152,6 +309,15 @@ test "public modules are reachable" {
     ));
     const Tls13Client = vail.tls.client_connection.ClientConnection(1024, 256);
     try std.testing.expect(@hasDecl(Tls13Client, "EchRejection"));
+    try std.testing.expect(@hasDecl(
+        Tls13Client.Established,
+        "exportKeyingMaterial",
+    ));
+    const Tls13Server = vail.tls.server_connection.ServerConnection(1024, 256);
+    try std.testing.expect(@hasDecl(
+        Tls13Server.Established,
+        "exportKeyingMaterial",
+    ));
     try std.testing.expect(@hasField(Tls13Client.EchRejection, "retry_configs"));
     try std.testing.expect(@hasField(Tls13Client.Event, "ech_rejected"));
     try std.testing.expect(@hasDecl(vail.tls, "key_schedule"));
@@ -166,6 +332,19 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(vail.tls, "key_exchange"));
     try std.testing.expect(@hasDecl(vail.tls.key_exchange, "mlkem768"));
     try std.testing.expect(@hasDecl(vail.tls.key_exchange, "mlkem1024"));
+    try std.testing.expect(@hasDecl(vail.tls.key_exchange, "p521"));
+    try std.testing.expectEqual(
+        @as(u16, 0x0019),
+        vail.tls.key_exchange.named_group_secp521r1,
+    );
+    try std.testing.expect(@hasField(
+        vail.tls.key_exchange.ClientKeyMaterial,
+        "secp521r1",
+    ));
+    try std.testing.expect(@hasField(
+        vail.tls.key_exchange.ServerKeyMaterial,
+        "secp521r1",
+    ));
     try std.testing.expect(@hasField(
         vail.tls.key_exchange.ClientKeyMaterial,
         "mlkem768",
@@ -233,6 +412,10 @@ test "public modules are reachable" {
         vail.tls.tls12_client_connection.Established,
         "createTicketSession",
     ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.tls12_client_connection.Established,
+        "exportKeyingMaterial",
+    ));
     try std.testing.expect(@hasField(
         vail.tls.tls12_server_connection.Config,
         "session_tickets",
@@ -252,6 +435,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         vail.tls.tls12_server_connection,
         "SessionTicketPolicy",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.tls.tls12_server_connection.Established,
+        "exportKeyingMaterial",
     ));
     try std.testing.expect(@hasDecl(vail.tls, "transcript"));
     try std.testing.expect(@hasDecl(
@@ -281,12 +468,119 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         vail.x509.trust,
+        "CrlSignerBundleVerifier",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.trust,
+        "CertificateAuthorityBundleVerifier",
+    ));
+    try std.testing.expect(@hasField(
+        vail.x509.trust.BundleVerifier,
+        "compatible_trust_anchors",
+    ));
+    try std.testing.expect(@hasField(
+        vail.x509.trust.PathLimits,
+        "max_compatible_trust_anchors",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.trust.SystemStore,
+        "initEmpty",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.trust.SystemStore,
+        "addCompatibleCertificate",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.trust.SystemStore,
+        "addCompatiblePem",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.trust.SystemStore,
+        "addUnsupportedPem",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.trust.SystemStore,
+        "addCompatiblePemFile",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.trust.SystemStore,
+        "addCompatiblePemFileAbsolute",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.trust.SystemStore,
+        "PemFileOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.trust,
         "validateClientCertificateAuthority",
     ));
     try std.testing.expect(@hasDecl(
         vail.x509.trust,
         "validateClientCertificateRevocationListIssuer",
     ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.trust,
+        "validateCertificateRevocationListSigner",
+    ));
+    try std.testing.expect(@hasDecl(vail.x509.crl, "CombinedList"));
+    try std.testing.expect(@hasDecl(
+        vail.x509.crl,
+        "DistributionPointUrls",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.crl,
+        "distributionPointUrls",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.crl,
+        "certificateFreshestCrlUrls",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.crl,
+        "listFreshestCrlUrls",
+    ));
+    try std.testing.expect(@hasDecl(vail.x509.crl, "Fetcher"));
+    try std.testing.expect(@hasDecl(vail.x509.crl, "fetchLatestDelta"));
+    try std.testing.expect(@hasDecl(vail.x509.crl, "ConditionalFetcher"));
+    try std.testing.expect(@hasDecl(vail.x509.crl, "DeltaCache"));
+    try std.testing.expect(@hasDecl(vail.x509.crl, "refreshDeltaCache"));
+    try std.testing.expect(@hasDecl(vail.x509.crl, "SignerPathOptions"));
+    try std.testing.expect(@hasDecl(
+        vail.x509.crl,
+        "SharedAnchorPathOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.crl,
+        "AuthorizedIndirectList",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.crl,
+        "AuthorizedIndirectCombinedList",
+    ));
+    try std.testing.expect(@hasDecl(vail.x509, "distinguished_name"));
+    try std.testing.expect(@hasDecl(vail.x509, "policy"));
+    try std.testing.expect(@hasDecl(vail.x509, "certificate_set"));
+    try std.testing.expect(@hasDecl(vail.x509, "issuer_fetch"));
+    try std.testing.expect(@hasDecl(
+        vail.x509.certificate_set,
+        "Certificates",
+    ));
+    try std.testing.expect(@hasDecl(vail.x509.certificate_set, "parse"));
+    try std.testing.expect(@hasDecl(vail.x509.certificate_set, "parseBer"));
+    try std.testing.expect(@hasDecl(vail.x509.issuer_fetch, "Fetcher"));
+    try std.testing.expect(@hasDecl(vail.x509.issuer_fetch, "Options"));
+    try std.testing.expect(@hasDecl(vail.x509.issuer_fetch, "resolve"));
+    try std.testing.expect(@hasField(
+        vail.x509.issuer_fetch.Options,
+        "allow_ber_certs_only",
+    ));
+    try std.testing.expect(@hasDecl(
+        vail.x509.trust.BundleVerifier,
+        "verifyWithFetchedIssuers",
+    ));
+    try std.testing.expect(@hasDecl(vail.x509.ocsp, "responderUrls"));
+    try std.testing.expect(@hasDecl(vail.x509.ocsp, "caIssuerUrls"));
+    try std.testing.expect(@hasDecl(vail.x509.ocsp, "verifyWithP521"));
     try std.testing.expect(@hasDecl(vail.tls.auth, "ServerIdentity"));
     try std.testing.expect(@hasDecl(vail.tls.auth, "CertificateType"));
     try std.testing.expect(@hasDecl(vail.tls.auth, "Signer"));

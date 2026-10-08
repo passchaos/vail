@@ -60,9 +60,12 @@ pub const State = struct {
             return error.SequenceExhausted;
         const algorithm: traffic_secrets.Algorithm = switch (self.suite) {
             .aes_128_gcm_sha256 => .aes_128_gcm,
+            .aes_128_ccm_sha256 => .aes_128_ccm,
+            .aes_128_ccm_8_sha256 => .aes_128_ccm_8,
             .aes_256_gcm_sha384 => .aes_256_gcm,
             .chacha20_poly1305_sha256 => .chacha20_poly1305,
             .sm4_gcm_sm3 => .sm4_gcm,
+            .sm4_ccm_sm3 => .sm4_ccm,
         };
         return traffic_secrets.Direction.init(
             sequence,
@@ -253,12 +256,41 @@ test "traffic state advances sequence only after successful records" {
     try std.testing.expectEqual(@as(?u64, 2), receiver.sequenceNumber());
 }
 
+test "CCM-8 traffic-secret extraction preserves the short-tag algorithm" {
+    const initial = secret.Secret.fromSha256([_]u8{0x45} ** 32);
+    var state = try State.init(.aes_128_ccm_8_sha256, initial);
+    defer state.deinit();
+    var direction = try state.extractedDirection();
+    defer direction.deinit();
+    try std.testing.expectEqual(
+        traffic_secrets.Algorithm.aes_128_ccm_8,
+        direction.algorithm,
+    );
+    try std.testing.expectEqual(@as(usize, 16), direction.key().len);
+}
+
+test "SM4-CCM traffic-secret extraction preserves the algorithm" {
+    const initial = secret.Secret.fromSm3([_]u8{0x46} ** 32);
+    var state = try State.init(.sm4_ccm_sm3, initial);
+    defer state.deinit();
+    var direction = try state.extractedDirection();
+    defer direction.deinit();
+    try std.testing.expectEqual(
+        traffic_secrets.Algorithm.sm4_ccm,
+        direction.algorithm,
+    );
+    try std.testing.expectEqual(@as(usize, 16), direction.key().len);
+}
+
 test "traffic update resets sequence and invalidates old keys" {
     inline for ([_]cipher_suite.Suite{
         .aes_128_gcm_sha256,
+        .aes_128_ccm_sha256,
+        .aes_128_ccm_8_sha256,
         .aes_256_gcm_sha384,
         .chacha20_poly1305_sha256,
         .sm4_gcm_sm3,
+        .sm4_ccm_sm3,
     }) |suite| {
         const initial = switch (suite.hash()) {
             .sha256 => secret.Secret.fromSha256([_]u8{0x71} ** 32),
@@ -325,8 +357,11 @@ test "traffic state fails closed when the sequence is exhausted" {
 test "traffic state requires updates at AEAD confidentiality limits" {
     inline for ([_]cipher_suite.Suite{
         .aes_128_gcm_sha256,
+        .aes_128_ccm_sha256,
+        .aes_128_ccm_8_sha256,
         .aes_256_gcm_sha384,
         .sm4_gcm_sm3,
+        .sm4_ccm_sm3,
     }) |suite| {
         const initial = switch (suite.hash()) {
             .sha256 => secret.Secret.fromSha256([_]u8{0x61} ** 32),

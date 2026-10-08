@@ -5,8 +5,12 @@
 
 const std = @import("std");
 const auth = @import("../tls/auth.zig");
+const p521 = @import("../crypto/p521.zig");
 const certificate_compat = @import("certificate.zig");
+const distinguished_name = @import("distinguished_name.zig");
+const issuer_fetch = @import("issuer_fetch.zig");
 const ocsp = @import("ocsp.zig");
+const certificate_policy = @import("policy.zig");
 
 const Certificate = std.crypto.Certificate;
 
@@ -14,7 +18,11 @@ pub const PathLimits = struct {
     max_depth: usize = 8,
     max_candidate_checks: usize = 64,
     max_presented_certificates: usize = 16,
+    max_compatible_trust_anchors: usize = 32,
 };
+
+pub const CertificatePolicy = certificate_policy.Config;
+pub const any_certificate_policy_oid = certificate_policy.any_policy_oid;
 
 pub const RevocationStatus = enum {
     good,
@@ -49,7 +57,16 @@ pub const RevocationPolicy = struct {
 const hard_max_presented_certificates = 32;
 const hard_max_depth = 16;
 const hard_max_candidate_checks = 256;
+const hard_max_compatible_trust_anchors = 64;
+pub const max_compatible_certificate_bytes = 1024 * 1024;
+pub const default_max_compatible_pem_bytes = 8 * 1024 * 1024;
+const pem_certificate_begin = "-----BEGIN CERTIFICATE-----";
+const pem_certificate_end = "-----END CERTIFICATE-----";
+const pem_base64 = std.base64.standard.decoderWithIgnore(" \t\r\n");
 
+/// Caller policy for a server leaf without an RFC 7633 requirement. A leaf
+/// containing TLS Feature `status_request(5)` always upgrades this to
+/// `.require`.
 pub const StapledOcspPolicy = enum {
     ignore,
     if_present,
@@ -58,11 +75,16 @@ pub const StapledOcspPolicy = enum {
 
 pub const BundleVerifier = struct {
     bundle: *const Certificate.Bundle,
+    /// Additional borrowed trust anchors parsed by Vail's compatibility
+    /// parser, including algorithms not understood by Zig std's Bundle.
+    compatible_trust_anchors: []const []const u8 = &.{},
     now_seconds: i64,
     path_limits: PathLimits = .{},
     revocation: ?RevocationPolicy = null,
     stapled_ocsp: StapledOcspPolicy = .ignore,
     ocsp_validation: ocsp.Policy = .{},
+    /// RFC 5280/RFC 9618 certificate-policy inputs and resource bounds.
+    certificate_policy: CertificatePolicy = .{},
 
     pub fn clientVerifier(
         self: *const BundleVerifier,
@@ -87,6 +109,7 @@ pub const BundleVerifier = struct {
         try verifyServerIdentity(leaf, server_identity);
         try verifyChain(
             self.bundle,
+            self.compatible_trust_anchors,
             self.now_seconds,
             trust_context.chain,
             .server_auth,
@@ -94,9 +117,82 @@ pub const BundleVerifier = struct {
             self.revocation,
             server_identity,
             trust_context.ocsp_response,
+            trust_context.ocsp_responses,
             self.stapled_ocsp,
             self.ocsp_validation,
+            self.certificate_policy,
         );
+    }
+
+    /// Resolve AIA id-ad-caIssuers references into caller-owned buffers, add
+    /// the unique fetched certificates to the unordered presented set, and
+    /// run the ordinary bounded path search. The fetch callback owns all URI,
+    /// transport, redirect, and network-access policy.
+    pub fn verifyWithFetchedIssuers(
+        self: BundleVerifier,
+        trust_context: auth.TrustContext,
+        issuer_storage: []u8,
+        fetch_scratch: []u8,
+        fetched_output: [][]const u8,
+        fetcher: issuer_fetch.Fetcher,
+        fetch_options: issuer_fetch.Options,
+    ) !issuer_fetch.Result {
+        if (trust_context.chain.len == 0) {
+            return error.EmptyCertificateChain;
+        }
+        try validatePathLimits(self.path_limits);
+        try validateCompatibleTrustAnchors(
+            self.compatible_trust_anchors,
+            self.path_limits,
+        );
+        try certificate_policy.validateConfig(self.certificate_policy);
+        if (trust_context.chain.len > hard_max_presented_certificates) {
+            return error.CertificatePathTooManyCertificates;
+        }
+        if (trust_context.chain.len > self.path_limits.max_presented_certificates) {
+            return error.CertificatePathTooManyCertificates;
+        }
+        if (trust_context.ocsp_responses) |responses| {
+            if (responses.len != trust_context.chain.len) {
+                return error.InvalidCertificateOcspResponses;
+            }
+        }
+        const fetched = try issuer_fetch.resolve(
+            issuer_storage,
+            fetch_scratch,
+            fetched_output,
+            trust_context.chain,
+            fetcher,
+            fetch_options,
+        );
+        const combined_len = std.math.add(
+            usize,
+            trust_context.chain.len,
+            fetched.certificates.len,
+        ) catch return error.CertificatePathTooManyCertificates;
+        if (combined_len > hard_max_presented_certificates) {
+            return error.CertificatePathTooManyCertificates;
+        }
+        var combined: [hard_max_presented_certificates][]const u8 = undefined;
+        @memcpy(combined[0..trust_context.chain.len], trust_context.chain);
+        @memcpy(
+            combined[trust_context.chain.len..combined_len],
+            fetched.certificates,
+        );
+
+        var combined_responses: [hard_max_presented_certificates]?[]const u8 =
+            @splat(null);
+        const responses = if (trust_context.ocsp_responses) |presented| blk: {
+            @memcpy(combined_responses[0..presented.len], presented);
+            break :blk combined_responses[0..combined_len];
+        } else null;
+        try self.verify(.{
+            .server_name = trust_context.server_name,
+            .chain = combined[0..combined_len],
+            .ocsp_response = trust_context.ocsp_response,
+            .ocsp_responses = responses,
+        });
+        return fetched;
     }
 
     fn verifyCallback(
@@ -115,9 +211,12 @@ pub const BundleVerifier = struct {
 /// supplied path. TLS separately verifies CertificateVerify possession.
 pub const ClientCertificateBundleVerifier = struct {
     bundle: *const Certificate.Bundle,
+    compatible_trust_anchors: []const []const u8 = &.{},
     now_seconds: i64,
     path_limits: PathLimits = .{},
     revocation: ?RevocationPolicy = null,
+    /// RFC 5280/RFC 9618 certificate-policy inputs and resource bounds.
+    certificate_policy: CertificatePolicy = .{},
 
     pub fn clientVerifier(
         self: *const ClientCertificateBundleVerifier,
@@ -134,6 +233,7 @@ pub const ClientCertificateBundleVerifier = struct {
     ) !void {
         try verifyChain(
             self.bundle,
+            self.compatible_trust_anchors,
             self.now_seconds,
             trust_context.chain,
             .client_auth,
@@ -141,8 +241,10 @@ pub const ClientCertificateBundleVerifier = struct {
             self.revocation,
             null,
             null,
+            null,
             .ignore,
             .{},
+            self.certificate_policy,
         );
     }
 
@@ -158,10 +260,93 @@ pub const ClientCertificateBundleVerifier = struct {
     }
 };
 
-const EndpointPurpose = enum { server_auth, client_auth };
+/// CA-bundle verifier for a certificate that signs CRLs. Unlike an endpoint
+/// TLS certificate, the target may itself be a CA; KeyUsage, when present,
+/// must authorize cRLSign. Intermediate CA, name-constraint, policy, and path
+/// search rules are otherwise shared with ordinary certificate validation.
+pub const CrlSignerBundleVerifier = struct {
+    bundle: *const Certificate.Bundle,
+    compatible_trust_anchors: []const []const u8 = &.{},
+    now_seconds: i64,
+    path_limits: PathLimits = .{},
+    certificate_policy: CertificatePolicy = .{},
+    /// Optional independent revocation source for the CRL signer path. Do not
+    /// point this at the CRL currently being authorized.
+    revocation: ?RevocationPolicy = null,
+
+    pub fn verify(
+        self: CrlSignerBundleVerifier,
+        chain: []const []const u8,
+    ) !void {
+        try verifyChain(
+            self.bundle,
+            self.compatible_trust_anchors,
+            self.now_seconds,
+            chain,
+            .crl_signing,
+            self.path_limits,
+            self.revocation,
+            null,
+            null,
+            null,
+            .ignore,
+            .{},
+            self.certificate_policy,
+        );
+    }
+};
+
+/// Verify a CA certificate and its supplied issuer chain to a configured
+/// anchor without imposing an endpoint EKU. This is intended for proving that
+/// two independently validated infrastructure paths share a trust anchor.
+pub const CertificateAuthorityBundleVerifier = struct {
+    bundle: *const Certificate.Bundle,
+    compatible_trust_anchors: []const []const u8 = &.{},
+    now_seconds: i64,
+    path_limits: PathLimits = .{},
+    certificate_policy: CertificatePolicy = .{},
+    /// Optional independent revocation source for the CA path.
+    revocation: ?RevocationPolicy = null,
+
+    pub fn verify(
+        self: CertificateAuthorityBundleVerifier,
+        chain: []const []const u8,
+    ) !void {
+        try verifyChain(
+            self.bundle,
+            self.compatible_trust_anchors,
+            self.now_seconds,
+            chain,
+            .certificate_authority,
+            self.path_limits,
+            self.revocation,
+            null,
+            null,
+            null,
+            .ignore,
+            .{},
+            self.certificate_policy,
+        );
+    }
+};
+
+const EndpointPurpose = enum {
+    server_auth,
+    client_auth,
+    crl_signing,
+    certificate_authority,
+};
+
+const Rfc822Name = struct {
+    local: []const u8,
+    domain: []const u8,
+};
 
 const ServerIdentity = union(enum) {
     dns: []const u8,
+    rfc822: Rfc822Name,
+    uri: []const u8,
+    directory: []const u8,
     ip4: [4]u8,
     ip6: [16]u8,
 };
@@ -199,8 +384,26 @@ pub fn validateClientCertificateRevocationListIssuer(
     }
 }
 
+/// Validate the certificate-level requirements for a CRL signing key. Trust
+/// and authorization of a delegated indirect-CRL signer are established by
+/// the caller against the selected certificate path.
+pub fn validateCertificateRevocationListSigner(
+    certificate_der: []const u8,
+    now_seconds: i64,
+) !void {
+    const certificate = try parseCertificate(certificate_der);
+    try verifyValidity(certificate, now_seconds);
+    const usage = try certificateUsage(certificate_der);
+    if (usage.unsupported_critical_extension or
+        (usage.key_usage_present and !usage.crl_sign))
+    {
+        return error.InvalidCertificateUsage;
+    }
+}
+
 fn verifyChain(
     bundle: *const Certificate.Bundle,
+    compatible_trust_anchors: []const []const u8,
     now_seconds: i64,
     chain: []const []const u8,
     purpose: EndpointPurpose,
@@ -208,13 +411,29 @@ fn verifyChain(
     revocation: ?RevocationPolicy,
     constrained_identity: ?ServerIdentity,
     stapled_ocsp_response: ?[]const u8,
+    stapled_ocsp_responses: ?[]const ?[]const u8,
     stapled_ocsp_policy: StapledOcspPolicy,
     ocsp_validation: ocsp.Policy,
+    policy_config: CertificatePolicy,
 ) !void {
     if (chain.len == 0) return error.EmptyCertificateChain;
     try validatePathLimits(limits);
+    try validateCompatibleTrustAnchors(compatible_trust_anchors, limits);
+    try certificate_policy.validateConfig(policy_config);
     if (chain.len > limits.max_presented_certificates) {
         return error.CertificatePathTooManyCertificates;
+    }
+    if (stapled_ocsp_responses) |responses| {
+        if (responses.len != chain.len) {
+            return error.InvalidCertificateOcspResponses;
+        }
+        if (stapled_ocsp_response) |legacy| {
+            const leaf_response = responses[0] orelse
+                return error.InvalidCertificateOcspResponses;
+            if (!std.mem.eql(u8, legacy, leaf_response)) {
+                return error.InvalidCertificateOcspResponses;
+            }
+        }
     }
     var parsed: [hard_max_presented_certificates]Certificate.Parsed = undefined;
     var custom_algorithms: [hard_max_presented_certificates]certificate_compat.SignatureAlgorithm = undefined;
@@ -234,6 +453,7 @@ fn verifyChain(
     try validateLeafUsageProfile(leaf_usage, purpose);
     var search = PathSearch{
         .bundle = bundle,
+        .compatible_trust_anchors = compatible_trust_anchors,
         .now_seconds = now_seconds,
         .chain = chain,
         .parsed = parsed[0..chain.len],
@@ -245,14 +465,20 @@ fn verifyChain(
         .revocation = revocation,
         .constrained_identity = constrained_identity,
         .stapled_ocsp_response = stapled_ocsp_response,
-        .stapled_ocsp_policy = stapled_ocsp_policy,
+        .stapled_ocsp_responses = stapled_ocsp_responses,
+        .stapled_ocsp_policy = if (leaf_usage.must_staple)
+            .require
+        else
+            stapled_ocsp_policy,
         .ocsp_validation = ocsp_validation,
+        .policy_config = policy_config,
     };
     try search.verifyFrom(0, 1, 0, 0);
 }
 
 const PathSearch = struct {
     bundle: *const Certificate.Bundle,
+    compatible_trust_anchors: []const []const u8,
     now_seconds: i64,
     chain: []const []const u8,
     parsed: []const Certificate.Parsed,
@@ -264,8 +490,11 @@ const PathSearch = struct {
     revocation: ?RevocationPolicy,
     constrained_identity: ?ServerIdentity,
     stapled_ocsp_response: ?[]const u8,
+    stapled_ocsp_responses: ?[]const ?[]const u8,
     stapled_ocsp_policy: StapledOcspPolicy,
     ocsp_validation: ocsp.Policy,
+    policy_config: CertificatePolicy,
+    path_indices: [hard_max_depth]usize = undefined,
     candidate_checks: usize = 0,
 
     fn verifyFrom(
@@ -278,70 +507,114 @@ const PathSearch = struct {
         if (depth >= self.limits.max_depth) {
             return error.CertificatePathTooDeep;
         }
+        self.path_indices[depth] = subject_index;
         const subject = self.parsed[subject_index];
-        if (trustedEquivalentAnchor(self.bundle, subject)) |anchor| {
-            if (subject_index == 0 and self.stapled_ocsp_policy != .ignore) {
-                if (self.stapled_ocsp_response != null) {
-                    return error.CertificateOcspIssuerUnavailable;
-                }
-                if (self.stapled_ocsp_policy == .require) {
-                    return error.CertificateOcspResponseRequired;
-                }
-            }
-            try verifyValidity(subject, self.now_seconds);
-            try verifyValidity(anchor, self.now_seconds);
+        if (try trustedEquivalentAnchorExact(self.bundle, subject)) |anchor| {
+            try self.acceptTrustedEquivalentAnchor(
+                subject_index,
+                subject,
+                anchor,
+                depth,
+            );
+            return;
+        }
+        if (try trustedEquivalentCompatibleAnchor(
+            self.compatible_trust_anchors,
+            subject,
+            true,
+        )) |anchor| {
+            try self.acceptTrustedEquivalentAnchor(
+                subject_index,
+                subject,
+                anchor,
+                depth,
+            );
             return;
         }
 
         var remembered_error: ?anyerror = null;
-        if (self.bundle.find(subject.issuer())) |anchor_index| {
+        const exact_anchor_index = self.bundle.find(subject.issuer());
+        if (exact_anchor_index) |anchor_index| {
             try self.consumeCandidateBudget();
-            const anchor_element = try Certificate.der.Element.parse(
-                self.bundle.bytes.items,
+            self.verifyBundleAnchor(
+                subject_index,
+                subject,
+                anchor_index,
+                ca_below,
+                used,
+                depth,
+            ) catch |err| {
+                remembered_error = err;
+            };
+            if (remembered_error == null) return;
+        }
+        for (self.compatible_trust_anchors) |anchor_der| {
+            const anchor = try parseCertificate(anchor_der);
+            if (!std.mem.eql(u8, subject.issuer(), anchor.subject())) continue;
+            try self.consumeCandidateBudget();
+            self.verifyAnchorDer(
+                subject_index,
+                subject,
+                anchor_der,
+                anchor,
+                ca_below,
+                used,
+                depth,
+            ) catch |err| {
+                remembered_error = err;
+                continue;
+            };
+            return;
+        }
+        var anchors = self.bundle.map.iterator();
+        while (anchors.next()) |entry| {
+            const anchor_index = entry.value_ptr.*;
+            if (exact_anchor_index != null and
+                anchor_index == exact_anchor_index.?) continue;
+            const anchor_der = try bundleCertificateDer(
+                self.bundle,
                 anchor_index,
             );
-            const anchor_der = self.bundle.bytes.items[anchor_index..anchor_element.slice.end];
             const anchor = try parseCertificate(anchor_der);
-            anchor_attempt: {
-                self.validateIssuerUsageAndNameConstraints(
-                    try certificateUsage(anchor_der),
-                    ca_below,
-                    used,
-                ) catch |err| {
-                    remembered_error = err;
-                    break :anchor_attempt;
-                };
-                self.verifyCertificateSignature(
-                    subject_index,
-                    subject,
-                    anchor,
-                ) catch |err| {
-                    remembered_error = err;
-                    break :anchor_attempt;
-                };
-                if (self.revocation) |revocation| {
-                    revocation.verify(
-                        self.chain[subject_index],
-                        anchor_der,
-                    ) catch |err| {
-                        remembered_error = err;
-                        break :anchor_attempt;
-                    };
-                }
-                self.verifyStapledOcsp(
-                    subject_index,
-                    self.chain[subject_index],
-                    anchor_der,
-                ) catch |err| {
-                    remembered_error = err;
-                    break :anchor_attempt;
-                };
-                verifyValidity(anchor, self.now_seconds) catch |err| {
-                    remembered_error = err;
-                    break :anchor_attempt;
-                };
-                return;
-            }
+            if (!(directoryNamesEqual(
+                subject.issuer(),
+                anchor.subject(),
+            ) catch false)) continue;
+            try self.consumeCandidateBudget();
+            self.verifyBundleAnchor(
+                subject_index,
+                subject,
+                anchor_index,
+                ca_below,
+                used,
+                depth,
+            ) catch |err| {
+                remembered_error = err;
+                continue;
+            };
+            return;
+        }
+        for (self.compatible_trust_anchors) |anchor_der| {
+            const anchor = try parseCertificate(anchor_der);
+            if (std.mem.eql(u8, subject.issuer(), anchor.subject())) continue;
+            if (!(directoryNamesEqual(
+                subject.issuer(),
+                anchor.subject(),
+            ) catch false)) continue;
+            try self.consumeCandidateBudget();
+            self.verifyAnchorDer(
+                subject_index,
+                subject,
+                anchor_der,
+                anchor,
+                ca_below,
+                used,
+                depth,
+            ) catch |err| {
+                remembered_error = err;
+                continue;
+            };
+            return;
         }
 
         const subject_usage = try self.usageFor(subject_index);
@@ -357,11 +630,12 @@ const PathSearch = struct {
         var priorities: [hard_max_presented_certificates]u2 = @splat(3);
         for (self.parsed[1..], 1..) |issuer, issuer_index| {
             const bit = @as(u32, 1) << @intCast(issuer_index);
-            if ((used & bit) != 0 or !std.mem.eql(
-                u8,
+            if ((used & bit) != 0) continue;
+            const issuer_name_matches = directoryNamesEqual(
                 subject.issuer(),
                 issuer.subject(),
-            )) continue;
+            ) catch false;
+            if (!issuer_name_matches) continue;
             if (subject_usage.authority_key_identifier) |authority_key| {
                 const issuer_usage = self.usageFor(issuer_index) catch {
                     // A malformed same-name decoy must not consume the budget
@@ -415,27 +689,11 @@ const PathSearch = struct {
                     remembered_error = err;
                     continue;
                 };
-                self.verifyCertificateSignature(
+                self.verifyIssuerEdge(
                     subject_index,
                     subject,
-                    issuer,
-                ) catch |err| {
-                    remembered_error = err;
-                    continue;
-                };
-                if (self.revocation) |revocation| {
-                    revocation.verify(
-                        self.chain[subject_index],
-                        self.chain[issuer_index],
-                    ) catch |err| {
-                        remembered_error = err;
-                        continue;
-                    };
-                }
-                self.verifyStapledOcsp(
-                    subject_index,
-                    self.chain[subject_index],
                     self.chain[issuer_index],
+                    issuer,
                 ) catch |err| {
                     remembered_error = err;
                     continue;
@@ -459,6 +717,28 @@ const PathSearch = struct {
                 return;
             }
         }
+        if (try trustedEquivalentAnchorFallback(self.bundle, subject)) |anchor| {
+            try self.acceptTrustedEquivalentAnchor(
+                subject_index,
+                subject,
+                anchor,
+                depth,
+            );
+            return;
+        }
+        if (try trustedEquivalentCompatibleAnchor(
+            self.compatible_trust_anchors,
+            subject,
+            false,
+        )) |anchor| {
+            try self.acceptTrustedEquivalentAnchor(
+                subject_index,
+                subject,
+                anchor,
+                depth,
+            );
+            return;
+        }
         return remembered_error orelse error.CertificateIssuerNotFound;
     }
 
@@ -467,6 +747,96 @@ const PathSearch = struct {
             return error.CertificatePathSearchLimitExceeded;
         }
         self.candidate_checks += 1;
+    }
+
+    fn verifyBundleAnchor(
+        self: *PathSearch,
+        subject_index: usize,
+        subject: Certificate.Parsed,
+        anchor_index: u32,
+        ca_below: usize,
+        used: u32,
+        depth: usize,
+    ) !void {
+        const anchor_der = try bundleCertificateDer(self.bundle, anchor_index);
+        const anchor = try parseCertificate(anchor_der);
+        return self.verifyAnchorDer(
+            subject_index,
+            subject,
+            anchor_der,
+            anchor,
+            ca_below,
+            used,
+            depth,
+        );
+    }
+
+    fn verifyAnchorDer(
+        self: *PathSearch,
+        subject_index: usize,
+        subject: Certificate.Parsed,
+        anchor_der: []const u8,
+        anchor: Certificate.Parsed,
+        ca_below: usize,
+        used: u32,
+        depth: usize,
+    ) !void {
+        try self.validateIssuerUsageAndNameConstraints(
+            try certificateUsage(anchor_der),
+            ca_below,
+            used,
+        );
+        try self.verifyIssuerEdge(
+            subject_index,
+            subject,
+            anchor_der,
+            anchor,
+        );
+        try verifyValidity(anchor, self.now_seconds);
+        try self.verifySelectedCertificatePolicies(depth + 1);
+    }
+
+    fn acceptTrustedEquivalentAnchor(
+        self: *PathSearch,
+        subject_index: usize,
+        subject: Certificate.Parsed,
+        anchor: Certificate.Parsed,
+        depth: usize,
+    ) !void {
+        if (subject_index == 0 and self.stapled_ocsp_policy != .ignore) {
+            if (self.stapledResponse(subject_index) != null) {
+                return error.CertificateOcspIssuerUnavailable;
+            }
+            if (self.stapled_ocsp_policy == .require) {
+                return error.CertificateOcspResponseRequired;
+            }
+        }
+        try verifyValidity(subject, self.now_seconds);
+        try verifyValidity(anchor, self.now_seconds);
+        try self.verifySelectedCertificatePolicies(depth);
+    }
+
+    noinline fn verifySelectedCertificatePolicies(
+        self: *PathSearch,
+        count: usize,
+    ) !void {
+        var certificates: [hard_max_depth]certificate_policy.Certificate =
+            undefined;
+        for (0..count) |forward_index| {
+            const path_index = self.path_indices[count - 1 - forward_index];
+            const parsed = self.parsed[path_index];
+            certificates[forward_index] = .{
+                .extensions = (try self.usageFor(path_index)).policy_extensions,
+                .self_issued = try directoryNamesEqual(
+                    parsed.issuer(),
+                    parsed.subject(),
+                ),
+            };
+        }
+        try certificate_policy.validatePath(
+            self.policy_config,
+            certificates[0..count],
+        );
     }
 
     fn usageFor(
@@ -519,7 +889,7 @@ const PathSearch = struct {
             remaining &= remaining - 1;
             const certificate = &self.parsed[index];
             if (index != 0 and
-                namesEqualForSelfIssued(
+                try directoryNamesEqual(
                     certificate.issuer(),
                     certificate.subject(),
                 )) continue;
@@ -537,15 +907,79 @@ const PathSearch = struct {
         issuer: Certificate.Parsed,
     ) !void {
         const bit = @as(u32, 1) << @intCast(subject_index);
-        if ((self.custom_algorithm_mask & bit) != 0) {
-            return certificate_compat.verifyWithAlgorithm(
+        const p521_issuer = switch (issuer.pub_key_algo) {
+            .X9_62_id_ecPublicKey => |curve| curve == .secp521r1,
+            else => false,
+        };
+        if ((self.custom_algorithm_mask & bit) != 0 or p521_issuer) {
+            return certificate_compat.verifySignatureAndValidity(
                 subject,
-                self.custom_algorithms[subject_index],
+                if ((self.custom_algorithm_mask & bit) != 0)
+                    self.custom_algorithms[subject_index]
+                else
+                    null,
                 issuer,
                 self.now_seconds,
             );
         }
-        return subject.verify(issuer, self.now_seconds);
+        if (std.mem.eql(u8, subject.issuer(), issuer.subject())) {
+            return subject.verify(issuer, self.now_seconds);
+        }
+        return certificate_compat.verifySignatureAndValidity(
+            subject,
+            null,
+            issuer,
+            self.now_seconds,
+        );
+    }
+
+    noinline fn verifyIssuerEdge(
+        self: *PathSearch,
+        subject_index: usize,
+        subject: Certificate.Parsed,
+        issuer_der: []const u8,
+        issuer: Certificate.Parsed,
+    ) !void {
+        const p521_issuer = switch (issuer.pub_key_algo) {
+            .X9_62_id_ecPublicKey => |curve| curve == .secp521r1,
+            else => false,
+        };
+        if (p521_issuer) {
+            var verifier = p521.CompactPreparedVerifier.init(issuer.pubKey()) catch
+                return error.CertificatePublicKeyInvalid;
+            const bit = @as(u32, 1) << @intCast(subject_index);
+            try certificate_compat.verifySignatureAndValidityWithP521(
+                subject,
+                if ((self.custom_algorithm_mask & bit) != 0)
+                    self.custom_algorithms[subject_index]
+                else
+                    null,
+                issuer,
+                self.now_seconds,
+                &verifier,
+            );
+            if (self.revocation) |revocation| {
+                try revocation.verify(
+                    self.chain[subject_index],
+                    issuer_der,
+                );
+            }
+            return self.verifyStapledOcspWithP521(
+                subject_index,
+                self.chain[subject_index],
+                issuer_der,
+                &verifier,
+            );
+        }
+        try self.verifyCertificateSignature(subject_index, subject, issuer);
+        if (self.revocation) |revocation| {
+            try revocation.verify(self.chain[subject_index], issuer_der);
+        }
+        try self.verifyStapledOcsp(
+            subject_index,
+            self.chain[subject_index],
+            issuer_der,
+        );
     }
 
     fn verifyStapledOcsp(
@@ -554,17 +988,17 @@ const PathSearch = struct {
         certificate_der: []const u8,
         issuer_der: []const u8,
     ) !void {
-        if (subject_index != 0 or self.stapled_ocsp_policy == .ignore) {
-            return;
-        }
-        const response = self.stapled_ocsp_response orelse {
-            if (self.stapled_ocsp_policy == .require) {
+        if (self.stapled_ocsp_policy == .ignore) return;
+        const encoded = self.stapledResponse(subject_index) orelse {
+            if (subject_index == 0 and
+                self.stapled_ocsp_policy == .require)
+            {
                 return error.CertificateOcspResponseRequired;
             }
             return;
         };
         switch (try ocsp.verify(
-            response,
+            encoded,
             certificate_der,
             issuer_der,
             self.now_seconds,
@@ -575,15 +1009,58 @@ const PathSearch = struct {
             .unknown => return error.CertificateOcspStatusUnknown,
         }
     }
+
+    fn verifyStapledOcspWithP521(
+        self: *PathSearch,
+        subject_index: usize,
+        certificate_der: []const u8,
+        issuer_der: []const u8,
+        verifier: *const p521.CompactPreparedVerifier,
+    ) !void {
+        if (self.stapled_ocsp_policy == .ignore) return;
+        const encoded = self.stapledResponse(subject_index) orelse {
+            if (subject_index == 0 and
+                self.stapled_ocsp_policy == .require)
+            {
+                return error.CertificateOcspResponseRequired;
+            }
+            return;
+        };
+        switch (try ocsp.verifyWithP521(
+            encoded,
+            certificate_der,
+            issuer_der,
+            self.now_seconds,
+            self.ocsp_validation,
+            verifier,
+        )) {
+            .good => {},
+            .revoked => return error.CertificateRevoked,
+            .unknown => return error.CertificateOcspStatusUnknown,
+        }
+    }
+
+    fn stapledResponse(
+        self: *const PathSearch,
+        subject_index: usize,
+    ) ?[]const u8 {
+        if (self.stapled_ocsp_responses) |responses| {
+            return responses[subject_index];
+        }
+        return if (subject_index == 0) self.stapled_ocsp_response else null;
+    }
 };
 
 // This comparison is reached only for non-leaf certificates selected into a
 // constrained path, so keep it out of the per-name validation loop.
-noinline fn namesEqualForSelfIssued(
-    issuer: []const u8,
-    subject: []const u8,
-) bool {
-    return std.mem.eql(u8, issuer, subject);
+noinline fn directoryNamesEqual(
+    a: []const u8,
+    b: []const u8,
+) !bool {
+    return distinguished_name.eql(a, b) catch |err| return switch (err) {
+        error.InvalidName => error.InvalidCertificateExtension,
+        error.UnsupportedDirectoryString => error.UnsupportedCertificateNameConstraint,
+    };
 }
 
 fn validatePathLimits(limits: PathLimits) !void {
@@ -592,15 +1069,40 @@ fn validatePathLimits(limits: PathLimits) !void {
         limits.max_candidate_checks == 0 or
         limits.max_candidate_checks > hard_max_candidate_checks or
         limits.max_presented_certificates == 0 or
-        limits.max_presented_certificates > hard_max_presented_certificates)
+        limits.max_presented_certificates > hard_max_presented_certificates or
+        limits.max_compatible_trust_anchors == 0 or
+        limits.max_compatible_trust_anchors >
+            hard_max_compatible_trust_anchors)
     {
         return error.InvalidCertificatePathLimits;
+    }
+}
+
+fn validateCompatibleTrustAnchors(
+    anchors: []const []const u8,
+    limits: PathLimits,
+) !void {
+    if (anchors.len > limits.max_compatible_trust_anchors) {
+        return error.CertificatePathTooManyTrustAnchors;
+    }
+    for (anchors, 0..) |anchor_der, index| {
+        _ = try certificate_compat.parse(anchor_der);
+        for (anchors[0..index]) |prior| {
+            if (std.mem.eql(u8, prior, anchor_der)) {
+                return error.DuplicateTrustAnchor;
+            }
+        }
     }
 }
 
 pub const SystemStore = struct {
     allocator: std.mem.Allocator,
     bundle: Certificate.Bundle = .empty,
+    compatible_trust_anchors: std.ArrayList([]u8) = .empty,
+
+    pub fn initEmpty(allocator: std.mem.Allocator) SystemStore {
+        return .{ .allocator = allocator };
+    }
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -614,16 +1116,202 @@ pub const SystemStore = struct {
     }
 
     pub fn deinit(self: *SystemStore) void {
+        self.rollbackCompatibleAnchors(0);
+        self.compatible_trust_anchors.deinit(self.allocator);
         self.bundle.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    /// Copy one DER certificate into the compatibility store. Returns false
+    /// for an exact duplicate or an anchor already expired at `now_seconds`.
+    pub fn addCompatibleCertificate(
+        self: *SystemStore,
+        certificate_der: []const u8,
+        now_seconds: i64,
+    ) !bool {
+        if (certificate_der.len == 0 or
+            certificate_der.len > max_compatible_certificate_bytes)
+        {
+            return error.CompatibleTrustAnchorTooLarge;
+        }
+        const parsed = try certificate_compat.parse(certificate_der);
+        if (now_seconds >= 0 and
+            @as(u64, @intCast(now_seconds)) > parsed.standard.validity.not_after)
+        {
+            return false;
+        }
+        for (self.compatible_trust_anchors.items) |existing| {
+            if (std.mem.eql(u8, existing, certificate_der)) return false;
+        }
+        if (self.compatible_trust_anchors.items.len ==
+            hard_max_compatible_trust_anchors)
+        {
+            return error.CertificatePathTooManyTrustAnchors;
+        }
+        const owned = try self.allocator.dupe(u8, certificate_der);
+        errdefer self.allocator.free(owned);
+        try self.compatible_trust_anchors.append(self.allocator, owned);
+        return true;
+    }
+
+    /// Decode and add every CERTIFICATE block in a PEM buffer atomically.
+    /// Bytes outside certificate blocks are ignored, matching common CA files.
+    pub fn addCompatiblePem(
+        self: *SystemStore,
+        pem: []const u8,
+        now_seconds: i64,
+    ) !usize {
+        return self.addPemInternal(pem, now_seconds, false);
+    }
+
+    /// Add only certificates that Zig std's parser cannot represent but
+    /// Vail's compatibility parser accepts. This is useful when the same PEM
+    /// has already been loaded into `bundle` through Zig std.
+    pub fn addUnsupportedPem(
+        self: *SystemStore,
+        pem: []const u8,
+        now_seconds: i64,
+    ) !usize {
+        return self.addPemInternal(pem, now_seconds, true);
+    }
+
+    pub const PemFileOptions = struct {
+        max_bytes: usize = default_max_compatible_pem_bytes,
+        only_std_unsupported: bool = false,
+    };
+
+    /// Load compatible certificate anchors from a PEM file relative to `dir`.
+    pub fn addCompatiblePemFile(
+        self: *SystemStore,
+        io: std.Io,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+        now_seconds: i64,
+        options: PemFileOptions,
+    ) !usize {
+        if (options.max_bytes == 0) return error.InvalidPemFileLimit;
+        const pem = try dir.readFileAlloc(
+            io,
+            sub_path,
+            self.allocator,
+            .limited(options.max_bytes),
+        );
+        defer self.allocator.free(pem);
+        return self.addPemInternal(
+            pem,
+            now_seconds,
+            options.only_std_unsupported,
+        );
+    }
+
+    /// Load compatible anchors from an absolute PEM path.
+    pub fn addCompatiblePemFileAbsolute(
+        self: *SystemStore,
+        io: std.Io,
+        absolute_path: []const u8,
+        now_seconds: i64,
+        options: PemFileOptions,
+    ) !usize {
+        if (options.max_bytes == 0) return error.InvalidPemFileLimit;
+        var file = try std.Io.Dir.openFileAbsolute(io, absolute_path, .{});
+        defer file.close(io);
+        var reader = file.reader(io, &.{});
+        const pem = try reader.interface.allocRemaining(
+            self.allocator,
+            .limited(options.max_bytes),
+        );
+        defer self.allocator.free(pem);
+        return self.addPemInternal(
+            pem,
+            now_seconds,
+            options.only_std_unsupported,
+        );
+    }
+
+    fn addPemInternal(
+        self: *SystemStore,
+        pem: []const u8,
+        now_seconds: i64,
+        only_std_unsupported: bool,
+    ) !usize {
+        const original_count = self.compatible_trust_anchors.items.len;
+        errdefer self.rollbackCompatibleAnchors(original_count);
+        var added: usize = 0;
+        var position: usize = 0;
+        var found = false;
+        while (std.mem.indexOfPos(
+            u8,
+            pem,
+            position,
+            pem_certificate_begin,
+        )) |begin| {
+            found = true;
+            const encoded_start = begin + pem_certificate_begin.len;
+            const end = std.mem.indexOfPos(
+                u8,
+                pem,
+                encoded_start,
+                pem_certificate_end,
+            ) orelse return error.MissingEndCertificateMarker;
+            const encoded = std.mem.trim(
+                u8,
+                pem[encoded_start..end],
+                " \t\r\n",
+            );
+            var significant_len: usize = 0;
+            for (encoded) |byte| switch (byte) {
+                ' ', '\t', '\r', '\n' => {},
+                else => significant_len += 1,
+            };
+            const decoded_capacity = try std.base64.standard.Decoder
+                .calcSizeUpperBound(significant_len);
+            if (decoded_capacity == 0 or
+                decoded_capacity > max_compatible_certificate_bytes)
+            {
+                return error.CompatibleTrustAnchorTooLarge;
+            }
+            const decoded = try self.allocator.alloc(u8, decoded_capacity);
+            defer self.allocator.free(decoded);
+            const decoded_len = try pem_base64.decode(decoded, encoded);
+            if (only_std_unsupported) {
+                if (Certificate.parse(.{
+                    .buffer = decoded[0..decoded_len],
+                    .index = 0,
+                })) |_| {
+                    position = end + pem_certificate_end.len;
+                    continue;
+                } else |_| {}
+            }
+            if (try self.addCompatibleCertificate(
+                decoded[0..decoded_len],
+                now_seconds,
+            )) added += 1;
+            position = end + pem_certificate_end.len;
+        }
+        if (!found) return error.MissingCertificateMarker;
+        return added;
+    }
+
+    pub fn compatibleAnchorCount(self: *const SystemStore) usize {
+        return self.compatible_trust_anchors.items.len;
+    }
+
+    fn rollbackCompatibleAnchors(self: *SystemStore, retained: usize) void {
+        for (self.compatible_trust_anchors.items[retained..]) |certificate| {
+            self.allocator.free(certificate);
+        }
+        self.compatible_trust_anchors.shrinkRetainingCapacity(retained);
     }
 
     pub fn verifier(
         self: *const SystemStore,
         now_seconds: i64,
     ) BundleVerifier {
+        // Like slices returned by Certificate.Bundle, this verifier is
+        // invalidated by a subsequent add operation or by deinit.
         return .{
             .bundle = &self.bundle,
+            .compatible_trust_anchors = self.compatible_trust_anchors.items,
             .now_seconds = now_seconds,
         };
     }
@@ -644,6 +1332,9 @@ fn verifyServerIdentity(
 ) !void {
     switch (identity) {
         .dns => |name| try certificate.verifyHostName(name),
+        .rfc822 => unreachable,
+        .uri => unreachable,
+        .directory => unreachable,
         .ip4 => |address| try verifyIpSubjectAltName(
             certificate,
             &address,
@@ -681,24 +1372,79 @@ fn parseCertificate(der: []const u8) !Certificate.Parsed {
 /// Match a server-supplied cross-certificate to a configured trust anchor.
 /// Name equality alone is insufficient: the complete SubjectPublicKeyInfo
 /// must also identify the same CA key and parameters.
-fn trustedEquivalentAnchor(
+fn trustedEquivalentAnchorExact(
     bundle: *const Certificate.Bundle,
     subject: Certificate.Parsed,
-) ?Certificate.Parsed {
+) !?Certificate.Parsed {
     const anchor_index = bundle.find(subject.subject()) orelse return null;
-    const anchor_element = Certificate.der.Element.parse(
-        bundle.bytes.items,
-        anchor_index,
-    ) catch unreachable;
-    const anchor = parseCertificate(
-        bundle.bytes.items[anchor_index..anchor_element.slice.end],
-    ) catch unreachable;
+    const anchor_der = try bundleCertificateDer(bundle, anchor_index);
+    const anchor = try parseCertificate(anchor_der);
     if (!std.mem.eql(
         u8,
         subjectPublicKeyInfo(subject),
         subjectPublicKeyInfo(anchor),
     )) return null;
     return anchor;
+}
+
+fn trustedEquivalentAnchorFallback(
+    bundle: *const Certificate.Bundle,
+    subject: Certificate.Parsed,
+) !?Certificate.Parsed {
+    const exact_anchor_index = bundle.find(subject.subject());
+    var anchors = bundle.map.iterator();
+    while (anchors.next()) |entry| {
+        const anchor_index = entry.value_ptr.*;
+        if (exact_anchor_index != null and
+            anchor_index == exact_anchor_index.?) continue;
+        const anchor_der = try bundleCertificateDer(bundle, anchor_index);
+        const anchor = try parseCertificate(anchor_der);
+        if (!(directoryNamesEqual(
+            subject.subject(),
+            anchor.subject(),
+        ) catch false)) continue;
+        if (std.mem.eql(
+            u8,
+            subjectPublicKeyInfo(subject),
+            subjectPublicKeyInfo(anchor),
+        )) return anchor;
+    }
+    return null;
+}
+
+fn trustedEquivalentCompatibleAnchor(
+    anchors: []const []const u8,
+    subject: Certificate.Parsed,
+    exact_name: bool,
+) !?Certificate.Parsed {
+    for (anchors) |anchor_der| {
+        const anchor = try parseCertificate(anchor_der);
+        const name_matches = if (exact_name)
+            std.mem.eql(u8, subject.subject(), anchor.subject())
+        else
+            directoryNamesEqual(
+                subject.subject(),
+                anchor.subject(),
+            ) catch false;
+        if (!name_matches) continue;
+        if (std.mem.eql(
+            u8,
+            subjectPublicKeyInfo(subject),
+            subjectPublicKeyInfo(anchor),
+        )) return anchor;
+    }
+    return null;
+}
+
+fn bundleCertificateDer(
+    bundle: *const Certificate.Bundle,
+    anchor_index: u32,
+) ![]const u8 {
+    const anchor_element = Certificate.der.Element.parse(
+        bundle.bytes.items,
+        anchor_index,
+    ) catch return error.InvalidCertificate;
+    return bundle.bytes.items[anchor_index..anchor_element.slice.end];
 }
 
 fn subjectPublicKeyInfo(subject: Certificate.Parsed) []const u8 {
@@ -726,7 +1472,10 @@ fn countCaBelow(
     current: usize,
     issuer: Certificate.Parsed,
 ) !usize {
-    if (std.mem.eql(u8, issuer.issuer(), issuer.subject())) return current;
+    if (try directoryNamesEqual(
+        issuer.issuer(),
+        issuer.subject(),
+    )) return current;
     return std.math.add(usize, current, 1) catch
         error.CertificatePathLengthExceeded;
 }
@@ -743,8 +1492,10 @@ const CertificateUsage = struct {
     server_auth: bool = false,
     client_auth: bool = false,
     any_extended_key_usage: bool = false,
+    must_staple: bool = false,
     unsupported_critical_extension: bool = false,
     name_constraints: ?[]const u8 = null,
+    policy_extensions: certificate_policy.Extensions = .{},
     subject_key_identifier: ?[]const u8 = null,
     authority_key_identifier: ?[]const u8 = null,
 };
@@ -807,10 +1558,17 @@ fn validateLeafUsageProfile(
     usage: CertificateUsage,
     purpose: EndpointPurpose,
 ) !void {
+    if (purpose == .certificate_authority) {
+        return validateIssuerUsageProfile(usage, 0, purpose);
+    }
+    const crl_signing = purpose == .crl_signing;
     if (usage.unsupported_critical_extension or
-        (usage.basic_constraints_present and usage.is_ca) or
-        usage.name_constraints != null or
-        (usage.key_usage_present and !usage.digital_signature) or
+        (!crl_signing and usage.basic_constraints_present and usage.is_ca) or
+        (!crl_signing and usage.name_constraints != null) or
+        (usage.key_usage_present and if (crl_signing)
+            !usage.crl_sign
+        else
+            !usage.digital_signature) or
         (usage.extended_key_usage_present and
             !purposeAllowed(usage, purpose) and
             !usage.any_extended_key_usage))
@@ -858,6 +1616,8 @@ fn purposeAllowed(
     return switch (purpose) {
         .server_auth => usage.server_auth,
         .client_auth => usage.client_auth,
+        .crl_signing => false,
+        .certificate_authority => true,
     };
 }
 
@@ -928,6 +1688,16 @@ fn certificateUsage(certificate_der: []const u8) !CertificateUsage {
             result.server_auth = extended.server_auth;
             result.client_auth = extended.client_auth;
             result.any_extended_key_usage = extended.any;
+        } else if (std.mem.eql(
+            u8,
+            oid.value,
+            &.{ 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x18 },
+        )) {
+            const features = try parseTlsFeatures(value.value);
+            result.must_staple = features.status_request;
+            if (critical and features.unsupported) {
+                result.unsupported_critical_extension = true;
+            }
         } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x11 })) {
             // Hostname verification above consumes subjectAltName.
         } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x0e })) {
@@ -949,9 +1719,37 @@ fn certificateUsage(certificate_der: []const u8) !CertificateUsage {
             }
             try validateNameConstraintsSyntax(value.value);
             result.name_constraints = value.value;
+        } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x20 })) {
+            result.policy_extensions.certificate_policies = .{
+                .encoded = value.value,
+                .critical = critical,
+            };
+        } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x21 })) {
+            result.policy_extensions.policy_mappings = .{
+                .encoded = value.value,
+                .critical = critical,
+            };
+        } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x24 })) {
+            result.policy_extensions.policy_constraints = .{
+                .encoded = value.value,
+                .critical = critical,
+            };
+        } else if (std.mem.eql(u8, oid.value, &.{ 0x55, 0x1d, 0x36 })) {
+            result.policy_extensions.inhibit_any_policy = .{
+                .encoded = value.value,
+                .critical = critical,
+            };
         } else if (critical) {
             result.unsupported_critical_extension = true;
         }
+    }
+    try certificate_policy.validateExtensions(result.policy_extensions);
+    if (!result.is_ca and
+        (result.policy_extensions.policy_mappings != null or
+            result.policy_extensions.policy_constraints != null or
+            result.policy_extensions.inhibit_any_policy != null))
+    {
+        return error.InvalidCertificatePolicy;
     }
     return result;
 }
@@ -1135,8 +1933,7 @@ fn authorityIssuerMatches(
         if (name.tag != 0xa4) continue;
         const directory_name = try singleInner(name.value, 0x30);
         saw_directory_name = true;
-        if (std.mem.eql(
-            u8,
+        if (try directoryNamesEqual(
             directory_name.value,
             candidate_issuer_name,
         )) return true;
@@ -1216,13 +2013,29 @@ fn validateCertificateNamesAgainstConstraints(
     constraints: []const u8,
     certificate: *const Certificate.Parsed,
 ) !void {
+    const subject = certificate.subject();
+    if (subject.len != 0) {
+        try validateNameConstraints(
+            constraints,
+            .{ .directory = subject },
+        );
+    }
     const encoded_names = certificate.subjectAltName();
-    if (encoded_names.len == 0) return;
+    if (encoded_names.len == 0) {
+        return validateSubjectEmailAddresses(
+            constraints,
+            certificate.subject(),
+        );
+    }
     const names = singleInner(encoded_names, 0x30) catch
         return error.InvalidCertificateExtension;
     var reader = DerReader{ .bytes = names.value };
     while (try reader.next()) |name| {
         switch (name.tag) {
+            0x81 => try validateNameConstraints(
+                constraints,
+                .{ .rfc822 = try parseRfc822Name(name.value) },
+            ),
             0x82 => {
                 if (name.value.len == 0) {
                     return error.InvalidCertificateExtension;
@@ -1232,6 +2045,10 @@ fn validateCertificateNamesAgainstConstraints(
                     .{ .dns = name.value },
                 );
             },
+            0x86 => try validateNameConstraints(
+                constraints,
+                .{ .uri = try parseUriHost(name.value) },
+            ),
             0x87 => {
                 if (name.value.len == 4) {
                     try validateNameConstraints(
@@ -1247,7 +2064,47 @@ fn validateCertificateNamesAgainstConstraints(
                     return error.InvalidCertificateExtension;
                 }
             },
+            0xa4 => {
+                const directory_name = try singleInner(name.value, 0x30);
+                try validateNameConstraints(
+                    constraints,
+                    .{ .directory = directory_name.value },
+                );
+            },
             else => {},
+        }
+    }
+}
+
+const oid_email_address = [_]u8{
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x01,
+};
+
+fn validateSubjectEmailAddresses(
+    constraints: []const u8,
+    subject: []const u8,
+) !void {
+    var rdns = DerReader{ .bytes = subject };
+    while (try rdns.next()) |rdn| {
+        if (rdn.tag != 0x31) return error.InvalidCertificateExtension;
+        var attributes = DerReader{ .bytes = rdn.value };
+        while (try attributes.next()) |attribute| {
+            if (attribute.tag != 0x30) {
+                return error.InvalidCertificateExtension;
+            }
+            var fields = DerReader{ .bytes = attribute.value };
+            const oid = try fields.require(0x06);
+            const value = (try fields.next()) orelse
+                return error.InvalidCertificateExtension;
+            if (try fields.next() != null) {
+                return error.InvalidCertificateExtension;
+            }
+            if (!std.mem.eql(u8, oid.value, &oid_email_address)) continue;
+            if (value.tag != 0x16) return error.InvalidCertificateExtension;
+            try validateNameConstraints(
+                constraints,
+                .{ .rfc822 = try parseRfc822Name(value.value) },
+            );
         }
     }
 }
@@ -1292,6 +2149,15 @@ fn parseNameConstraints(
             const base = (try subtree_fields.next()) orelse
                 return error.InvalidCertificateExtension;
             const relevant = switch (base.tag) {
+                0x81 => blk: {
+                    if (!validRfc822Constraint(base.value)) {
+                        return error.InvalidCertificateExtension;
+                    }
+                    break :blk if (identity) |name| switch (name) {
+                        .rfc822 => true,
+                        else => false,
+                    } else false;
+                },
                 0x82 => blk: {
                     if (!validDnsConstraint(base.value)) {
                         return error.InvalidCertificateExtension;
@@ -1301,11 +2167,31 @@ fn parseNameConstraints(
                         else => false,
                     } else false;
                 },
+                0x86 => blk: {
+                    if (!validUriConstraint(base.value)) {
+                        return error.InvalidCertificateExtension;
+                    }
+                    break :blk if (identity) |name| switch (name) {
+                        .uri => true,
+                        else => false,
+                    } else false;
+                },
                 0x87 => blk: {
                     try validateIpConstraint(base.value);
                     break :blk if (identity) |name| switch (name) {
                         .ip4 => base.value.len == 8,
                         .ip6 => base.value.len == 32,
+                        else => false,
+                    } else false;
+                },
+                0xa4 => blk: {
+                    const directory_name = try singleInner(
+                        base.value,
+                        0x30,
+                    );
+                    try validateDirectoryName(directory_name.value);
+                    break :blk if (identity) |name| switch (name) {
+                        .directory => true,
                         else => false,
                     } else false;
                 },
@@ -1321,7 +2207,7 @@ fn parseNameConstraints(
                 }
             }
             if (relevant and !excluded) result.saw_permitted = true;
-            if (evaluate and relevant and identityMatchesConstraint(
+            if (evaluate and relevant and try identityMatchesConstraint(
                 identity.?,
                 base,
             )) {
@@ -1361,13 +2247,230 @@ fn validateIpConstraint(constraint: []const u8) !void {
     }
 }
 
+fn validRfc822Constraint(value: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, value, '@') != null) {
+        _ = parseRfc822Name(value) catch return false;
+        return true;
+    }
+    return validDnsConstraint(value);
+}
+
+fn parseRfc822Name(value: []const u8) !Rfc822Name {
+    if (value.len < 3) return error.InvalidCertificateExtension;
+    var at: usize = 0;
+    if (value[0] == '"') {
+        var index: usize = 1;
+        var closed = false;
+        while (index < value.len) : (index += 1) {
+            const byte = value[index];
+            if (byte == '\\') {
+                index += 1;
+                if (index >= value.len or
+                    value[index] < 0x20 or value[index] >= 0x7f)
+                {
+                    return error.InvalidCertificateExtension;
+                }
+                continue;
+            }
+            if (byte == '"') {
+                at = index + 1;
+                closed = true;
+                break;
+            }
+            if (byte < 0x20 or byte >= 0x7f) {
+                return error.InvalidCertificateExtension;
+            }
+        }
+        if (!closed or at >= value.len or value[at] != '@') {
+            return error.InvalidCertificateExtension;
+        }
+    } else {
+        at = std.mem.indexOfScalar(u8, value, '@') orelse
+            return error.InvalidCertificateExtension;
+        if (at == 0) return error.InvalidCertificateExtension;
+        var previous_dot = true;
+        for (value[0..at]) |byte| {
+            if (byte == '.') {
+                if (previous_dot) return error.InvalidCertificateExtension;
+                previous_dot = true;
+            } else {
+                if (!isRfc822Atext(byte)) {
+                    return error.InvalidCertificateExtension;
+                }
+                previous_dot = false;
+            }
+        }
+        if (previous_dot) return error.InvalidCertificateExtension;
+    }
+    if (at + 1 >= value.len or
+        std.mem.indexOfScalar(u8, value[at + 1 ..], '@') != null)
+    {
+        return error.InvalidCertificateExtension;
+    }
+    const domain = value[at + 1 ..];
+    if (domain[0] == '.' or !validDnsConstraint(domain)) {
+        return error.InvalidCertificateExtension;
+    }
+    return .{ .local = value[0..at], .domain = domain };
+}
+
+fn isRfc822Atext(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or switch (byte) {
+        '!',
+        '#',
+        '$',
+        '%',
+        '&',
+        '\'',
+        '*',
+        '+',
+        '-',
+        '/',
+        '=',
+        '?',
+        '^',
+        '_',
+        '`',
+        '{',
+        '|',
+        '}',
+        '~',
+        => true,
+        else => false,
+    };
+}
+
+fn rfc822WithinConstraint(
+    mailbox: Rfc822Name,
+    constraint: []const u8,
+) bool {
+    if (std.mem.indexOfScalar(u8, constraint, '@') != null) {
+        const required = parseRfc822Name(constraint) catch return false;
+        return std.mem.eql(u8, mailbox.local, required.local) and
+            std.ascii.eqlIgnoreCase(mailbox.domain, required.domain);
+    }
+    if (constraint[0] == '.') {
+        return dnsWithinConstraint(mailbox.domain, constraint);
+    }
+    return std.ascii.eqlIgnoreCase(mailbox.domain, constraint);
+}
+
+fn validUriConstraint(value: []const u8) bool {
+    if (!validDnsConstraint(value)) return false;
+    const host = if (value[0] == '.') value[1..] else value;
+    if (std.Io.net.IpAddress.parse(host, 0)) |_| return false else |_| {}
+    return true;
+}
+
+fn parseUriHost(uri: []const u8) ![]const u8 {
+    if (uri.len < 4 or !std.ascii.isAlphabetic(uri[0])) {
+        return error.InvalidCertificateExtension;
+    }
+    var scheme_end: ?usize = null;
+    for (uri[1..], 1..) |byte, index| {
+        if (byte == ':') {
+            scheme_end = index;
+            break;
+        }
+        if (!std.ascii.isAlphanumeric(byte) and
+            byte != '+' and byte != '-' and byte != '.')
+        {
+            return error.InvalidCertificateExtension;
+        }
+    }
+    const colon = scheme_end orelse return error.InvalidCertificateExtension;
+    if (colon + 3 > uri.len or
+        !std.mem.eql(u8, uri[colon + 1 ..][0..2], "//"))
+    {
+        return error.InvalidCertificateExtension;
+    }
+    for (uri) |byte| {
+        if (byte <= 0x20 or byte >= 0x7f) {
+            return error.InvalidCertificateExtension;
+        }
+    }
+
+    const authority_start = colon + 3;
+    var authority_end = authority_start;
+    while (authority_end < uri.len and
+        uri[authority_end] != '/' and
+        uri[authority_end] != '?' and
+        uri[authority_end] != '#')
+    {
+        authority_end += 1;
+    }
+    if (authority_end == authority_start) {
+        return error.InvalidCertificateExtension;
+    }
+    const authority = uri[authority_start..authority_end];
+    const host_port = if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| blk: {
+        if (std.mem.indexOfScalar(u8, authority[0..at], '@') != null) {
+            return error.InvalidCertificateExtension;
+        }
+        break :blk authority[at + 1 ..];
+    } else authority;
+    if (host_port.len == 0 or host_port[0] == '[') {
+        return error.InvalidCertificateExtension;
+    }
+
+    const host = if (std.mem.lastIndexOfScalar(u8, host_port, ':')) |port_separator| blk: {
+        const port = host_port[port_separator + 1 ..];
+        for (port) |byte| {
+            if (!std.ascii.isDigit(byte)) {
+                return error.InvalidCertificateExtension;
+            }
+        }
+        break :blk host_port[0..port_separator];
+    } else host_port;
+    if (host.len == 0 or host[0] == '.' or !validDnsConstraint(host)) {
+        return error.InvalidCertificateExtension;
+    }
+    if (std.Io.net.IpAddress.parse(host, 0)) |_| {
+        return error.InvalidCertificateExtension;
+    } else |_| {}
+    return host;
+}
+
+fn uriWithinConstraint(host: []const u8, constraint: []const u8) bool {
+    if (constraint[0] == '.') return dnsWithinConstraint(host, constraint);
+    return std.ascii.eqlIgnoreCase(host, constraint);
+}
+
+fn validateDirectoryName(name: []const u8) !void {
+    distinguished_name.validate(name) catch |err| return switch (err) {
+        error.InvalidName => error.InvalidCertificateExtension,
+        error.UnsupportedDirectoryString => error.UnsupportedCertificateNameConstraint,
+    };
+}
+
+fn directoryNameWithinConstraint(
+    name: []const u8,
+    constraint: []const u8,
+) !bool {
+    return distinguished_name.withinSubtree(
+        name,
+        constraint,
+    ) catch |err| return switch (err) {
+        error.InvalidName => error.InvalidCertificateExtension,
+        error.UnsupportedDirectoryString => error.UnsupportedCertificateNameConstraint,
+    };
+}
+
 fn identityMatchesConstraint(
     identity: ServerIdentity,
     constraint: Tlv,
-) bool {
+) !bool {
     return switch (identity) {
         .dns => |dns_name| constraint.tag == 0x82 and
             dnsWithinConstraint(dns_name, constraint.value),
+        .rfc822 => |mailbox| constraint.tag == 0x81 and
+            rfc822WithinConstraint(mailbox, constraint.value),
+        .uri => |host| constraint.tag == 0x86 and
+            uriWithinConstraint(host, constraint.value),
+        .directory => |name| if (constraint.tag == 0xa4) blk: {
+            const base = try singleInner(constraint.value, 0x30);
+            break :blk try directoryNameWithinConstraint(name, base.value);
+        } else false,
         .ip4 => |address| constraint.tag == 0x87 and
             ipWithinConstraint(&address, constraint.value),
         .ip6 => |address| constraint.tag == 0x87 and
@@ -1391,13 +2494,25 @@ fn ipWithinConstraint(
 fn validDnsConstraint(value: []const u8) bool {
     if (value.len == 0 or value[value.len - 1] == '.') return false;
     const name = if (value[0] == '.') value[1..] else value;
-    if (name.len == 0) return false;
+    if (name.len == 0 or name.len > 253) return false;
+    var label_len: usize = 0;
+    var previous: u8 = 0;
     for (name) |byte| {
-        if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '.') {
+        if (byte == '.') {
+            if (label_len == 0 or previous == '-') return false;
+            label_len = 0;
+            previous = byte;
+            continue;
+        }
+        if (!std.ascii.isAlphanumeric(byte) and byte != '-') {
             return false;
         }
+        if (label_len == 0 and byte == '-') return false;
+        label_len += 1;
+        if (label_len > 63) return false;
+        previous = byte;
     }
-    return true;
+    return label_len != 0 and previous != '-';
 }
 
 fn dnsWithinConstraint(dns_name: []const u8, constraint: []const u8) bool {
@@ -1528,6 +2643,50 @@ const ExtendedKeyUsage = struct {
     any: bool = false,
 };
 
+const TlsFeatures = struct {
+    status_request: bool = false,
+    unsupported: bool = false,
+};
+
+/// RFC 7633 encodes TLS features as a non-empty SEQUENCE OF INTEGER. This
+/// parser accepts unknown non-negative feature numbers so a non-critical
+/// extension remains forward compatible, while reporting them to the caller
+/// for critical-extension handling.
+fn parseTlsFeatures(encoded: []const u8) !TlsFeatures {
+    const sequence = try singleInner(encoded, 0x30);
+    if (sequence.value.len == 0) return error.InvalidCertificateExtension;
+
+    var result: TlsFeatures = .{};
+    var features = DerReader{ .bytes = sequence.value };
+    while (features.pos < features.bytes.len) {
+        const feature_offset = features.pos;
+        const feature = (try features.next()) orelse unreachable;
+        if (feature.tag != 0x02 or feature.value.len == 0 or
+            (feature.value[0] & 0x80) != 0 or
+            (feature.value.len > 1 and feature.value[0] == 0 and
+                (feature.value[1] & 0x80) == 0))
+        {
+            return error.InvalidCertificateExtension;
+        }
+
+        var prior = DerReader{
+            .bytes = sequence.value[0..feature_offset],
+        };
+        while (try prior.next()) |prior_feature| {
+            if (std.mem.eql(u8, prior_feature.value, feature.value)) {
+                return error.InvalidCertificateExtension;
+            }
+        }
+
+        if (feature.value.len == 1 and feature.value[0] == 5) {
+            result.status_request = true;
+        } else {
+            result.unsupported = true;
+        }
+    }
+    return result;
+}
+
 fn parseExtendedKeyUsage(encoded: []const u8) !ExtendedKeyUsage {
     const sequence = try singleInner(encoded, 0x30);
     if (sequence.value.len == 0) return error.InvalidCertificateExtension;
@@ -1657,6 +2816,7 @@ pub const testing = struct {
     pub const BasicConstraintsValue = BasicConstraints;
     pub const KeyUsageValue = KeyUsage;
     pub const ExtendedKeyUsageValue = ExtendedKeyUsage;
+    pub const TlsFeaturesValue = TlsFeatures;
 
     pub fn certificateUsage(certificate_der: []const u8) !Usage {
         return @import("trust.zig").certificateUsage(certificate_der);
@@ -1705,6 +2865,10 @@ pub const testing = struct {
         encoded: []const u8,
     ) !ExtendedKeyUsageValue {
         return @import("trust.zig").parseExtendedKeyUsage(encoded);
+    }
+
+    pub fn parseTlsFeatures(encoded: []const u8) !TlsFeaturesValue {
+        return @import("trust.zig").parseTlsFeatures(encoded);
     }
 
     pub fn parseSubjectKeyIdentifier(encoded: []const u8) ![]const u8 {
@@ -1777,5 +2941,39 @@ pub const testing = struct {
                 identity,
             ),
         }
+    }
+
+    pub fn validateRfc822NameConstraints(
+        encoded: []const u8,
+        mailbox: []const u8,
+    ) !void {
+        return @import("trust.zig").validateNameConstraints(
+            encoded,
+            .{ .rfc822 = try parseRfc822Name(mailbox) },
+        );
+    }
+
+    pub fn validateUriNameConstraints(
+        encoded: []const u8,
+        uri: []const u8,
+    ) !void {
+        return @import("trust.zig").validateNameConstraints(
+            encoded,
+            .{ .uri = try parseUriHost(uri) },
+        );
+    }
+
+    pub fn validateDirectoryNameConstraints(
+        encoded: []const u8,
+        name: []const u8,
+    ) !void {
+        return @import("trust.zig").validateNameConstraints(
+            encoded,
+            .{ .directory = name },
+        );
+    }
+
+    pub fn directoryNamesEqual(a: []const u8, b: []const u8) !bool {
+        return @import("trust.zig").directoryNamesEqual(a, b);
     }
 };

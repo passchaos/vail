@@ -20,6 +20,7 @@ pub const handshake_type_certificate_status: u8 = 0x16;
 
 const ext_server_name: u16 = 0x0000;
 const ext_status_request: u16 = 0x0005;
+const ext_status_request_v2: u16 = 0x0011;
 const ext_ec_point_formats: u16 = 0x000b;
 const ext_application_layer_protocol_negotiation: u16 = 0x0010;
 const ext_extended_master_secret: u16 = 0x0017;
@@ -71,6 +72,10 @@ pub const Policy = struct {
     /// DER-encoded OCSPResponse stapled only when the client offered the
     /// TLS 1.2 status_request extension.
     ocsp_response: ?[]const u8 = null,
+    /// RFC 6961 responses aligned with the certificate chain. This and
+    /// `ocsp_response` are mutually exclusive; a null entry encodes an empty
+    /// OCSPResponse and trailing entries may be omitted on the wire.
+    ocsp_responses: ?[]const ?[]const u8 = null,
     /// Limit this endpoint accepts for TLS 1.2 plaintext fragments.
     record_size_limit: ?u16 = null,
 };
@@ -82,6 +87,7 @@ pub const Selection = struct {
     extended_master_secret: bool,
     session_ticket_acknowledged: bool = false,
     status_request_acknowledged: bool = false,
+    status_request_v2_acknowledged: bool = false,
     local_record_size_limit: ?u16 = null,
     peer_record_size_limit: ?u16 = null,
 };
@@ -100,6 +106,7 @@ pub const ParsedServerHello = struct {
     secure_renegotiation: bool,
     session_ticket_acknowledged: bool,
     status_request_acknowledged: bool,
+    status_request_v2_acknowledged: bool,
     local_record_size_limit: ?u16,
     peer_record_size_limit: ?u16,
 };
@@ -225,6 +232,7 @@ pub fn parseServerHello(
     var seen_renegotiation = false;
     var seen_session_ticket = false;
     var seen_status_request = false;
+    var seen_status_request_v2 = false;
     var seen_record_size_limit = false;
     var peer_record_size_limit: ?u16 = null;
     var selected_alpn: ?[]const u8 = null;
@@ -285,6 +293,13 @@ pub fn parseServerHello(
                 seen_status_request = true;
                 if (payload.len != 0) return error.InvalidServerHello;
             },
+            ext_status_request_v2 => {
+                if (seen_status_request_v2) {
+                    return error.DuplicateServerExtension;
+                }
+                seen_status_request_v2 = true;
+                if (payload.len != 0) return error.InvalidServerHello;
+            },
             ext_record_size_limit => {
                 if (seen_record_size_limit) {
                     return error.DuplicateServerExtension;
@@ -308,6 +323,9 @@ pub fn parseServerHello(
     if (policy.require_secure_renegotiation and !seen_renegotiation) {
         return error.MissingSecureRenegotiation;
     }
+    if (seen_status_request and seen_status_request_v2) {
+        return error.InvalidServerHello;
+    }
     return .{
         .random = random,
         .session_id = session_id,
@@ -317,6 +335,7 @@ pub fn parseServerHello(
         .secure_renegotiation = seen_renegotiation,
         .session_ticket_acknowledged = seen_session_ticket,
         .status_request_acknowledged = seen_status_request,
+        .status_request_v2_acknowledged = seen_status_request_v2,
         .local_record_size_limit = policy.record_size_limit,
         .peer_record_size_limit = peer_record_size_limit,
     };
@@ -382,6 +401,28 @@ pub fn parseAndVerifyServerKeyExchange(
     suite: tls12.Suite,
     policy: Policy,
 ) Error!ParsedServerKeyExchange {
+    return parseAndVerifyServerKeyExchangeWithVerifier(
+        message,
+        certificate,
+        client_random,
+        server_random,
+        suite,
+        policy,
+        .{},
+    );
+}
+
+/// Authenticate an ECDHE ServerKeyExchange with caller-retained verification
+/// state when available.
+pub fn parseAndVerifyServerKeyExchangeWithVerifier(
+    message: []const u8,
+    certificate: []const u8,
+    client_random: [32]u8,
+    server_random: [32]u8,
+    suite: tls12.Suite,
+    policy: Policy,
+    verifier: auth.ClientVerifier,
+) Error!ParsedServerKeyExchange {
     var pos: usize = 0;
     if (try readByte(message, &pos) != handshake_type_server_key_exchange or
         try readU24At(message, &pos) != message.len - pos)
@@ -395,7 +436,7 @@ pub fn parseAndVerifyServerKeyExchange(
     const group = try readInt(u16, message, &pos);
     if (!containsU16(policy.groups, group)) return error.NoSupportedGroup;
     const public_key_len = try readByte(message, &pos);
-    if (public_key_len == 0 or public_key_len > key_exchange.p384.public_len) {
+    if (public_key_len == 0 or public_key_len > key_exchange.p521.public_len) {
         return error.InvalidServerKeyExchange;
     }
     const public_key = try readSlice(message, &pos, public_key_len);
@@ -412,13 +453,13 @@ pub fn parseAndVerifyServerKeyExchange(
     }
     const signature = try readSlice(message, &pos, signature_len);
     if (pos != message.len) return error.InvalidServerKeyExchange;
-    var signed_content: [64 + 1 + 2 + 1 + key_exchange.p384.public_len]u8 =
+    var signed_content: [64 + 1 + 2 + 1 + key_exchange.p521.public_len]u8 =
         undefined;
     signed_content[0..32].* = client_random;
     signed_content[32..64].* = server_random;
     const params = message[params_start..params_end];
     @memcpy(signed_content[64..][0..params.len], params);
-    try auth.verifyTls12SignedContent(
+    try verifier.verifyTls12Signature(
         certificate,
         .{ .scheme = signature_scheme, .signature = signature },
         signed_content[0 .. 64 + params.len],
@@ -474,6 +515,30 @@ pub fn select(
             return error.InvalidCertificateStatus;
         }
     }
+    if (policy.ocsp_response != null and policy.ocsp_responses != null) {
+        return error.InvalidCertificateStatus;
+    }
+    if (policy.ocsp_responses) |responses| {
+        if (responses.len == 0) return error.InvalidCertificateStatus;
+        var encoded_len: usize = 0;
+        var has_response = false;
+        for (responses) |response| {
+            const response_len = if (response) |bytes| bytes.len else 0;
+            has_response = has_response or response_len != 0;
+            if (response_len > std.math.maxInt(u24)) {
+                return error.InvalidCertificateStatus;
+            }
+            encoded_len = std.math.add(
+                usize,
+                encoded_len,
+                3 + response_len,
+            ) catch return error.InvalidCertificateStatus;
+            if (encoded_len > std.math.maxInt(u24) - 4) {
+                return error.InvalidCertificateStatus;
+            }
+        }
+        if (!has_response) return error.InvalidCertificateStatus;
+    }
     if (client.legacy_version < 0x0303 or
         !containsByte(client.compression_methods, 0))
     {
@@ -498,11 +563,19 @@ pub fn select(
     } else return error.NoSharedCipherSuite;
     const group = for (policy.groups) |candidate| {
         const implemented = candidate == key_exchange.named_group_secp256r1 or
-            candidate == key_exchange.named_group_secp384r1;
+            candidate == key_exchange.named_group_secp384r1 or
+            candidate == key_exchange.named_group_secp521r1;
         if (!implemented) continue;
         if (client.supported_groups.len == 0 or
             try client.supportsGroup(candidate)) break candidate;
     } else return error.NoSupportedGroup;
+    const acknowledge_multi = client.requests_ocsp_multi and
+        policy.ocsp_responses != null;
+    const legacy_response = policy.ocsp_response orelse
+        if (policy.ocsp_responses) |responses|
+            responses[0]
+        else
+            null;
     return .{
         .suite = suite,
         .group = group,
@@ -514,8 +587,9 @@ pub fn select(
         .session_ticket_acknowledged = policy.issue_session_ticket and
             client.session_ticket != null and
             client.offers_extended_master_secret,
-        .status_request_acknowledged = client.requests_ocsp and
-            policy.ocsp_response != null,
+        .status_request_acknowledged = !acknowledge_multi and
+            client.requests_ocsp and legacy_response != null,
+        .status_request_v2_acknowledged = acknowledge_multi,
         .local_record_size_limit = if (client.record_size_limit != null)
             policy.record_size_limit
         else
@@ -535,10 +609,16 @@ pub fn writeServerFlight(
     certificate_chain: []const []const u8,
     signer: auth.Signer,
 ) Error!ServerFlight {
+    if (policy.ocsp_responses) |responses| {
+        if (responses.len != certificate_chain.len) {
+            return error.InvalidCertificateStatus;
+        }
+    }
     const selection = try select(client, signer, policy);
     const expected_public_len: usize = switch (selection.group) {
         key_exchange.named_group_secp256r1 => key_exchange.p256.public_len,
         key_exchange.named_group_secp384r1 => key_exchange.p384.public_len,
+        key_exchange.named_group_secp521r1 => key_exchange.p521.public_len,
         else => return error.NoSupportedGroup,
     };
     if (server_public_key.len != expected_public_len or
@@ -575,13 +655,25 @@ pub fn writeServerFlight(
     try out.appendSlice(allocator, certificate.items);
     state.update(certificate.items);
 
-    if (selection.status_request_acknowledged) {
+    if (selection.status_request_v2_acknowledged) {
         var certificate_status: std.ArrayList(u8) = .empty;
         defer certificate_status.deinit(allocator);
+        try writeCertificateStatusV2(
+            &certificate_status,
+            allocator,
+            policy.ocsp_responses.?,
+        );
+        try out.appendSlice(allocator, certificate_status.items);
+        state.update(certificate_status.items);
+    } else if (selection.status_request_acknowledged) {
+        var certificate_status: std.ArrayList(u8) = .empty;
+        defer certificate_status.deinit(allocator);
+        const response = policy.ocsp_response orelse
+            policy.ocsp_responses.?[0].?;
         try writeCertificateStatus(
             &certificate_status,
             allocator,
-            policy.ocsp_response.?,
+            response,
         );
         try out.appendSlice(allocator, certificate_status.items);
         state.update(certificate_status.items);
@@ -726,6 +818,14 @@ fn writeServerHello(
             &extensions,
             allocator,
             ext_status_request,
+            &.{},
+        );
+    }
+    if (selection.status_request_v2_acknowledged) {
+        try appendExtension(
+            &extensions,
+            allocator,
+            ext_status_request_v2,
             &.{},
         );
     }
@@ -883,6 +983,87 @@ pub fn parseCertificateStatus(message: []const u8) Error![]const u8 {
     return message[8..];
 }
 
+pub fn writeCertificateStatusV2(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    ocsp_responses: []const ?[]const u8,
+) Error!void {
+    var response_count = ocsp_responses.len;
+    while (response_count != 0 and
+        ocsp_responses[response_count - 1] == null)
+    {
+        response_count -= 1;
+    }
+    if (response_count == 0) return error.InvalidCertificateStatus;
+
+    var responses_len: usize = 0;
+    for (ocsp_responses[0..response_count]) |response| {
+        const response_len = if (response) |bytes| bytes.len else 0;
+        if (response_len > std.math.maxInt(u24)) {
+            return error.InvalidCertificateStatus;
+        }
+        responses_len = std.math.add(
+            usize,
+            responses_len,
+            3 + response_len,
+        ) catch return error.InvalidCertificateStatus;
+    }
+    if (responses_len > std.math.maxInt(u24) - 4) {
+        return error.InvalidCertificateStatus;
+    }
+
+    const original_len = out.items.len;
+    errdefer out.items.len = original_len;
+    try appendHandshakeHeader(
+        out,
+        allocator,
+        handshake_type_certificate_status,
+        1 + 3 + responses_len,
+    );
+    try out.append(allocator, 2); // ocsp_multi
+    try appendU24(out, allocator, @intCast(responses_len));
+    for (ocsp_responses[0..response_count]) |response| {
+        const encoded = response orelse &.{};
+        try appendU24(out, allocator, @intCast(encoded.len));
+        try out.appendSlice(allocator, encoded);
+    }
+}
+
+pub fn parseCertificateStatusV2(
+    allocator: std.mem.Allocator,
+    message: []const u8,
+    certificate_count: usize,
+) Error![]?[]const u8 {
+    if (certificate_count == 0 or message.len < 11 or
+        message[0] != handshake_type_certificate_status or
+        readU24(message[1..4]) != message.len - 4 or
+        message[4] != 2)
+    {
+        return error.InvalidCertificateStatus;
+    }
+    const responses_len = readU24(message[5..8]);
+    if (responses_len < 3 or responses_len != message.len - 8) {
+        return error.InvalidCertificateStatus;
+    }
+
+    const responses = try allocator.alloc(?[]const u8, certificate_count);
+    errdefer allocator.free(responses);
+    @memset(responses, null);
+    var pos: usize = 8;
+    var response_index: usize = 0;
+    while (pos < message.len) : (response_index += 1) {
+        if (response_index == responses.len) {
+            return error.InvalidCertificateStatus;
+        }
+        const response_len = readU24At(message, &pos) catch
+            return error.InvalidCertificateStatus;
+        const response = readSlice(message, &pos, response_len) catch
+            return error.InvalidCertificateStatus;
+        responses[response_index] = if (response.len == 0) null else response;
+    }
+    return responses;
+}
+
 pub fn writeCertificateRequest(
     out: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -1010,7 +1191,7 @@ fn writeServerKeyExchange(
     public_key: []const u8,
     signer: auth.Signer,
 ) Error!void {
-    var params: [1 + 2 + 1 + key_exchange.p384.public_len]u8 = undefined;
+    var params: [1 + 2 + 1 + key_exchange.p521.public_len]u8 = undefined;
     params[0] = named_curve_type;
     std.mem.writeInt(u16, params[1..3], group, .big);
     params[3] = @intCast(public_key.len);
@@ -1059,6 +1240,7 @@ fn signerMatchesSuite(signer: auth.Signer, suite: tls12.Suite) bool {
         => switch (signer.scheme()) {
             auth.signature_scheme_ecdsa_secp256r1_sha256,
             auth.signature_scheme_ecdsa_secp384r1_sha384,
+            auth.signature_scheme_ecdsa_secp521r1_sha512,
             => true,
             else => false,
         },
@@ -1082,7 +1264,9 @@ fn signatureMatchesSuite(signature_scheme: u16, suite: tls12.Suite) bool {
         => signature_scheme ==
             auth.signature_scheme_ecdsa_secp256r1_sha256 or
             signature_scheme ==
-                auth.signature_scheme_ecdsa_secp384r1_sha384,
+                auth.signature_scheme_ecdsa_secp384r1_sha384 or
+            signature_scheme ==
+                auth.signature_scheme_ecdsa_secp521r1_sha512,
     };
 }
 
@@ -1245,6 +1429,44 @@ fn readU24(bytes: *const [3]u8) usize {
     return (@as(usize, bytes[0]) << 16) |
         (@as(usize, bytes[1]) << 8) |
         bytes[2];
+}
+
+test "RFC 6961 CertificateStatus response lists round-trip strictly" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeCertificateStatusV2(
+        &encoded,
+        allocator,
+        &.{ "leaf-status", null, "issuer-status", null },
+    );
+    const parsed = try parseCertificateStatusV2(
+        allocator,
+        encoded.items,
+        4,
+    );
+    defer allocator.free(parsed);
+    try std.testing.expectEqual(@as(usize, 4), parsed.len);
+    try std.testing.expectEqualStrings("leaf-status", parsed[0].?);
+    try std.testing.expect(parsed[1] == null);
+    try std.testing.expectEqualStrings("issuer-status", parsed[2].?);
+    try std.testing.expect(parsed[3] == null);
+
+    try std.testing.expectError(
+        error.InvalidCertificateStatus,
+        parseCertificateStatusV2(allocator, encoded.items, 2),
+    );
+    var malformed = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(malformed);
+    malformed[7] -%= 1;
+    try std.testing.expectError(
+        error.InvalidCertificateStatus,
+        parseCertificateStatusV2(allocator, malformed, 4),
+    );
+    try std.testing.expectError(
+        error.InvalidCertificateStatus,
+        writeCertificateStatusV2(&encoded, allocator, &.{ null, null }),
+    );
 }
 
 test "TLS 1.2 server flight is transcript-bound and signed" {
@@ -1411,6 +1633,94 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
         ),
     );
     try parseServerHelloDone(messages.server_hello_done);
+
+    var multi_hello: std.ArrayList(u8) = .empty;
+    defer multi_hello.deinit(allocator);
+    try client_hello.writeWithKeyShare(&multi_hello, allocator, .{
+        .random = [_]u8{0x34} ** 32,
+        .key_share = .{
+            .group = key_exchange.named_group_x25519,
+            .key_exchange = &([_]u8{0x35} ** 32),
+        },
+        .supported_groups = &.{
+            key_exchange.named_group_x25519,
+            key_exchange.named_group_secp256r1,
+        },
+        .additional_cipher_suites = &.{
+            @intFromEnum(tls12.Suite.ecdhe_rsa_aes_128_gcm_sha256),
+        },
+        .supported_versions = &.{0x0303},
+        .offer_extended_master_secret = true,
+        .request_ocsp = true,
+        .request_ocsp_multi = true,
+    });
+    const parsed_multi_hello = try client_hello.parse(multi_hello.items);
+    var multi_flight: std.ArrayList(u8) = .empty;
+    defer multi_flight.deinit(allocator);
+    const multi_result = try writeServerFlight(
+        &multi_flight,
+        allocator,
+        multi_hello.items,
+        parsed_multi_hello,
+        .{ .ocsp_responses = &.{ "leaf-status", "issuer-status" } },
+        [_]u8{0x36} ** 32,
+        &server_public,
+        &.{ &certificate, &certificate },
+        signer,
+    );
+    try std.testing.expect(!multi_result.selection.status_request_acknowledged);
+    try std.testing.expect(
+        multi_result.selection.status_request_v2_acknowledged,
+    );
+    const multi_messages = try splitServerFlight(multi_flight.items);
+    const parsed_multi_server = try parseServerHello(
+        multi_messages.server_hello,
+        .{ .require_secure_renegotiation = false },
+        false,
+    );
+    try std.testing.expect(
+        parsed_multi_server.status_request_v2_acknowledged,
+    );
+    const multi_status = try parseCertificateStatusV2(
+        allocator,
+        multi_messages.certificate_status.?,
+        2,
+    );
+    defer allocator.free(multi_status);
+    try std.testing.expectEqualStrings("leaf-status", multi_status[0].?);
+    try std.testing.expectEqualStrings("issuer-status", multi_status[1].?);
+    const legacy_fallback = try select(
+        parsed,
+        signer,
+        .{ .ocsp_responses = &.{ "leaf-status", "issuer-status" } },
+    );
+    try std.testing.expect(legacy_fallback.status_request_acknowledged);
+    try std.testing.expect(
+        !legacy_fallback.status_request_v2_acknowledged,
+    );
+    try std.testing.expectError(
+        error.InvalidCertificateStatus,
+        select(parsed_multi_hello, signer, .{
+            .ocsp_response = "legacy",
+            .ocsp_responses = &.{ "leaf-status", "issuer-status" },
+        }),
+    );
+    var invalid_flight: std.ArrayList(u8) = .empty;
+    defer invalid_flight.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidCertificateStatus,
+        writeServerFlight(
+            &invalid_flight,
+            allocator,
+            multi_hello.items,
+            parsed_multi_hello,
+            .{ .ocsp_responses = &.{"leaf-status"} },
+            [_]u8{0x37} ** 32,
+            &server_public,
+            &.{ &certificate, &certificate },
+            signer,
+        ),
+    );
 
     var client_key_exchange: std.ArrayList(u8) = .empty;
     defer client_key_exchange.deinit(allocator);

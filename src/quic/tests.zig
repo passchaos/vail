@@ -198,10 +198,14 @@ test "TLS runtime PSKs install QUIC 0-RTT client keys" {
     try expectHex("a1868326687403f478922e352b42a7d3", early_keys.hp[0..16]);
 }
 
-test "AES and ChaCha traffic suites round-trip without allocation" {
+test "QUIC AEAD traffic suites round-trip without allocation" {
     const secret = [_]u8{0x42} ** traffic.secret_len;
-    inline for (.{ traffic.Suite.aes_128_gcm_sha256, .chacha20_poly1305_sha256 }) |suite| {
-        const keys = traffic.Keys.derive(suite, secret, .{});
+    inline for (.{
+        traffic.Suite.aes_128_gcm_sha256,
+        .aes_128_ccm_sha256,
+        .chacha20_poly1305_sha256,
+    }) |suite| {
+        const keys = try traffic.Keys.derive(suite, secret, .{});
         const plaintext = "Vail QUIC traffic";
         var ciphertext: [plaintext.len]u8 = undefined;
         var tag: [traffic.tag_len]u8 = undefined;
@@ -218,14 +222,67 @@ test "AES and ChaCha traffic suites round-trip without allocation" {
     }
 }
 
+test "AES-CCM QUIC traffic matches an independent vector" {
+    const keys = try traffic.Keys.derive(
+        .aes_128_ccm_sha256,
+        [_]u8{0x42} ** traffic.secret_len,
+        .{},
+    );
+    try expectHex("da4f3a4cddb4f22a0a3480aa02d23e16", keys.key[0..16]);
+    try expectHex("55c937e2671304101facd192", &keys.iv);
+    try expectHex("1fa5fdcb2578e7f3bc03e9965473aa42", keys.hp[0..16]);
+
+    const plaintext = "Vail QUIC traffic";
+    var ciphertext: [plaintext.len]u8 = undefined;
+    var tag: [traffic.tag_len]u8 = undefined;
+    try keys.protect(7, "header", plaintext, &ciphertext, &tag);
+    try expectHex("b1ff573b2ba4a9e064c7beae5c0cb7c942", &ciphertext);
+    try expectHex("2775f00aa06097325ac2a26894602d99", &tag);
+    try expectHex(
+        "6c1e2bc551",
+        &keys.headerProtectionMask([_]u8{0} ** traffic.sample_len),
+    );
+}
+
+test "QUIC rejects TLS AES-128-CCM-8 explicitly" {
+    const secret = tls_secret.Secret.fromSha256([_]u8{0x42} ** traffic.secret_len);
+    try std.testing.expect(!traffic.Suite.aes_128_ccm_8_sha256.quicCompatible());
+    try std.testing.expectError(
+        error.UnsupportedCipherSuite,
+        traffic.Keys.deriveChecked(
+            .aes_128_ccm_8_sha256,
+            secret,
+            traffic.labels_v1,
+        ),
+    );
+    try std.testing.expectError(
+        error.UnsupportedCipherSuite,
+        traffic.nextTrafficSecret(
+            .aes_128_ccm_8_sha256,
+            secret,
+            traffic.labels_v1,
+        ),
+    );
+    try std.testing.expectError(
+        error.UnsupportedCipherSuite,
+        tls_secrets.keysForSecret(
+            .aes_128_ccm_8_sha256,
+            secret,
+            traffic.labels_v1,
+        ),
+    );
+}
+
 test "prepared QUIC traffic keys match value-key suites" {
     const plaintext = "prepared Vail QUIC traffic";
     const aad = "header";
     inline for (.{
         traffic.Suite.aes_128_gcm_sha256,
+        traffic.Suite.aes_128_ccm_sha256,
         traffic.Suite.aes_256_gcm_sha384,
         traffic.Suite.chacha20_poly1305_sha256,
         traffic.Suite.sm4_gcm_sm3,
+        traffic.Suite.sm4_ccm_sm3,
     }) |suite| {
         const secret: tls_secret.Secret = switch (suite.hash()) {
             .sha256 => .fromSha256([_]u8{0x61} ** 32),
@@ -440,6 +497,35 @@ test "SM4-GCM SM3 traffic keys match independent vectors" {
             .{},
         ),
     );
+}
+
+test "SM4-CCM SM3 QUIC traffic uses the RFC 8998 primitive" {
+    const secret = [_]u8{0x42} ** traffic.secret_len;
+    const keys = try traffic.Keys.deriveChecked(
+        .sm4_ccm_sm3,
+        .fromSm3(secret),
+        .{},
+    );
+    try std.testing.expect(traffic.Suite.sm4_ccm_sm3.quicCompatible());
+    try expectHex("afb128b472334cfca2b05656defda9e7", keys.key[0..16]);
+    try expectHex("3b8476ed92aea6118da10b2d", &keys.iv);
+    try expectHex("8dabfe0cd76f165e49ea063308121f02", keys.hp[0..16]);
+
+    const plaintext = "Vail SM4-CCM QUIC";
+    var ciphertext: [plaintext.len]u8 = undefined;
+    var tag: [traffic.tag_len]u8 = undefined;
+    try keys.protect(7, "header", plaintext, &ciphertext, &tag);
+    var opened: [plaintext.len]u8 = undefined;
+    try keys.open(7, "header", &ciphertext, tag, &opened);
+    try std.testing.expectEqualStrings(plaintext, &opened);
+
+    var bad_tag = tag;
+    bad_tag[0] ^= 1;
+    try std.testing.expectError(
+        error.AuthenticationFailed,
+        keys.open(7, "header", &ciphertext, bad_tag, &opened),
+    );
+    try std.testing.expectEqual([_]u8{0} ** plaintext.len, opened);
 }
 
 test "QUIC key update keeps header protection key stable" {

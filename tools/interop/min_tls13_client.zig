@@ -17,6 +17,18 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "chacha")
     else
         false;
+    const use_ccm = if (mode) |argument|
+        std.mem.eql(u8, argument, "ccm")
+    else
+        false;
+    const use_ccm8 = if (mode) |argument|
+        std.mem.eql(u8, argument, "ccm8")
+    else
+        false;
+    const use_sm4_ccm = if (mode) |argument|
+        std.mem.eql(u8, argument, "sm4-ccm")
+    else
+        false;
     const use_ticket_request = if (mode) |argument|
         std.mem.eql(u8, argument, "ticket-request")
     else
@@ -33,18 +45,33 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, argument, "pss-certificate")
     else
         false;
+    const use_p521_kx = if (mode) |argument|
+        std.mem.eql(u8, argument, "p521-kx") or
+            std.mem.eql(u8, argument, "p521-all")
+    else
+        false;
+    const port = if (args.next()) |encoded|
+        try std.fmt.parseUnsigned(u16, encoded, 10)
+    else
+        24445;
     if (args.next() != null) return error.InvalidArguments;
     const fd = try sysSocket();
     defer _ = linux.close(fd);
     var addr = std.mem.zeroes(linux.sockaddr.in);
     addr.family = linux.AF.INET;
-    addr.port = std.mem.nativeToBig(u16, 24445);
+    addr.port = std.mem.nativeToBig(u16, port);
     addr.addr = std.mem.nativeToBig(u32, 0x7f000001);
     try sysConnect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
 
-    var material = vail.tls.key_exchange.ClientKeyMaterial{
-        .x25519 = [_]u8{0x61} ** vail.tls.key_exchange.secret_len,
-    };
+    var material = if (use_p521_kx)
+        vail.tls.key_exchange.ClientKeyMaterial{
+            .secp521r1 = [_]u8{0} **
+                (vail.tls.key_exchange.p521.secret_len - 1) ++ .{7},
+        }
+    else
+        vail.tls.key_exchange.ClientKeyMaterial{
+            .x25519 = [_]u8{0x61} ** vail.tls.key_exchange.secret_len,
+        };
     var retry_material = vail.tls.key_exchange.ClientKeyMaterial{
         .secp256r1 = [_]u8{0} **
             (vail.tls.key_exchange.p256.secret_len - 1) ++ .{1},
@@ -72,6 +99,12 @@ pub fn main(init: std.process.Init) !void {
         .retry_key_material = &retry_material,
         .cipher_suites = if (use_chacha)
             &.{.chacha20_poly1305_sha256}
+        else if (use_ccm)
+            &.{.aes_128_ccm_sha256}
+        else if (use_ccm8)
+            &.{.aes_128_ccm_8_sha256}
+        else if (use_sm4_ccm)
+            &.{.sm4_ccm_sm3}
         else
             &.{.aes_128_gcm_sha256},
         .alpn_protocols = &.{"h2"},
@@ -124,6 +157,9 @@ pub fn main(init: std.process.Init) !void {
         "cipher suite={s}\n",
         .{@tagName(established.application.suite)},
     );
+    if (use_p521_kx) {
+        std.debug.print("P-521 ECDH negotiated\n", .{});
+    }
     if (established.certificate_compression) |algorithm| {
         std.debug.print(
             "certificate compression={s}\n",

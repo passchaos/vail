@@ -77,6 +77,9 @@ pub const Policy = struct {
     /// DER-encoded OCSPResponse stapled only when the client offered the
     /// status_request extension and the handshake is certificate based.
     ocsp_response: ?[]const u8 = null,
+    /// Optional TLS 1.3 per-CertificateEntry OCSP responses aligned with the
+    /// configured chain. This and `ocsp_response` are mutually exclusive.
+    ocsp_responses: ?[]const ?[]const u8 = null,
     /// Precomputed compressed Certificate messages. The first entry matching
     /// both the actual Certificate body and a client-offered algorithm wins.
     compressed_certificates: []const certificate_compression.PreparedView = &.{},

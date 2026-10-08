@@ -1,8 +1,8 @@
 //! TLS 1.3 server Certificate and CertificateVerify helpers.
 //!
 //! The handshake codec is certificate-format agnostic. Built-in possession
-//! verification supports Ed25519, ECDSA P-256/P-384, ML-DSA-44/65/87, SM2,
-//! RSA-PSS, and the TLS 1.2 RSA PKCS#1 v1.5 schemes. An allocation-free signer
+//! verification supports Ed25519, ECDSA P-256/P-384/P-521, ML-DSA-44/65/87,
+//! SM2, RSA-PSS, and the TLS 1.2 RSA PKCS#1 v1.5 schemes. An allocation-free signer
 //! callback supports additional pure-Zig or hardware-backed private-key
 //! implementations.
 //! Applications can separately provide a trust callback for chain, validity,
@@ -10,6 +10,11 @@
 
 const std = @import("std");
 
+const crypto_ed25519 = @import("../crypto/ed25519.zig");
+const crypto_mldsa = @import("../crypto/mldsa.zig");
+const p521 = @import("../crypto/p521.zig");
+const p256 = @import("../crypto/p256.zig");
+const p384 = @import("../crypto/p384.zig");
 const rsa = @import("../crypto/rsa.zig");
 const sm2 = @import("../crypto/sm2.zig");
 const x509_certificate = @import("../x509/certificate.zig");
@@ -25,9 +30,9 @@ const EcdsaP256Sha384 = std.crypto.sign.ecdsa.Ecdsa(
     std.crypto.ecc.P256,
     std.crypto.hash.sha2.Sha384,
 );
-const EcdsaP384Sha256 = std.crypto.sign.ecdsa.Ecdsa(
-    std.crypto.ecc.P384,
-    std.crypto.hash.sha2.Sha256,
+const EcdsaP256Sha512 = std.crypto.sign.ecdsa.Ecdsa(
+    std.crypto.ecc.P256,
+    std.crypto.hash.sha2.Sha512,
 );
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Sha384 = std.crypto.hash.sha2.Sha384;
@@ -35,6 +40,7 @@ const Sha512 = std.crypto.hash.sha2.Sha512;
 
 pub const signature_scheme_ecdsa_secp256r1_sha256: u16 = 0x0403;
 pub const signature_scheme_ecdsa_secp384r1_sha384: u16 = 0x0503;
+pub const signature_scheme_ecdsa_secp521r1_sha512: u16 = 0x0603;
 pub const signature_scheme_rsa_pkcs1_sha256: u16 = 0x0401;
 pub const signature_scheme_rsa_pkcs1_sha384: u16 = 0x0501;
 pub const signature_scheme_rsa_pkcs1_sha512: u16 = 0x0601;
@@ -103,6 +109,32 @@ pub fn certificateSignatureSchemes(
         .self_issued = true,
     };
     return switch (metadata.algorithm) {
+        .ecdsa_sha224,
+        .ecdsa_sha3_224,
+        .ecdsa_sha3_256,
+        .ecdsa_sha3_384,
+        .ecdsa_sha3_512,
+        .ecdsa_shake128,
+        .ecdsa_shake256,
+        => error.UnsupportedSignatureScheme,
+        .rsa_pkcs1_sha1,
+        .rsa_pss_sha224,
+        .rsa_pss_sha512_224,
+        .rsa_pss_sha512_256,
+        .rsa_pss_sha3_224,
+        .rsa_pss_sha3_256,
+        .rsa_pss_sha3_384,
+        .rsa_pss_sha3_512,
+        .rsa_pss_shake128,
+        .rsa_pss_shake256,
+        .rsa_pkcs1_sha3_224,
+        .rsa_pkcs1_sha3_256,
+        .rsa_pkcs1_sha3_384,
+        .rsa_pkcs1_sha3_512,
+        .rsa_pkcs1_sha224,
+        .rsa_pkcs1_sha512_224,
+        .rsa_pkcs1_sha512_256,
+        => error.UnsupportedSignatureScheme,
         .rsa_pss_sha256 => pssCertificateSchemes(
             signature_scheme_rsa_pss_rsae_sha256,
             signature_scheme_rsa_pss_pss_sha256,
@@ -126,6 +158,11 @@ pub fn certificateSignatureSchemes(
         .ecdsa_p384_sha384 => exactCertificateScheme(
             signature_scheme_ecdsa_secp384r1_sha384,
             .p384,
+            issuer_der,
+        ),
+        .ecdsa_sha512 => exactCertificateScheme(
+            signature_scheme_ecdsa_secp521r1_sha512,
+            .p521,
             issuer_der,
         ),
         .rsa_pkcs1_sha256 => exactCertificateScheme(
@@ -282,6 +319,7 @@ const CertificatePublicKeyKind = enum {
     rsa_pss,
     p256,
     p384,
+    p521,
     ed25519,
     other,
 };
@@ -350,6 +388,7 @@ fn certificatePublicKeyKind(
         const curve = certificate_der[parameters.content_start..parameters.end];
         if (std.mem.eql(u8, curve, &oid_p256)) return .p256;
         if (std.mem.eql(u8, curve, &oid_p384)) return .p384;
+        if (std.mem.eql(u8, curve, &oid_p521)) return .p521;
     }
     return .other;
 }
@@ -483,6 +522,8 @@ pub const ServerIdentity = struct {
 pub const Signer = union(enum) {
     ed25519: struct {
         key_pair: Ed25519.KeyPair,
+        /// Optional caller-retained expanded state for repeated signatures.
+        prepared: ?*const crypto_ed25519.PreparedSigner = null,
         /// Must be fresh per signature when non-null.
         noise: ?[Ed25519.noise_length]u8 = null,
     },
@@ -495,6 +536,16 @@ pub const Signer = union(enum) {
         key_pair: EcdsaP384Sha384.KeyPair,
         /// Must be fresh per signature when non-null.
         noise: ?[EcdsaP384Sha384.noise_length]u8 = null,
+    },
+    ecdsa_p521_sha512: struct {
+        key_pair: *const p521.KeyPair,
+        /// Used to obtain a fresh secret nonce for every signature.
+        io: std.Io,
+    },
+    ecdsa_p521_sha512_prepared: struct {
+        key_pair: *const p521.KeyPair,
+        /// Consumed and wiped by the first signature attempt.
+        nonce: *p521.PreparedNonce,
     },
     sm2sig_sm3: struct {
         key_pair: sm2.KeyPair,
@@ -516,6 +567,8 @@ pub const Signer = union(enum) {
             .ed25519 => signature_scheme_ed25519,
             .ecdsa_p256_sha256 => signature_scheme_ecdsa_secp256r1_sha256,
             .ecdsa_p384_sha384 => signature_scheme_ecdsa_secp384r1_sha384,
+            .ecdsa_p521_sha512 => signature_scheme_ecdsa_secp521r1_sha512,
+            .ecdsa_p521_sha512_prepared => signature_scheme_ecdsa_secp521r1_sha512,
             .sm2sig_sm3 => signature_scheme_sm2sig_sm3,
             .ml_dsa_44 => signature_scheme_ml_dsa_44,
             .ml_dsa_65 => signature_scheme_ml_dsa_65,
@@ -531,6 +584,8 @@ pub const Signer = union(enum) {
             .ed25519 => Ed25519.Signature.encoded_length,
             .ecdsa_p256_sha256 => EcdsaP256Sha256.Signature.der_encoded_length_max,
             .ecdsa_p384_sha384 => EcdsaP384Sha384.Signature.der_encoded_length_max,
+            .ecdsa_p521_sha512 => p521.Signature.der_encoded_length_max,
+            .ecdsa_p521_sha512_prepared => p521.Signature.der_encoded_length_max,
             .sm2sig_sm3 => sm2.Signature.der_encoded_length_max,
             .ml_dsa_44 => MlDsa44.Signature.encoded_length,
             .ml_dsa_65 => MlDsa65.Signature.encoded_length,
@@ -547,6 +602,11 @@ pub const Signer = union(enum) {
     ) Error!void {
         switch (self) {
             .ed25519 => |signer| {
+                if (signer.prepared) |prepared| {
+                    if (!prepared.matchesPublicKey(signer.key_pair.public_key)) {
+                        return error.InvalidCertificate;
+                    }
+                }
                 const leaf_key = try ed25519CertificatePublicKey(certificate);
                 if (!std.mem.eql(
                     u8,
@@ -569,6 +629,12 @@ pub const Signer = union(enum) {
                 if (!std.mem.eql(u8, &leaf_key, &signing_key)) {
                     return error.InvalidCertificate;
                 }
+            },
+            .ecdsa_p521_sha512 => |signer| {
+                try validateP521Signer(signer.key_pair, certificate);
+            },
+            .ecdsa_p521_sha512_prepared => |signer| {
+                try validateP521Signer(signer.key_pair, certificate);
             },
             .sm2sig_sm3 => |signer| {
                 const leaf_key = try sm2CertificatePublicKey(certificate);
@@ -670,22 +736,33 @@ pub const Signer = union(enum) {
                 if (output.len < Ed25519.Signature.encoded_length) {
                     return error.InvalidCertificateVerify;
                 }
-                const signature = ed.key_pair.sign(
-                    content,
-                    ed.noise,
-                ) catch return error.InvalidCertificateVerify;
+                const signature = if (ed.prepared) |prepared|
+                    if (ed.noise) |noise|
+                        prepared.sign(content, noise) catch
+                            return error.InvalidCertificateVerify
+                    else
+                        prepared.signDeterministic(content) catch
+                            return error.InvalidCertificateVerify
+                else
+                    crypto_ed25519.sign(
+                        ed.key_pair,
+                        content,
+                        ed.noise,
+                    ) catch return error.InvalidCertificateVerify;
                 const bytes = signature.toBytes();
                 @memcpy(output[0..bytes.len], &bytes);
                 break :blk bytes.len;
             },
             .ecdsa_p256_sha256 => |ecdsa| blk: {
-                const signature = ecdsa.key_pair.sign(
+                const signature = p256.sign(
+                    Sha256,
+                    ecdsa.key_pair,
                     content,
                     ecdsa.noise,
                 ) catch return error.InvalidCertificateVerify;
                 var der: [EcdsaP256Sha256.Signature.der_encoded_length_max]u8 =
                     undefined;
-                const encoded = signature.toDer(&der);
+                const encoded = p256.signatureToDer(Sha256, signature, &der);
                 if (output.len < encoded.len) {
                     return error.InvalidCertificateVerify;
                 }
@@ -693,7 +770,9 @@ pub const Signer = union(enum) {
                 break :blk encoded.len;
             },
             .ecdsa_p384_sha384 => |ecdsa| blk: {
-                const signature = ecdsa.key_pair.sign(
+                const signature = p384.sign(
+                    Sha384,
+                    ecdsa.key_pair,
                     content,
                     ecdsa.noise,
                 ) catch return error.InvalidCertificateVerify;
@@ -703,6 +782,37 @@ pub const Signer = union(enum) {
                 if (output.len < encoded.len) {
                     return error.InvalidCertificateVerify;
                 }
+                @memcpy(output[0..encoded.len], encoded);
+                break :blk encoded.len;
+            },
+            .ecdsa_p521_sha512 => |ecdsa| blk: {
+                if (output.len < p521.Signature.der_encoded_length_max) {
+                    return error.InvalidCertificateVerify;
+                }
+                var nonce = ecdsa.key_pair.prepareRandomNonce(ecdsa.io) catch
+                    return error.InvalidCertificateVerify;
+                defer nonce.deinit();
+                const signature = ecdsa.key_pair.signPrepared(
+                    Sha512,
+                    content,
+                    &nonce,
+                ) catch return error.InvalidCertificateVerify;
+                var der: [p521.Signature.der_encoded_length_max]u8 = undefined;
+                const encoded = signature.toDer(&der);
+                @memcpy(output[0..encoded.len], encoded);
+                break :blk encoded.len;
+            },
+            .ecdsa_p521_sha512_prepared => |ecdsa| blk: {
+                if (output.len < p521.Signature.der_encoded_length_max) {
+                    return error.InvalidCertificateVerify;
+                }
+                const signature = ecdsa.key_pair.signPrepared(
+                    Sha512,
+                    content,
+                    ecdsa.nonce,
+                ) catch return error.InvalidCertificateVerify;
+                var der: [p521.Signature.der_encoded_length_max]u8 = undefined;
+                const encoded = signature.toDer(&der);
                 @memcpy(output[0..encoded.len], encoded);
                 break :blk encoded.len;
             },
@@ -828,8 +938,30 @@ fn signMlDsa(
     if (output.len < MlDsa.Signature.encoded_length) {
         return error.InvalidCertificateVerify;
     }
+    if (comptime (MlDsa == MlDsa44 or MlDsa == MlDsa65 or MlDsa == MlDsa87) and
+        crypto_mldsa.mldsa_accelerated)
+    {
+        const PreparedSigner = if (MlDsa == MlDsa44)
+            crypto_mldsa.PreparedSigner44
+        else if (MlDsa == MlDsa65)
+            crypto_mldsa.PreparedSigner65
+        else
+            crypto_mldsa.PreparedSigner87;
+        var prepared = PreparedSigner.init(
+            &signer.key_pair.secret_key,
+        );
+        defer prepared.deinit();
+        const encoded = prepared.sign(
+            content,
+            signer.noise orelse .{0} ** MlDsa.noise_length,
+        );
+        @memcpy(output[0..encoded.len], &encoded);
+        return encoded.len;
+    }
     var state = signer.key_pair.signer(signer.noise) catch
         return error.InvalidCertificateVerify;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&state.h));
+    defer std.crypto.secureZero(u8, &state.rnd);
     state.update(content);
     const signature = state.finalize();
     const encoded = signature.toBytes();
@@ -882,13 +1014,212 @@ pub const CustomSigner = struct {
 pub const TrustContext = struct {
     server_name: ?[]const u8,
     chain: []const []const u8,
+    /// Backward-compatible view of the leaf CertificateEntry response.
     ocsp_response: ?[]const u8 = null,
+    /// TLS 1.3 per-CertificateEntry OCSP responses, aligned with `chain`.
+    /// Null indicates a caller using the legacy leaf-only API.
+    ocsp_responses: ?[]const ?[]const u8 = null,
 };
 
 pub const TrustCallback = *const fn (
     context: ?*anyopaque,
     trust: TrustContext,
 ) anyerror!void;
+
+/// Reusable RSA-2048/65537 public-key context for repeated TLS signature
+/// checks. Certificate matching remains enforced on every use, while
+/// Montgomery setup is paid only once with the trust configuration.
+pub const PreparedRsaVerifier = struct {
+    public_key: rsa.PreparedPublicKey,
+    public_key_fingerprint: [Sha256.digest_length]u8,
+    signature_scheme: u16,
+
+    pub fn init(
+        certificate: []const u8,
+        signature_scheme: u16,
+    ) Error!PreparedRsaVerifier {
+        const expected_key_algorithm = rsaKeyAlgorithmForScheme(
+            signature_scheme,
+        ) orelse return error.UnsupportedSignatureScheme;
+        const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
+            certificate,
+            expected_key_algorithm,
+            if (isRsaPkcs1Scheme(signature_scheme))
+                null
+            else
+                try x509PssAlgorithmForScheme(signature_scheme),
+        );
+        const components = Certificate.rsa.PublicKey.parseDer(
+            public_key_der,
+        ) catch return error.InvalidCertificate;
+        var fingerprint: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(public_key_der, &fingerprint, .{});
+        return .{
+            .public_key = rsa.PreparedPublicKey.init(
+                components.exponent,
+                components.modulus,
+            ) catch |err| switch (err) {
+                error.InvalidPublicKey => return error.InvalidCertificate,
+                else => return error.UnsupportedCertificateKey,
+            },
+            .public_key_fingerprint = fingerprint,
+            .signature_scheme = signature_scheme,
+        };
+    }
+
+    fn verify(
+        self: *const PreparedRsaVerifier,
+        certificate: []const u8,
+        parsed: ParsedCertificateVerify,
+        transcript_hash: []const u8,
+        role: EndpointRole,
+    ) Error!void {
+        if (parsed.scheme != self.signature_scheme) {
+            return error.UnsupportedSignatureScheme;
+        }
+        if (transcript_hash.len != Sha256.digest_length and
+            transcript_hash.len != Sha384.digest_length and
+            transcript_hash.len != Sha512.digest_length)
+        {
+            return error.InvalidCertificateVerify;
+        }
+        const expected_key_algorithm = rsaKeyAlgorithmForScheme(
+            parsed.scheme,
+        ) orelse return error.UnsupportedSignatureScheme;
+        const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
+            certificate,
+            expected_key_algorithm,
+            try x509PssAlgorithmForScheme(parsed.scheme),
+        );
+        var fingerprint: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(public_key_der, &fingerprint, .{});
+        if (!std.crypto.timing_safe.eql(
+            [Sha256.digest_length]u8,
+            fingerprint,
+            self.public_key_fingerprint,
+        )) return error.InvalidCertificate;
+
+        const separator = [_]u8{0};
+        const message_parts = [_][]const u8{
+            " " ** 64,
+            certificateVerifyContext(role),
+            &separator,
+            transcript_hash,
+        };
+        const verification = switch (parsed.scheme) {
+            signature_scheme_rsa_pss_rsae_sha256,
+            signature_scheme_rsa_pss_pss_sha256,
+            => self.public_key.verifyPssSha256(
+                &message_parts,
+                parsed.signature,
+            ),
+            signature_scheme_rsa_pss_rsae_sha384,
+            signature_scheme_rsa_pss_pss_sha384,
+            => self.public_key.verifyPssSha384(
+                &message_parts,
+                parsed.signature,
+            ),
+            signature_scheme_rsa_pss_rsae_sha512,
+            signature_scheme_rsa_pss_pss_sha512,
+            => self.public_key.verifyPssSha512(
+                &message_parts,
+                parsed.signature,
+            ),
+            else => return error.UnsupportedSignatureScheme,
+        };
+        verification catch |err| switch (err) {
+            error.InvalidSignature => return error.BadCertificateVerify,
+            else => return error.InvalidCertificate,
+        };
+    }
+
+    fn verifyTls12(
+        self: *const PreparedRsaVerifier,
+        certificate: []const u8,
+        parsed: ParsedCertificateVerify,
+        content: []const u8,
+    ) Error!void {
+        if (parsed.scheme != self.signature_scheme) {
+            return error.UnsupportedSignatureScheme;
+        }
+        const expected_key_algorithm = rsaKeyAlgorithmForScheme(
+            parsed.scheme,
+        ) orelse return error.UnsupportedSignatureScheme;
+        const public_key_der = try rsaCertificatePublicKeyForAlgorithm(
+            certificate,
+            expected_key_algorithm,
+            if (isRsaPkcs1Scheme(parsed.scheme))
+                null
+            else
+                try x509PssAlgorithmForScheme(parsed.scheme),
+        );
+        var fingerprint: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(public_key_der, &fingerprint, .{});
+        if (!std.crypto.timing_safe.eql(
+            [Sha256.digest_length]u8,
+            fingerprint,
+            self.public_key_fingerprint,
+        )) return error.InvalidCertificate;
+
+        const message_parts = [_][]const u8{content};
+        const verification = switch (parsed.scheme) {
+            signature_scheme_rsa_pkcs1_sha256 => self.public_key.verifyPkcs1v15Sha256(
+                &message_parts,
+                parsed.signature,
+            ),
+            signature_scheme_rsa_pkcs1_sha384 => self.public_key.verifyPkcs1v15Sha384(
+                &message_parts,
+                parsed.signature,
+            ),
+            signature_scheme_rsa_pkcs1_sha512 => self.public_key.verifyPkcs1v15Sha512(
+                &message_parts,
+                parsed.signature,
+            ),
+            signature_scheme_rsa_pss_rsae_sha256,
+            signature_scheme_rsa_pss_pss_sha256,
+            => self.public_key.verifyPssSha256(
+                &message_parts,
+                parsed.signature,
+            ),
+            signature_scheme_rsa_pss_rsae_sha384,
+            signature_scheme_rsa_pss_pss_sha384,
+            => self.public_key.verifyPssSha384(
+                &message_parts,
+                parsed.signature,
+            ),
+            signature_scheme_rsa_pss_rsae_sha512,
+            signature_scheme_rsa_pss_pss_sha512,
+            => self.public_key.verifyPssSha512(
+                &message_parts,
+                parsed.signature,
+            ),
+            else => return error.UnsupportedSignatureScheme,
+        };
+        verification catch |err| switch (err) {
+            error.InvalidSignature => return error.BadCertificateVerify,
+            else => return error.InvalidCertificate,
+        };
+    }
+};
+
+fn rsaKeyAlgorithmForScheme(
+    signature_scheme: u16,
+) ?Certificate.AlgorithmCategory {
+    return switch (signature_scheme) {
+        signature_scheme_rsa_pkcs1_sha256,
+        signature_scheme_rsa_pkcs1_sha384,
+        signature_scheme_rsa_pkcs1_sha512,
+        signature_scheme_rsa_pss_rsae_sha256,
+        signature_scheme_rsa_pss_rsae_sha384,
+        signature_scheme_rsa_pss_rsae_sha512,
+        => .rsaEncryption,
+        signature_scheme_rsa_pss_pss_sha256,
+        signature_scheme_rsa_pss_pss_sha384,
+        signature_scheme_rsa_pss_pss_sha512,
+        => .rsassa_pss,
+        else => null,
+    };
+}
 
 pub const ClientVerifier = struct {
     /// The callback owns X.509 chain/path/time/hostname/EKU policy. The codec
@@ -898,6 +1229,7 @@ pub const ClientVerifier = struct {
     pinned_ed25519_public_key: ?[Ed25519.PublicKey.encoded_length]u8 = null,
     pinned_ecdsa_p256_public_key: ?[EcdsaP256Sha256.PublicKey.uncompressed_sec1_encoded_length]u8 = null,
     pinned_ecdsa_p384_public_key: ?[EcdsaP384Sha384.PublicKey.uncompressed_sec1_encoded_length]u8 = null,
+    pinned_ecdsa_p521_public_key: ?[p521.uncompressed_sec1_encoded_length]u8 = null,
     pinned_sm2_public_key: ?[sm2.public_key_len]u8 = null,
     /// DER RSAPublicKey bytes from X.509 SubjectPublicKeyInfo's BIT STRING
     /// payload (not the complete SubjectPublicKeyInfo). The caller retains
@@ -905,6 +1237,14 @@ pub const ClientVerifier = struct {
     pinned_rsa_public_key: ?[]const u8 = null,
     /// Exact DER SubjectPublicKeyInfo pin used with RFC 7250.
     pinned_raw_public_key: ?[]const u8 = null,
+    /// Optional reusable Ed25519 table. This accelerates CertificateVerify
+    /// across connections while remaining independent from trust policy.
+    prepared_ed25519_verifier: ?*const crypto_ed25519.PreparedVerifier = null,
+    /// Optional reusable P-256 table for repeated CertificateVerify checks.
+    prepared_p256_verifier: ?*const p256.PreparedVerifier = null,
+    /// Optional reusable RSA-2048/65537 Montgomery context for TLS 1.3
+    /// CertificateVerify or TLS 1.2 signed-handshake verification.
+    prepared_rsa_verifier: ?*const PreparedRsaVerifier = null,
 
     pub fn verifyTrust(
         self: ClientVerifier,
@@ -920,13 +1260,41 @@ pub const ClientVerifier = struct {
         chain: []const []const u8,
         ocsp_response: ?[]const u8,
     ) Error!void {
+        return self.verifyTrustContext(.{
+            .server_name = server_name,
+            .chain = chain,
+            .ocsp_response = ocsp_response,
+        });
+    }
+
+    pub fn verifyTrustWithOcspResponses(
+        self: ClientVerifier,
+        server_name: ?[]const u8,
+        chain: []const []const u8,
+        ocsp_responses: []const ?[]const u8,
+    ) Error!void {
+        if (ocsp_responses.len != chain.len) {
+            return error.InvalidCertificate;
+        }
+        return self.verifyTrustContext(.{
+            .server_name = server_name,
+            .chain = chain,
+            .ocsp_response = if (ocsp_responses.len == 0)
+                null
+            else
+                ocsp_responses[0],
+            .ocsp_responses = ocsp_responses,
+        });
+    }
+
+    fn verifyTrustContext(
+        self: ClientVerifier,
+        trust: TrustContext,
+    ) Error!void {
+        const chain = trust.chain;
         if (chain.len == 0) return error.EmptyCertificateChain;
         if (self.verify_trust) |verify| {
-            verify(self.context, .{
-                .server_name = server_name,
-                .chain = chain,
-                .ocsp_response = ocsp_response,
-            }) catch return error.CertificateUntrusted;
+            verify(self.context, trust) catch return error.CertificateUntrusted;
             return;
         }
         if (self.pinned_ed25519_public_key) |pinned| {
@@ -961,6 +1329,13 @@ pub const ClientVerifier = struct {
                 actual,
                 pinned,
             )) {
+                return error.CertificateUntrusted;
+            }
+            return;
+        }
+        if (self.pinned_ecdsa_p521_public_key) |pinned| {
+            const actual = try p521CertificatePublicKey(chain[0]);
+            if (!timingSafeEqlBytes(actual, &pinned)) {
                 return error.CertificateUntrusted;
             }
             return;
@@ -1002,14 +1377,83 @@ pub const ClientVerifier = struct {
         }
         return self.verifyTrustWithOcsp(server_name, chain, null);
     }
+
+    pub fn verifyPeerCertificateVerify(
+        self: ClientVerifier,
+        certificate: []const u8,
+        parsed: ParsedCertificateVerify,
+        transcript_hash: []const u8,
+        role: EndpointRole,
+    ) Error!void {
+        if (self.prepared_ed25519_verifier) |prepared| {
+            if (parsed.scheme == signature_scheme_ed25519) {
+                return verifyCertificateVerifyForRoleWithEd25519(
+                    certificate,
+                    parsed,
+                    transcript_hash,
+                    role,
+                    prepared,
+                );
+            }
+        }
+        if (self.prepared_p256_verifier) |prepared| {
+            if (parsed.scheme == signature_scheme_ecdsa_secp256r1_sha256) {
+                return verifyCertificateVerifyForRoleWithP256(
+                    certificate,
+                    parsed,
+                    transcript_hash,
+                    role,
+                    prepared,
+                );
+            }
+        }
+        if (self.prepared_rsa_verifier) |prepared| {
+            if (parsed.scheme == prepared.signature_scheme) {
+                return prepared.verify(
+                    certificate,
+                    parsed,
+                    transcript_hash,
+                    role,
+                );
+            }
+        }
+        return verifyCertificateVerifyForRole(
+            certificate,
+            parsed,
+            transcript_hash,
+            role,
+        );
+    }
+
+    pub fn verifyTls12Signature(
+        self: ClientVerifier,
+        certificate: []const u8,
+        parsed: ParsedCertificateVerify,
+        content: []const u8,
+    ) Error!void {
+        if (self.prepared_rsa_verifier) |prepared| {
+            if (parsed.scheme == prepared.signature_scheme) {
+                return prepared.verifyTls12(
+                    certificate,
+                    parsed,
+                    content,
+                );
+            }
+        }
+        return verifyTls12SignedContent(certificate, parsed, content);
+    }
 };
 
 pub const ParsedCertificate = struct {
     entries: [][]const u8,
+    /// TLS 1.3 CertificateEntry status_request responses aligned with entries.
+    ocsp_responses: ?[]?[]const u8 = null,
+    /// Backward-compatible view of `ocsp_responses[0]`.
     ocsp_response: ?[]const u8 = null,
 
     pub fn deinit(self: *ParsedCertificate, allocator: std.mem.Allocator) void {
         allocator.free(self.entries);
+        if (self.ocsp_responses) |responses| allocator.free(responses);
         self.* = undefined;
     }
 };
@@ -1040,6 +1484,7 @@ pub fn writeCertificateWithContext(
         chain,
         request_context,
         null,
+        null,
     );
 }
 
@@ -1049,6 +1494,7 @@ pub fn writeCertificateWithOcsp(
     chain: []const []const u8,
     ocsp_response: []const u8,
 ) Error!void {
+    if (chain.len == 0) return error.EmptyCertificateChain;
     if (ocsp_response.len == 0 or
         ocsp_response.len > std.math.maxInt(u16) - 8)
     {
@@ -1060,6 +1506,30 @@ pub fn writeCertificateWithOcsp(
         chain,
         &.{},
         ocsp_response,
+        null,
+    );
+}
+
+/// Encode RFC 8446 status_request extensions for arbitrary certificate-chain
+/// entries. `ocsp_responses` is aligned with `chain`; null entries emit an
+/// empty CertificateEntry extension vector.
+pub fn writeCertificateWithOcspResponses(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    chain: []const []const u8,
+    ocsp_responses: []const ?[]const u8,
+) Error!void {
+    if (chain.len == 0) return error.EmptyCertificateChain;
+    if (ocsp_responses.len != chain.len) {
+        return error.InvalidCertificate;
+    }
+    return writeCertificateEntriesWithContext(
+        list,
+        allocator,
+        chain,
+        &.{},
+        null,
+        ocsp_responses,
     );
 }
 
@@ -1079,6 +1549,7 @@ pub fn writeClientCertificateWithContext(
         chain,
         request_context,
         null,
+        null,
     );
 }
 
@@ -1088,10 +1559,15 @@ fn writeCertificateEntriesWithContext(
     chain: []const []const u8,
     request_context: []const u8,
     leaf_ocsp_response: ?[]const u8,
+    entry_ocsp_responses: ?[]const ?[]const u8,
 ) Error!void {
     if (request_context.len > std.math.maxInt(u8)) {
         return error.InvalidCertificate;
     }
+    std.debug.assert(leaf_ocsp_response == null or
+        entry_ocsp_responses == null);
+    std.debug.assert(entry_ocsp_responses == null or
+        entry_ocsp_responses.?.len == chain.len);
     const original_len = list.items.len;
     errdefer list.items.len = original_len;
 
@@ -1105,26 +1581,36 @@ fn writeCertificateEntriesWithContext(
         writeU24(&cert_len, @intCast(cert.len));
         try entries.appendSlice(allocator, &cert_len);
         try entries.appendSlice(allocator, cert);
-        if (index == 0 and leaf_ocsp_response != null) {
-            const response = leaf_ocsp_response.?;
+        const response = if (entry_ocsp_responses) |responses|
+            responses[index]
+        else if (index == 0)
+            leaf_ocsp_response
+        else
+            null;
+        if (response) |staple| {
+            if (staple.len == 0 or
+                staple.len > std.math.maxInt(u16) - 8)
+            {
+                return error.InvalidCertificate;
+            }
             try appendInt(
                 &entries,
                 allocator,
                 u16,
-                2 + 2 + 1 + 3 + response.len,
+                2 + 2 + 1 + 3 + staple.len,
             );
             try appendInt(&entries, allocator, u16, 0x0005);
             try appendInt(
                 &entries,
                 allocator,
                 u16,
-                1 + 3 + response.len,
+                1 + 3 + staple.len,
             );
             try entries.append(allocator, 1);
             var response_len: [3]u8 = undefined;
-            writeU24(&response_len, @intCast(response.len));
+            writeU24(&response_len, @intCast(staple.len));
             try entries.appendSlice(allocator, &response_len);
-            try entries.appendSlice(allocator, response);
+            try entries.appendSlice(allocator, staple);
         } else {
             try entries.appendSlice(allocator, &.{ 0, 0 });
         }
@@ -1205,27 +1691,33 @@ fn parseCertificateEntriesWithContext(
     if (entries_end != bytes.len) return error.InvalidCertificate;
 
     var entries: std.ArrayList([]const u8) = .empty;
-    var ocsp_response: ?[]const u8 = null;
     errdefer entries.deinit(allocator);
+    var ocsp_responses: std.ArrayList(?[]const u8) = .empty;
+    errdefer ocsp_responses.deinit(allocator);
     while (pos < entries_end) {
         const cert_len = try readU24At(bytes, &pos);
         if (cert_len == 0) return error.InvalidCertificate;
         const cert = try readSlice(bytes, &pos, cert_len);
         const extensions_len = try readInt(u16, bytes, &pos);
         const extensions = try readSlice(bytes, &pos, extensions_len);
-        if (entries.items.len == 0) {
-            ocsp_response = try parseCertificateEntryExtensions(extensions);
-        } else if (try parseCertificateEntryExtensions(extensions) != null) {
-            return error.InvalidCertificate;
-        }
+        const ocsp_response = try parseCertificateEntryExtensions(extensions);
         try entries.append(allocator, cert);
+        errdefer _ = entries.pop();
+        try ocsp_responses.append(allocator, ocsp_response);
     }
     if (!allow_empty and entries.items.len == 0) {
         return error.EmptyCertificateChain;
     }
+    const owned_entries = try entries.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_entries);
+    const owned_ocsp_responses = try ocsp_responses.toOwnedSlice(allocator);
     return .{
-        .entries = try entries.toOwnedSlice(allocator),
-        .ocsp_response = ocsp_response,
+        .entries = owned_entries,
+        .ocsp_responses = owned_ocsp_responses,
+        .ocsp_response = if (owned_ocsp_responses.len == 0)
+            null
+        else
+            owned_ocsp_responses[0],
     };
 }
 
@@ -1330,6 +1822,7 @@ fn isTls13CertificateVerifyScheme(scheme: u16) bool {
     return scheme == signature_scheme_ed25519 or
         scheme == signature_scheme_ecdsa_secp256r1_sha256 or
         scheme == signature_scheme_ecdsa_secp384r1_sha384 or
+        scheme == signature_scheme_ecdsa_secp521r1_sha512 or
         scheme == signature_scheme_rsa_pss_rsae_sha256 or
         scheme == signature_scheme_rsa_pss_rsae_sha384 or
         scheme == signature_scheme_rsa_pss_rsae_sha512 or
@@ -1367,6 +1860,7 @@ pub fn parseCertificateVerify(
     if (scheme != signature_scheme_ed25519 and
         scheme != signature_scheme_ecdsa_secp256r1_sha256 and
         scheme != signature_scheme_ecdsa_secp384r1_sha384 and
+        scheme != signature_scheme_ecdsa_secp521r1_sha512 and
         scheme != signature_scheme_rsa_pkcs1_sha256 and
         scheme != signature_scheme_rsa_pkcs1_sha384 and
         scheme != signature_scheme_rsa_pkcs1_sha512 and
@@ -1423,36 +1917,37 @@ pub fn verifySignedContent(
             const signature = Ed25519.Signature.fromBytes(
                 parsed.signature[0..Ed25519.Signature.encoded_length].*,
             );
-            signature.verify(content, public_key) catch
+            crypto_ed25519.verify(signature, content, public_key) catch
                 return error.BadCertificateVerify;
         },
         signature_scheme_ecdsa_secp256r1_sha256 => {
             const public_key_bytes =
                 try p256CertificatePublicKey(certificate);
-            const public_key = EcdsaP256Sha256.PublicKey.fromSec1(
+            try verifyP256Content(
+                Sha256,
                 &public_key_bytes,
-            ) catch return error.InvalidCertificate;
-            const signature = EcdsaP256Sha256.Signature.fromDer(
                 parsed.signature,
-            ) catch return error.InvalidCertificateVerify;
-            var verifier = signature.verifier(public_key) catch
-                return error.BadCertificateVerify;
-            verifier.update(content);
-            verifier.verify() catch return error.BadCertificateVerify;
+                content,
+            );
         },
         signature_scheme_ecdsa_secp384r1_sha384 => {
             const public_key_bytes =
                 try p384CertificatePublicKey(certificate);
-            const public_key = EcdsaP384Sha384.PublicKey.fromSec1(
+            try verifyP384Content(
+                Sha384,
                 &public_key_bytes,
-            ) catch return error.InvalidCertificate;
-            const signature = EcdsaP384Sha384.Signature.fromDer(
                 parsed.signature,
-            ) catch return error.InvalidCertificateVerify;
-            var verifier = signature.verifier(public_key) catch
-                return error.BadCertificateVerify;
-            verifier.update(content);
-            verifier.verify() catch return error.BadCertificateVerify;
+                content,
+            );
+        },
+        signature_scheme_ecdsa_secp521r1_sha512 => p521.verify(
+            Sha512,
+            content,
+            parsed.signature,
+            try p521CertificatePublicKey(certificate),
+        ) catch |err| switch (err) {
+            error.InvalidPublicKey => return error.InvalidCertificate,
+            error.InvalidSignature => return error.BadCertificateVerify,
         },
         signature_scheme_ml_dsa_44 => try verifyMlDsaContent(
             MlDsa44,
@@ -1540,6 +2035,36 @@ pub fn verifySignedContent(
     }
 }
 
+fn verifyP521CertificateVerify(
+    certificate: []const u8,
+    signature: []const u8,
+    transcript_hash: []const u8,
+    role: EndpointRole,
+) Error!void {
+    const context = certificateVerifyContext(role);
+    var signed_content: [
+        64 + client_certificate_verify_context.len + 1 +
+            Sha512.digest_length
+    ]u8 = undefined;
+    @memset(signed_content[0..64], 0x20);
+    @memcpy(signed_content[64 .. 64 + context.len], context);
+    const separator = 64 + context.len;
+    signed_content[separator] = 0;
+    @memcpy(
+        signed_content[separator + 1 ..][0..transcript_hash.len],
+        transcript_hash,
+    );
+    p521.verify(
+        Sha512,
+        signed_content[0 .. separator + 1 + transcript_hash.len],
+        signature,
+        try p521CertificatePublicKey(certificate),
+    ) catch |err| switch (err) {
+        error.InvalidPublicKey => return error.InvalidCertificate,
+        error.InvalidSignature => return error.BadCertificateVerify,
+    };
+}
+
 /// TLS 1.2 ECDSA SignatureScheme values bind only the hash and signature
 /// algorithm; unlike TLS 1.3, they do not constrain the certificate curve.
 /// RSA-PSS, RSA PKCS#1 v1.5, and Ed25519 retain their ordinary scheme
@@ -1574,35 +2099,79 @@ pub fn verifyTls12SignedContent(
         signature_scheme_ecdsa_secp256r1_sha256 => {
             const curve = try certificateCurve(certificate);
             switch (curve) {
-                .p256 => try verifyEcdsaContent(
-                    EcdsaP256Sha256,
+                .p256 => try verifyP256Content(
+                    Sha256,
                     &try p256CertificatePublicKey(certificate),
                     parsed.signature,
                     content,
                 ),
-                .p384 => try verifyEcdsaContent(
-                    EcdsaP384Sha256,
+                .p384 => try verifyP384Content(
+                    Sha256,
                     &try p384CertificatePublicKey(certificate),
                     parsed.signature,
                     content,
                 ),
+                .p521 => p521.verify(
+                    Sha256,
+                    content,
+                    parsed.signature,
+                    try p521CertificatePublicKey(certificate),
+                ) catch |err| switch (err) {
+                    error.InvalidPublicKey => return error.InvalidCertificate,
+                    error.InvalidSignature => return error.BadCertificateVerify,
+                },
             }
         },
         signature_scheme_ecdsa_secp384r1_sha384 => {
             const curve = try certificateCurve(certificate);
             switch (curve) {
-                .p256 => try verifyEcdsaContent(
-                    EcdsaP256Sha384,
+                .p256 => try verifyP256Content(
+                    Sha384,
                     &try p256CertificatePublicKey(certificate),
                     parsed.signature,
                     content,
                 ),
-                .p384 => try verifyEcdsaContent(
-                    EcdsaP384Sha384,
+                .p384 => try verifyP384Content(
+                    Sha384,
                     &try p384CertificatePublicKey(certificate),
                     parsed.signature,
                     content,
                 ),
+                .p521 => p521.verify(
+                    Sha384,
+                    content,
+                    parsed.signature,
+                    try p521CertificatePublicKey(certificate),
+                ) catch |err| switch (err) {
+                    error.InvalidPublicKey => return error.InvalidCertificate,
+                    error.InvalidSignature => return error.BadCertificateVerify,
+                },
+            }
+        },
+        signature_scheme_ecdsa_secp521r1_sha512 => {
+            const curve = try certificateCurve(certificate);
+            switch (curve) {
+                .p256 => try verifyP256Content(
+                    Sha512,
+                    &try p256CertificatePublicKey(certificate),
+                    parsed.signature,
+                    content,
+                ),
+                .p384 => try verifyP384Content(
+                    Sha512,
+                    &try p384CertificatePublicKey(certificate),
+                    parsed.signature,
+                    content,
+                ),
+                .p521 => p521.verify(
+                    Sha512,
+                    content,
+                    parsed.signature,
+                    try p521CertificatePublicKey(certificate),
+                ) catch |err| switch (err) {
+                    error.InvalidPublicKey => return error.InvalidCertificate,
+                    error.InvalidSignature => return error.BadCertificateVerify,
+                },
             }
         },
         else => try verifySignedContent(certificate, parsed, content),
@@ -1648,7 +2217,7 @@ fn verifyRsaPkcs1Content(
     }
 }
 
-const CertificateCurve = enum { p256, p384 };
+const CertificateCurve = enum { p256, p384, p521 };
 
 fn certificateCurve(certificate: []const u8) Error!CertificateCurve {
     if (certificate.len ==
@@ -1665,10 +2234,18 @@ fn certificateCurve(certificate: []const u8) Error!CertificateCurve {
             return error.InvalidCertificate;
         return .p384;
     }
+    if (certificate.len == p521.uncompressed_sec1_encoded_length or
+        certificate.len == p521.compressed_sec1_encoded_length)
+    {
+        p521.validatePublicKey(certificate) catch
+            return error.InvalidCertificate;
+        return .p521;
+    }
     if (try parseRawSpki(certificate)) |spki| {
         return switch (spki.kind) {
             .p256 => .p256,
             .p384 => .p384,
+            .p521 => .p521,
             else => error.UnsupportedCertificateKey,
         };
     }
@@ -1679,21 +2256,43 @@ fn certificateCurve(certificate: []const u8) Error!CertificateCurve {
     return switch (parsed_certificate.pub_key_algo.X9_62_id_ecPublicKey) {
         .X9_62_prime256v1 => .p256,
         .secp384r1 => .p384,
-        else => error.UnsupportedCertificateKey,
+        .secp521r1 => .p521,
     };
 }
 
-fn verifyEcdsaContent(
-    comptime Ecdsa: type,
+fn verifyP256Content(
+    comptime Hash: type,
     public_key_bytes: []const u8,
     signature_bytes: []const u8,
     content: []const u8,
 ) Error!void {
+    const Ecdsa = std.crypto.sign.ecdsa.Ecdsa(
+        std.crypto.ecc.P256,
+        Hash,
+    );
     const public_key = Ecdsa.PublicKey.fromSec1(public_key_bytes) catch
         return error.InvalidCertificate;
     const signature = Ecdsa.Signature.fromDer(signature_bytes) catch
         return error.InvalidCertificateVerify;
-    signature.verify(content, public_key) catch
+    p256.verify(Hash, content, signature, public_key) catch
+        return error.BadCertificateVerify;
+}
+
+fn verifyP384Content(
+    comptime Hash: type,
+    public_key_bytes: []const u8,
+    signature_bytes: []const u8,
+    content: []const u8,
+) Error!void {
+    const Ecdsa = std.crypto.sign.ecdsa.Ecdsa(
+        std.crypto.ecc.P384,
+        Hash,
+    );
+    const public_key = Ecdsa.PublicKey.fromSec1(public_key_bytes) catch
+        return error.InvalidCertificate;
+    const signature = Ecdsa.Signature.fromDer(signature_bytes) catch
+        return error.InvalidCertificateVerify;
+    p384.verify(Hash, content, signature, public_key) catch
         return error.BadCertificateVerify;
 }
 
@@ -1720,10 +2319,7 @@ fn mlDsaCertificatePublicKey(
     certificate: []const u8,
 ) Error![MlDsa.PublicKey.encoded_length]u8 {
     if (certificate.len == MlDsa.PublicKey.encoded_length) {
-        const encoded = certificate[0..MlDsa.PublicKey.encoded_length].*;
-        _ = MlDsa.PublicKey.fromBytes(encoded) catch
-            return error.InvalidCertificate;
-        return encoded;
+        return certificate[0..MlDsa.PublicKey.encoded_length].*;
     }
     const spki = (try parseRawSpki(certificate)) orelse
         return error.UnsupportedCertificateKey;
@@ -1732,10 +2328,7 @@ fn mlDsaCertificatePublicKey(
     {
         return error.UnsupportedCertificateKey;
     }
-    const encoded = spki.public_key[0..MlDsa.PublicKey.encoded_length].*;
-    _ = MlDsa.PublicKey.fromBytes(encoded) catch
-        return error.InvalidCertificate;
-    return encoded;
+    return spki.public_key[0..MlDsa.PublicKey.encoded_length].*;
 }
 
 fn verifyMlDsaContent(
@@ -1748,14 +2341,40 @@ fn verifyMlDsaContent(
     if (signature_bytes.len != MlDsa.Signature.encoded_length) {
         return error.InvalidCertificateVerify;
     }
-    const public_key = MlDsa.PublicKey.fromBytes(
-        try mlDsaCertificatePublicKey(MlDsa, expected_kind, certificate),
-    ) catch return error.InvalidCertificate;
-    const signature = MlDsa.Signature.fromBytes(
-        signature_bytes[0..MlDsa.Signature.encoded_length].*,
-    ) catch return error.InvalidCertificateVerify;
-    signature.verify(content, public_key) catch
-        return error.BadCertificateVerify;
+    const encoded = try mlDsaCertificatePublicKey(
+        MlDsa,
+        expected_kind,
+        certificate,
+    );
+    if (comptime MlDsa == MlDsa44 or MlDsa == MlDsa65 or MlDsa == MlDsa87) {
+        const PreparedVerifier = if (MlDsa == MlDsa44)
+            crypto_mldsa.PreparedVerifier44
+        else if (MlDsa == MlDsa65)
+            crypto_mldsa.PreparedVerifier65
+        else
+            crypto_mldsa.PreparedVerifier87;
+        const PreparedSignature = if (MlDsa == MlDsa44)
+            crypto_mldsa.PreparedSignature44
+        else if (MlDsa == MlDsa65)
+            crypto_mldsa.PreparedSignature65
+        else
+            crypto_mldsa.PreparedSignature87;
+        const prepared = PreparedVerifier.fromBytes(encoded) catch
+            return error.InvalidCertificate;
+        const signature = PreparedSignature.fromBytes(
+            signature_bytes[0..MlDsa.Signature.encoded_length],
+        ) catch return error.InvalidCertificateVerify;
+        prepared.verifyPrepared(&signature, content) catch
+            return error.BadCertificateVerify;
+    } else {
+        const signature = MlDsa.Signature.fromBytes(
+            signature_bytes[0..MlDsa.Signature.encoded_length].*,
+        ) catch return error.InvalidCertificateVerify;
+        const public_key = parseMlDsaPublicKey(MlDsa, encoded) catch
+            return error.InvalidCertificate;
+        signature.verify(content, public_key) catch
+            return error.BadCertificateVerify;
+    }
 }
 
 fn verifyMlDsaCertificateVerify(
@@ -1769,16 +2388,64 @@ fn verifyMlDsaCertificateVerify(
     if (signature_bytes.len != MlDsa.Signature.encoded_length) {
         return error.InvalidCertificateVerify;
     }
-    const public_key = MlDsa.PublicKey.fromBytes(
-        try mlDsaCertificatePublicKey(MlDsa, expected_kind, certificate),
-    ) catch return error.InvalidCertificate;
+    const encoded = try mlDsaCertificatePublicKey(
+        MlDsa,
+        expected_kind,
+        certificate,
+    );
+    if (comptime MlDsa == MlDsa44 or MlDsa == MlDsa65 or MlDsa == MlDsa87) {
+        const PreparedVerifier = if (MlDsa == MlDsa44)
+            crypto_mldsa.PreparedVerifier44
+        else if (MlDsa == MlDsa65)
+            crypto_mldsa.PreparedVerifier65
+        else
+            crypto_mldsa.PreparedVerifier87;
+        const PreparedSignature = if (MlDsa == MlDsa44)
+            crypto_mldsa.PreparedSignature44
+        else if (MlDsa == MlDsa65)
+            crypto_mldsa.PreparedSignature65
+        else
+            crypto_mldsa.PreparedSignature87;
+        const prepared = PreparedVerifier.fromBytes(encoded) catch
+            return error.InvalidCertificate;
+        const signature = PreparedSignature.fromBytes(
+            signature_bytes[0..MlDsa.Signature.encoded_length],
+        ) catch return error.InvalidCertificateVerify;
+        var content: [64 + server_certificate_verify_context.len + 1 + 64]u8 =
+            undefined;
+        @memset(content[0..64], ' ');
+        const context = certificateVerifyContext(role);
+        @memcpy(content[64..][0..context.len], context);
+        content[64 + context.len] = 0;
+        @memcpy(
+            content[64 + context.len + 1 ..][0..transcript_hash.len],
+            transcript_hash,
+        );
+        prepared.verifyPrepared(
+            &signature,
+            content[0 .. 64 + context.len + 1 + transcript_hash.len],
+        ) catch return error.BadCertificateVerify;
+        return;
+    }
     const signature = MlDsa.Signature.fromBytes(
         signature_bytes[0..MlDsa.Signature.encoded_length].*,
     ) catch return error.InvalidCertificateVerify;
+    const public_key = parseMlDsaPublicKey(MlDsa, encoded) catch
+        return error.InvalidCertificate;
     var verifier = signature.verifier(public_key) catch
         return error.BadCertificateVerify;
     updateCertificateVerifyInput(&verifier, transcript_hash, role);
     verifier.verify() catch return error.BadCertificateVerify;
+}
+
+fn parseMlDsaPublicKey(
+    comptime MlDsa: type,
+    encoded: [MlDsa.PublicKey.encoded_length]u8,
+) !MlDsa.PublicKey {
+    if (comptime MlDsa == MlDsa44) {
+        return crypto_mldsa.publicKey44FromBytes(encoded);
+    }
+    return MlDsa.PublicKey.fromBytes(encoded);
 }
 
 pub fn verifyCertificateVerify(
@@ -1818,10 +2485,12 @@ pub fn verifyCertificateVerifyForRole(
             const signature = Ed25519.Signature.fromBytes(
                 parsed.signature[0..Ed25519.Signature.encoded_length].*,
             );
-            var verifier = signature.verifier(public_key) catch
-                return error.BadCertificateVerify;
-            updateCertificateVerifyInput(&verifier, transcript_hash, role);
-            verifier.verify() catch return error.BadCertificateVerify;
+            verifyEd25519CertificateVerify(
+                signature,
+                public_key,
+                transcript_hash,
+                role,
+            ) catch return error.BadCertificateVerify;
         },
         signature_scheme_ml_dsa_44 => try verifyMlDsaCertificateVerify(
             MlDsa44,
@@ -1872,11 +2541,19 @@ pub fn verifyCertificateVerifyForRole(
             const signature = EcdsaP384Sha384.Signature.fromDer(
                 parsed.signature,
             ) catch return error.InvalidCertificateVerify;
-            var verifier = signature.verifier(public_key) catch
-                return error.BadCertificateVerify;
-            updateCertificateVerifyInput(&verifier, transcript_hash, role);
-            verifier.verify() catch return error.BadCertificateVerify;
+            verifyP384CertificateVerify(
+                signature,
+                public_key,
+                transcript_hash,
+                role,
+            ) catch return error.BadCertificateVerify;
         },
+        signature_scheme_ecdsa_secp521r1_sha512 => try verifyP521CertificateVerify(
+            certificate,
+            parsed.signature,
+            transcript_hash,
+            role,
+        ),
         signature_scheme_rsa_pss_rsae_sha256 => try verifyRsaPss(
             Sha256,
             .rsaEncryption,
@@ -1939,6 +2616,99 @@ pub fn verifyCertificateVerifyForRole(
         ),
         else => return error.UnsupportedSignatureScheme,
     }
+}
+
+/// Verify Ed25519 CertificateVerify with a caller-retained public-key table.
+/// The prepared key is checked against the certificate before it is used.
+pub fn verifyCertificateVerifyForRoleWithEd25519(
+    certificate: []const u8,
+    parsed: ParsedCertificateVerify,
+    transcript_hash: []const u8,
+    role: EndpointRole,
+    prepared: *const crypto_ed25519.PreparedVerifier,
+) Error!void {
+    if (parsed.scheme != signature_scheme_ed25519) {
+        return error.UnsupportedSignatureScheme;
+    }
+    if (parsed.signature.len != Ed25519.Signature.encoded_length or
+        (transcript_hash.len != Sha256.digest_length and
+            transcript_hash.len != Sha384.digest_length and
+            transcript_hash.len != Sha512.digest_length))
+    {
+        return error.InvalidCertificateVerify;
+    }
+    const public_key = Ed25519.PublicKey.fromBytes(
+        try ed25519CertificatePublicKey(certificate),
+    ) catch return error.InvalidCertificate;
+    if (!prepared.matchesPublicKey(public_key)) {
+        return error.InvalidCertificate;
+    }
+    const signature = Ed25519.Signature.fromBytes(
+        parsed.signature[0..Ed25519.Signature.encoded_length].*,
+    );
+
+    const context = certificateVerifyContext(role);
+    var signed_content: [
+        64 + client_certificate_verify_context.len + 1 +
+            Sha512.digest_length
+    ]u8 = undefined;
+    @memset(signed_content[0..64], 0x20);
+    @memcpy(signed_content[64 .. 64 + context.len], context);
+    const separator = 64 + context.len;
+    signed_content[separator] = 0;
+    @memcpy(
+        signed_content[separator + 1 ..][0..transcript_hash.len],
+        transcript_hash,
+    );
+    prepared.verify(
+        signature,
+        signed_content[0 .. separator + 1 + transcript_hash.len],
+    ) catch return error.BadCertificateVerify;
+}
+
+/// Verify P-256 CertificateVerify with a caller-retained public-key table.
+/// The prepared key is checked against the certificate before it is used.
+pub fn verifyCertificateVerifyForRoleWithP256(
+    certificate: []const u8,
+    parsed: ParsedCertificateVerify,
+    transcript_hash: []const u8,
+    role: EndpointRole,
+    prepared: *const p256.PreparedVerifier,
+) Error!void {
+    if (parsed.scheme != signature_scheme_ecdsa_secp256r1_sha256) {
+        return error.UnsupportedSignatureScheme;
+    }
+    if (transcript_hash.len != Sha256.digest_length) {
+        return error.InvalidCertificateVerify;
+    }
+    const public_key = EcdsaP256Sha256.PublicKey.fromSec1(
+        &try p256CertificatePublicKey(certificate),
+    ) catch return error.InvalidCertificate;
+    if (!prepared.matchesPublicKey(public_key.p)) {
+        return error.InvalidCertificate;
+    }
+    const signature = EcdsaP256Sha256.Signature.fromDer(
+        parsed.signature,
+    ) catch return error.InvalidCertificateVerify;
+
+    const context = certificateVerifyContext(role);
+    var signed_content: [
+        64 + client_certificate_verify_context.len + 1 +
+            Sha256.digest_length
+    ]u8 = undefined;
+    @memset(signed_content[0..64], 0x20);
+    @memcpy(signed_content[64 .. 64 + context.len], context);
+    const separator = 64 + context.len;
+    signed_content[separator] = 0;
+    @memcpy(
+        signed_content[separator + 1 ..][0..transcript_hash.len],
+        transcript_hash,
+    );
+    prepared.verify(
+        Sha256,
+        signed_content[0 .. separator + 1 + transcript_hash.len],
+        signature,
+    ) catch return error.BadCertificateVerify;
 }
 
 fn verifySm2(
@@ -2084,41 +2854,50 @@ fn verifyP256CertificateVerify(
     transcript_hash: []const u8,
     role: EndpointRole,
 ) !void {
-    const P256 = std.crypto.ecc.P256;
-    const Scalar = P256.scalar.Scalar;
-
-    const r = try Scalar.fromBytes(signature.r, .big);
-    const s = try Scalar.fromBytes(signature.s, .big);
-    if (r.isZero() or s.isZero()) return error.IdentityElement;
-
     var hasher = Sha256.init(.{});
     updateCertificateVerifyInput(&hasher, transcript_hash, role);
     var digest: [Sha256.digest_length]u8 = undefined;
     hasher.final(&digest);
-    const z = scalarFromDigest(digest);
-    if (z.isZero()) return error.SignatureVerificationFailed;
-
-    const s_inv = s.invert();
-    const v1 = z.mul(s_inv).toBytes(.little);
-    const v2 = r.mul(s_inv).toBytes(.little);
-    const point = try P256.mulDoubleBasePublic(
-        P256.basePoint,
-        v1,
-        public_key.p,
-        v2,
-        .little,
-    );
-    const x = point.affineCoordinates().x.toBytes(.big);
-    if (!r.equivalent(scalarFromDigest(x))) {
-        return error.SignatureVerificationFailed;
-    }
+    return p256.verifyPrehashed(Sha256, signature, digest, public_key);
 }
 
-fn scalarFromDigest(bytes: [32]u8) std.crypto.ecc.P256.scalar.Scalar {
-    return std.crypto.ecc.P256.scalar.Scalar.fromBytes48(
-        [_]u8{0} ** 16 ++ bytes,
-        .big,
+fn verifyEd25519CertificateVerify(
+    signature: Ed25519.Signature,
+    public_key: Ed25519.PublicKey,
+    transcript_hash: []const u8,
+    role: EndpointRole,
+) !void {
+    const context = certificateVerifyContext(role);
+    var signed_content: [
+        64 + client_certificate_verify_context.len + 1 +
+            Sha512.digest_length
+    ]u8 = undefined;
+    @memset(signed_content[0..64], 0x20);
+    @memcpy(signed_content[64 .. 64 + context.len], context);
+    const separator = 64 + context.len;
+    signed_content[separator] = 0;
+    @memcpy(
+        signed_content[separator + 1 ..][0..transcript_hash.len],
+        transcript_hash,
     );
+    return crypto_ed25519.verify(
+        signature,
+        signed_content[0 .. separator + 1 + transcript_hash.len],
+        public_key,
+    );
+}
+
+fn verifyP384CertificateVerify(
+    signature: EcdsaP384Sha384.Signature,
+    public_key: EcdsaP384Sha384.PublicKey,
+    transcript_hash: []const u8,
+    role: EndpointRole,
+) !void {
+    var hasher = Sha384.init(.{});
+    updateCertificateVerifyInput(&hasher, transcript_hash, role);
+    var digest: [Sha384.digest_length]u8 = undefined;
+    hasher.final(&digest);
+    return p384.verifyPrehashed(Sha384, signature, digest, public_key);
 }
 
 fn certificateVerifyContext(role: EndpointRole) []const u8 {
@@ -2224,6 +3003,45 @@ fn p384CertificatePublicKey(
     }
     return public_key[0..EcdsaP384Sha384.PublicKey
         .uncompressed_sec1_encoded_length].*;
+}
+
+fn p521CertificatePublicKey(certificate: []const u8) Error![]const u8 {
+    if (certificate.len == p521.uncompressed_sec1_encoded_length or
+        certificate.len == p521.compressed_sec1_encoded_length)
+    {
+        p521.validatePublicKey(certificate) catch
+            return error.InvalidCertificate;
+        return certificate;
+    }
+    if (try parseRawSpki(certificate)) |spki| {
+        if (spki.kind != .p521) return error.UnsupportedCertificateKey;
+        p521.validatePublicKey(spki.public_key) catch
+            return error.InvalidCertificate;
+        return spki.public_key;
+    }
+    const parsed = try parseX509(certificate);
+    if (parsed.pub_key_algo != .X9_62_id_ecPublicKey or
+        parsed.pub_key_algo.X9_62_id_ecPublicKey != .secp521r1)
+    {
+        return error.UnsupportedCertificateKey;
+    }
+    p521.validatePublicKey(parsed.pubKey()) catch
+        return error.InvalidCertificate;
+    return parsed.pubKey();
+}
+
+fn validateP521Signer(
+    key_pair: *const p521.KeyPair,
+    certificate: []const u8,
+) Error!void {
+    const leaf_key = try p521CertificatePublicKey(certificate);
+    const parsed_key = p521.PublicKey.fromSec1(leaf_key) catch
+        return error.InvalidCertificate;
+    const expected = parsed_key.toUncompressedSec1();
+    const actual = key_pair.public_key.toUncompressedSec1();
+    if (!std.mem.eql(u8, &expected, &actual)) {
+        return error.InvalidCertificate;
+    }
 }
 
 fn sm2CertificatePublicKey(
@@ -2341,6 +3159,7 @@ const oid_ml_dsa_65 = [_]u8{ 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x1
 const oid_ml_dsa_87 = [_]u8{ 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x13 };
 const oid_p256 = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
 const oid_p384 = [_]u8{ 0x2b, 0x81, 0x04, 0x00, 0x22 };
+const oid_p521 = [_]u8{ 0x2b, 0x81, 0x04, 0x00, 0x23 };
 
 const RawSpkiKind = enum {
     rsa_encryption,
@@ -2351,6 +3170,7 @@ const RawSpkiKind = enum {
     ml_dsa_87,
     p256,
     p384,
+    p521,
     sm2,
 };
 
@@ -2396,6 +3216,7 @@ fn parseRawSpki(bytes: []const u8) Error!?RawSpki {
         pos = parameters.end;
         if (oidEquals(bytes, parameters, &oid_p256)) break :blk .p256;
         if (oidEquals(bytes, parameters, &oid_p384)) break :blk .p384;
+        if (oidEquals(bytes, parameters, &oid_p521)) break :blk .p521;
         if (oidEquals(bytes, parameters, &oid_sm2)) break :blk .sm2;
         return error.UnsupportedCertificateKey;
     } else return null;
@@ -2414,7 +3235,8 @@ fn parseRawSpki(bytes: []const u8) Error!?RawSpki {
         pos = parameter.end;
         if (kind == .ed25519 or kind == .ml_dsa_44 or
             kind == .ml_dsa_65 or kind == .ml_dsa_87 or
-            kind == .p256 or kind == .p384 or kind == .sm2)
+            kind == .p256 or kind == .p384 or kind == .p521 or
+            kind == .sm2)
         {
             return error.InvalidCertificate;
         }
@@ -2636,6 +3458,76 @@ test "certificate signatures map to TLS signature schemes" {
     );
 }
 
+test "P-521 verifies TLS 1.2 and TLS 1.3 signatures" {
+    const vectors = @import("../x509/testdata/path_vectors.zig");
+    const root = decodeHex(vectors.p521_root_hex);
+    const leaf = decodeHex(vectors.p521_leaf_hex);
+    const content_signature = decodeHex(vectors.p521_sha512_signature_hex);
+    const server_signature = decodeHex(
+        vectors.p521_tls13_server_signature_hex,
+    );
+    const client_signature = decodeHex(
+        vectors.p521_tls13_client_signature_hex,
+    );
+
+    const certificate_scheme = try certificateSignatureSchemes(&leaf, &root);
+    try std.testing.expectEqual(
+        signature_scheme_ecdsa_secp521r1_sha512,
+        certificate_scheme.primary,
+    );
+    try verifySignedContent(
+        &root,
+        .{
+            .scheme = signature_scheme_ecdsa_secp521r1_sha512,
+            .signature = &content_signature,
+        },
+        "Vail pure Zig P-521 oracle",
+    );
+    try verifyTls12SignedContent(
+        &root,
+        .{
+            .scheme = signature_scheme_ecdsa_secp521r1_sha512,
+            .signature = &content_signature,
+        },
+        "Vail pure Zig P-521 oracle",
+    );
+
+    const transcript_hash = [_]u8{0x42} ** Sha512.digest_length;
+    try verifyCertificateVerifyForRole(
+        &root,
+        .{
+            .scheme = signature_scheme_ecdsa_secp521r1_sha512,
+            .signature = &server_signature,
+        },
+        &transcript_hash,
+        .server,
+    );
+    try verifyCertificateVerifyForRole(
+        &root,
+        .{
+            .scheme = signature_scheme_ecdsa_secp521r1_sha512,
+            .signature = &client_signature,
+        },
+        &transcript_hash,
+        .client,
+    );
+
+    var altered = server_signature;
+    altered[altered.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        verifyCertificateVerifyForRole(
+            &root,
+            .{
+                .scheme = signature_scheme_ecdsa_secp521r1_sha512,
+                .signature = &altered,
+            },
+            &transcript_hash,
+            .server,
+        ),
+    );
+}
+
 test "Certificate codec round-trips a leaf OCSP staple" {
     const allocator = std.testing.allocator;
     var encoded: std.ArrayList(u8) = .empty;
@@ -2656,6 +3548,35 @@ test "Certificate codec round-trips a leaf OCSP staple" {
         "ocsp-response",
         parsed.ocsp_response.?,
     );
+    try std.testing.expectEqual(@as(usize, 2), parsed.ocsp_responses.?.len);
+    try std.testing.expectEqualStrings(
+        "ocsp-response",
+        parsed.ocsp_responses.?[0].?,
+    );
+    try std.testing.expect(parsed.ocsp_responses.?[1] == null);
+
+    encoded.clearRetainingCapacity();
+    try writeCertificateWithOcspResponses(
+        &encoded,
+        allocator,
+        &.{ "leaf", "issuer" },
+        &.{ "leaf-response", "issuer-response" },
+    );
+    var parsed_multi = try parseCertificate(allocator, encoded.items);
+    defer parsed_multi.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), parsed_multi.entries.len);
+    try std.testing.expectEqualStrings(
+        "leaf-response",
+        parsed_multi.ocsp_response.?,
+    );
+    try std.testing.expectEqualStrings(
+        "leaf-response",
+        parsed_multi.ocsp_responses.?[0].?,
+    );
+    try std.testing.expectEqualStrings(
+        "issuer-response",
+        parsed_multi.ocsp_responses.?[1].?,
+    );
 
     try std.testing.expectError(
         error.InvalidCertificate,
@@ -2664,6 +3585,15 @@ test "Certificate codec round-trips a leaf OCSP staple" {
             allocator,
             &.{"leaf"},
             &.{},
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        writeCertificateWithOcspResponses(
+            &encoded,
+            allocator,
+            &.{ "leaf", "issuer" },
+            &.{"leaf-response"},
         ),
     );
 }
@@ -2702,6 +3632,144 @@ fn signWithTestCustomSigner(
     const encoded = signature.toBytes();
     @memcpy(output[0..encoded.len], &encoded);
     return encoded.len;
+}
+
+test "built-in Ed25519 signer emits verifiable CertificateVerify" {
+    const allocator = std.testing.allocator;
+    const key_pair = try crypto_ed25519.generateKeyPairDeterministic(
+        [_]u8{0x71} ** Ed25519.KeyPair.seed_length,
+    );
+    const public_key = key_pair.public_key.toBytes();
+    const signer = Signer{ .ed25519 = .{ .key_pair = key_pair } };
+    try (ServerIdentity{
+        .certificate_chain = &.{&public_key},
+        .signer = signer,
+    }).validate();
+
+    const transcript_hash = [_]u8{0x72} ** Sha256.digest_length;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeCertificateVerify(
+        &encoded,
+        allocator,
+        signer,
+        &transcript_hash,
+    );
+    const parsed = try parseCertificateVerify(encoded.items);
+    try std.testing.expectEqual(signature_scheme_ed25519, parsed.scheme);
+    try verifyCertificateVerify(&public_key, parsed, &transcript_hash);
+
+    const prepared = try crypto_ed25519.PreparedVerifier.init(
+        key_pair.public_key,
+    );
+    const verifier = ClientVerifier{
+        .pinned_ed25519_public_key = public_key,
+        .prepared_ed25519_verifier = &prepared,
+    };
+    try verifier.verifyPeerCertificateVerify(
+        &public_key,
+        parsed,
+        &transcript_hash,
+        .server,
+    );
+
+    var prepared_signer = try crypto_ed25519.PreparedSigner.init(key_pair);
+    defer prepared_signer.deinit();
+    const reusable_signer = Signer{ .ed25519 = .{
+        .key_pair = key_pair,
+        .prepared = &prepared_signer,
+    } };
+    encoded.clearRetainingCapacity();
+    try writeCertificateVerify(
+        &encoded,
+        allocator,
+        reusable_signer,
+        &transcript_hash,
+    );
+    const prepared_signature = try parseCertificateVerify(encoded.items);
+    try verifier.verifyPeerCertificateVerify(
+        &public_key,
+        prepared_signature,
+        &transcript_hash,
+        .server,
+    );
+
+    const other_key_pair = try crypto_ed25519.generateKeyPairDeterministic(
+        [_]u8{0x73} ** Ed25519.KeyPair.seed_length,
+    );
+    const mismatched_prepared = try crypto_ed25519.PreparedVerifier.init(
+        other_key_pair.public_key,
+    );
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        verifyCertificateVerifyForRoleWithEd25519(
+            &public_key,
+            parsed,
+            &transcript_hash,
+            .server,
+            &mismatched_prepared,
+        ),
+    );
+    var mismatched_signer = try crypto_ed25519.PreparedSigner.init(
+        other_key_pair,
+    );
+    defer mismatched_signer.deinit();
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        (ServerIdentity{
+            .certificate_chain = &.{&public_key},
+            .signer = .{ .ed25519 = .{
+                .key_pair = key_pair,
+                .prepared = &mismatched_signer,
+            } },
+        }).validate(),
+    );
+}
+
+test "prepared P-256 verifier authenticates CertificateVerify" {
+    const allocator = std.testing.allocator;
+    const key_pair = try EcdsaP256Sha256.KeyPair.generateDeterministic(
+        [_]u8{0x74} ** EcdsaP256Sha256.KeyPair.seed_length,
+    );
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const signer = Signer{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } };
+    const transcript_hash = [_]u8{0x75} ** Sha256.digest_length;
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeCertificateVerify(
+        &encoded,
+        allocator,
+        signer,
+        &transcript_hash,
+    );
+    const parsed = try parseCertificateVerify(encoded.items);
+    const prepared = try p256.PreparedVerifier.init(key_pair.public_key.p);
+    const verifier = ClientVerifier{
+        .pinned_ecdsa_p256_public_key = public_key,
+        .prepared_p256_verifier = &prepared,
+    };
+    try verifier.verifyPeerCertificateVerify(
+        &public_key,
+        parsed,
+        &transcript_hash,
+        .server,
+    );
+
+    const other_key_pair = try EcdsaP256Sha256.KeyPair.generateDeterministic(
+        [_]u8{0x76} ** EcdsaP256Sha256.KeyPair.seed_length,
+    );
+    const mismatched = try p256.PreparedVerifier.init(other_key_pair.public_key.p);
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        verifyCertificateVerifyForRoleWithP256(
+            &public_key,
+            parsed,
+            &transcript_hash,
+            .server,
+            &mismatched,
+        ),
+    );
 }
 
 test "custom signer preserves CertificateVerify construction and validation" {
@@ -2882,6 +3950,103 @@ test "RFC 7250 RSA SubjectPublicKeyInfo signs and verifies" {
             .verifyRawPublicKey("localhost", &.{&wrong}),
     );
     _ = allocator;
+}
+
+test "prepared RSA verifier matches generic TLS CertificateVerify" {
+    const allocator = std.testing.allocator;
+    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    const private_der = decodeHex(vectors.private_key_pkcs8_hex);
+    const certificate = decodeHex(vectors.certificate_hex);
+    const private = try rsa.PrivateKey.fromDer(&private_der);
+    var prepared_private = try private.prepare();
+    defer prepared_private.deinit();
+    const signer = Signer{ .rsa_pss = .{
+        .prepared_key = &prepared_private,
+        .signature_scheme = signature_scheme_rsa_pss_rsae_sha256,
+        .io = std.testing.io,
+    } };
+    const transcript_hash = [_]u8{0x5c} ** Sha256.digest_length;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeCertificateVerify(
+        &encoded,
+        allocator,
+        signer,
+        &transcript_hash,
+    );
+    const parsed = try parseCertificateVerify(encoded.items);
+    try verifyCertificateVerify(
+        &certificate,
+        parsed,
+        &transcript_hash,
+    );
+
+    const prepared = try PreparedRsaVerifier.init(
+        &certificate,
+        signature_scheme_rsa_pss_rsae_sha256,
+    );
+    try (ClientVerifier{ .prepared_rsa_verifier = &prepared })
+        .verifyPeerCertificateVerify(
+        &certificate,
+        parsed,
+        &transcript_hash,
+        .server,
+    );
+
+    encoded.items[encoded.items.len - 1] ^= 1;
+    const tampered = try parseCertificateVerify(encoded.items);
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        (ClientVerifier{ .prepared_rsa_verifier = &prepared })
+            .verifyPeerCertificateVerify(
+            &certificate,
+            tampered,
+            &transcript_hash,
+            .server,
+        ),
+    );
+}
+
+test "prepared RSA verifier matches generic TLS 1.2 PKCS1 verification" {
+    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    const private_der = decodeHex(vectors.private_key_pkcs8_hex);
+    const certificate = decodeHex(vectors.certificate_hex);
+    const private = try rsa.PrivateKey.fromDer(&private_der);
+    var prepared_private = try private.prepare();
+    defer prepared_private.deinit();
+    const signer = Signer{ .rsa_pkcs1 = .{
+        .prepared_key = &prepared_private,
+        .signature_scheme = signature_scheme_rsa_pkcs1_sha256,
+    } };
+    const content = "TLS 1.2 signed handshake content";
+    var signature: [max_classical_signature_len]u8 = undefined;
+    const signature_len = try signer.sign(content, &signature);
+    const parsed = ParsedCertificateVerify{
+        .scheme = signature_scheme_rsa_pkcs1_sha256,
+        .signature = signature[0..signature_len],
+    };
+    try verifyTls12SignedContent(&certificate, parsed, content);
+
+    const prepared = try PreparedRsaVerifier.init(
+        &certificate,
+        signature_scheme_rsa_pkcs1_sha256,
+    );
+    try (ClientVerifier{ .prepared_rsa_verifier = &prepared })
+        .verifyTls12Signature(&certificate, parsed, content);
+
+    signature[signature_len - 1] ^= 1;
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        (ClientVerifier{ .prepared_rsa_verifier = &prepared })
+            .verifyTls12Signature(
+            &certificate,
+            .{
+                .scheme = signature_scheme_rsa_pkcs1_sha256,
+                .signature = signature[0..signature_len],
+            },
+            content,
+        ),
+    );
 }
 
 test "RFC 4055 constrained RSA-PSS SubjectPublicKeyInfo enforces its profile" {
@@ -3083,6 +4248,35 @@ test "RFC 7250 elliptic-curve SubjectPublicKeyInfo signs and verifies" {
         message,
     );
 
+    var p521_secret = try p521.SecretKey.fromBytes(decodeHex(
+        "00123456789abcdef00112233445566778899aabbccddeeff1021324354657687" ++
+            "98a9bacbdcedfe0f112233445566778899aabbccddeeff00123456789abcdef1234",
+    ));
+    defer p521_secret.deinit();
+    var p521_key = try p521.KeyPair.fromSecretKey(p521_secret);
+    defer p521_key.deinit();
+    const p521_spki = p521SubjectPublicKeyInfo(
+        p521_key.public_key.toUncompressedSec1(),
+    );
+    const p521_signer = Signer{ .ecdsa_p521_sha512 = .{
+        .key_pair = &p521_key,
+        .io = std.testing.io,
+    } };
+    try (ServerIdentity{
+        .certificate_chain = &.{&p521_spki},
+        .signer = p521_signer,
+        .certificate_type = .raw_public_key,
+    }).validate();
+    const p521_signature_len = try p521_signer.sign(message, &signature);
+    try verifySignedContent(
+        &p521_spki,
+        .{
+            .scheme = p521_signer.scheme(),
+            .signature = signature[0..p521_signature_len],
+        },
+        message,
+    );
+
     const sm2_secret = try sm2.SecretKey.fromBytes(decodeHex(
         "3945208f7b2133b13f36e38ac6d39f95889393692860b51a42fb81ef4df7c5b8",
     ));
@@ -3176,6 +4370,24 @@ fn p384SubjectPublicKeyInfo(public_key: [97]u8) [120]u8 {
         0x00,
     } ++ ([_]u8{0} ** 97);
     @memcpy(spki[23..], &public_key);
+    return spki;
+}
+
+fn p521SubjectPublicKeyInfo(
+    public_key: [p521.uncompressed_sec1_encoded_length]u8,
+) [158]u8 {
+    var spki = [_]u8{
+        0x30, 0x81, 0x9b,
+        0x30, 0x10, 0x06,
+        0x07, 0x2a, 0x86,
+        0x48, 0xce, 0x3d,
+        0x02, 0x01, 0x06,
+        0x05, 0x2b, 0x81,
+        0x04, 0x00, 0x23,
+        0x03, 0x81, 0x86,
+        0x00,
+    } ++ ([_]u8{0} ** p521.uncompressed_sec1_encoded_length);
+    @memcpy(spki[25..], &public_key);
     return spki;
 }
 

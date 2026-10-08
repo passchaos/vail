@@ -33,6 +33,8 @@ pub fn main(init: std.process.Init) !void {
     private_key[private_key.len - 1] = 3;
     var private_key_p384 = [_]u8{0} ** vail.tls.key_exchange.p384.secret_len;
     private_key_p384[private_key_p384.len - 1] = 3;
+    var private_key_p521 = [_]u8{0} ** vail.tls.key_exchange.p521.secret_len;
+    private_key_p521[private_key_p521.len - 1] = 3;
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(std.heap.smp_allocator);
     var client = try Client.init(.{
@@ -49,6 +51,11 @@ pub fn main(init: std.process.Init) !void {
             &private_key_p384
         else
             null,
+        .client_private_key_p521 = if (profile.group ==
+            vail.tls.key_exchange.named_group_secp521r1)
+            &private_key_p521
+        else
+            null,
         .policy = .{
             .cipher_suites = &suites,
             .groups = &groups,
@@ -58,6 +65,10 @@ pub fn main(init: std.process.Init) !void {
             &.{vail.tls.auth.signature_scheme_rsa_pkcs1_sha256}
         else
             &vail.tls.client_hello.default_signature_schemes,
+        .client_hello_supported_groups = if (profile.p521_certificate)
+            &.{ vail.tls.key_exchange.named_group_secp256r1, 0x0019 }
+        else
+            &.{},
         .request_ocsp = profile.ocsp,
         .server_verifier = .{
             .verify_trust = if (profile.ocsp)
@@ -104,6 +115,9 @@ pub fn main(init: std.process.Init) !void {
             established.selected_alpn orelse "",
         },
     );
+    if (profile.group == vail.tls.key_exchange.named_group_secp521r1) {
+        std.debug.print("TLS 1.2 P-521 ECDH negotiated\n", .{});
+    }
 
     var request: [512]u8 = undefined;
     const request_len = try established.sealApplicationData(
@@ -135,6 +149,7 @@ const Profile = struct {
     client_auth: bool = false,
     pkcs1: bool = false,
     ocsp: bool = false,
+    p521_certificate: bool = false,
 };
 
 fn selectedProfile(init: std.process.Init) !Profile {
@@ -165,6 +180,24 @@ fn selectedProfile(init: std.process.Init) !Profile {
     }
     if (std.mem.eql(u8, name, "ecdsa-chacha")) {
         return .{ .suite = .ecdhe_ecdsa_chacha20_poly1305_sha256 };
+    }
+    if (std.mem.eql(u8, name, "p521") or
+        std.mem.eql(u8, name, "p521-all"))
+    {
+        return .{
+            .suite = .ecdhe_ecdsa_aes_128_gcm_sha256,
+            .group = if (std.mem.eql(u8, name, "p521-all"))
+                vail.tls.key_exchange.named_group_secp521r1
+            else
+                vail.tls.key_exchange.named_group_secp256r1,
+            .p521_certificate = true,
+        };
+    }
+    if (std.mem.eql(u8, name, "p521-kx")) {
+        return .{
+            .suite = .ecdhe_rsa_aes_128_gcm_sha256,
+            .group = vail.tls.key_exchange.named_group_secp521r1,
+        };
     }
     if (std.mem.eql(u8, name, "mtls")) {
         return .{

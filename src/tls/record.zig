@@ -6,17 +6,18 @@
 
 const std = @import("std");
 
+const aes_ccm = @import("../crypto/aes_ccm.zig");
 const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
 const prepared_chacha = @import("../crypto/chacha20_poly1305.zig");
+const sha256 = @import("../crypto/sha256.zig");
+const fast_sha2 = @import("../crypto/sha512.zig");
 const sm4 = @import("../crypto/sm4.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const secret = @import("secret.zig");
 
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
-const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
-const HkdfSha256 = std.crypto.kdf.hkdf.Hkdf(HmacSha256);
-const HmacSha384 = std.crypto.auth.hmac.sha2.HmacSha384;
+const HmacSha384 = std.crypto.auth.hmac.Hmac(fast_sha2.Sha384);
 const HkdfSha384 = std.crypto.kdf.hkdf.Hkdf(HmacSha384);
 const HmacSm3 = std.crypto.auth.hmac.Hmac(@import("../crypto/sm3.zig").Hash);
 const HkdfSm3 = std.crypto.kdf.hkdf.Hkdf(HmacSm3);
@@ -27,6 +28,7 @@ pub const content_type_alert: u8 = 21;
 pub const legacy_record_version = [_]u8{ 0x03, 0x03 };
 pub const header_len = 5;
 pub const iv_len = 12;
+/// Maximum TLS 1.3 AEAD tag length; individual suites can use less.
 pub const tag_len = 16;
 pub const max_key_len = 32;
 pub const max_plaintext_len = 1 << 14;
@@ -43,11 +45,32 @@ pub const Error = error{
     AuthenticationFailed,
 };
 
+const PreparedAead = union(enum) {
+    none,
+    aes_gcm: prepared_aes_gcm.Context,
+    aes_ccm: aes_ccm.Aes128Ccm,
+    aes_ccm_8: aes_ccm.Aes128Ccm8,
+    sm4_gcm: sm4.GcmContext,
+    sm4_ccm: sm4.Ccm,
+
+    fn deinit(self: *PreparedAead) void {
+        switch (self.*) {
+            .none => {},
+            .aes_gcm => |*context| context.deinit(),
+            .aes_ccm => |*context| context.deinit(),
+            .aes_ccm_8 => |*context| context.deinit(),
+            .sm4_gcm => |*context| context.deinit(),
+            .sm4_ccm => |*context| context.deinit(),
+        }
+        self.* = undefined;
+    }
+};
+
 pub const Keys = struct {
     suite: cipher_suite.Suite,
     key: [max_key_len]u8,
     iv: [iv_len]u8,
-    aes_gcm: ?prepared_aes_gcm.Context = null,
+    prepared: PreparedAead = .none,
 
     pub fn derive(
         suite: cipher_suite.Suite,
@@ -62,58 +85,46 @@ pub const Keys = struct {
         switch (suite) {
             .aes_128_gcm_sha256 => {
                 const value = traffic_secret.sha256() catch return error.HashMismatch;
-                keys.key[0..16].* = std.crypto.tls.hkdfExpandLabel(
-                    HkdfSha256,
-                    value,
-                    "key",
-                    "",
-                    16,
-                );
-                keys.iv = std.crypto.tls.hkdfExpandLabel(
-                    HkdfSha256,
-                    value,
-                    "iv",
-                    "",
-                    iv_len,
-                );
-                keys.aes_gcm = prepared_aes_gcm.Context.init128(
+                deriveSha256KeyAndIv(16, &keys, &value);
+                keys.prepared = .{ .aes_gcm = prepared_aes_gcm.Context.init128(
                     keys.key[0..Aes128Gcm.key_length].*,
+                ) };
+            },
+            .aes_128_ccm_sha256 => {
+                const value = traffic_secret.sha256() catch return error.HashMismatch;
+                deriveSha256KeyAndIv(
+                    aes_ccm.Aes128Ccm.key_length,
+                    &keys,
+                    &value,
                 );
+                keys.prepared = .{ .aes_ccm = aes_ccm.Aes128Ccm.init(
+                    keys.key[0..aes_ccm.Aes128Ccm.key_length].*,
+                ) };
+            },
+            .aes_128_ccm_8_sha256 => {
+                const value = traffic_secret.sha256() catch return error.HashMismatch;
+                deriveSha256KeyAndIv(
+                    aes_ccm.Aes128Ccm8.key_length,
+                    &keys,
+                    &value,
+                );
+                keys.prepared = .{ .aes_ccm_8 = aes_ccm.Aes128Ccm8.init(
+                    keys.key[0..aes_ccm.Aes128Ccm8.key_length].*,
+                ) };
             },
             .aes_256_gcm_sha384 => {
                 const value = traffic_secret.sha384() catch return error.HashMismatch;
-                keys.key = std.crypto.tls.hkdfExpandLabel(
-                    HkdfSha384,
-                    value,
-                    "key",
-                    "",
-                    32,
+                var expander = fast_sha2.PreparedHmac(fast_sha2.Sha384).init(
+                    &value,
                 );
-                keys.iv = std.crypto.tls.hkdfExpandLabel(
-                    HkdfSha384,
-                    value,
-                    "iv",
-                    "",
-                    iv_len,
-                );
-                keys.aes_gcm = prepared_aes_gcm.Context.init256(keys.key);
+                defer expander.deinit();
+                keys.key = expander.expandLabel("key", "", 32);
+                keys.iv = expander.expandLabel("iv", "", iv_len);
+                keys.prepared = .{ .aes_gcm = prepared_aes_gcm.Context.init256(keys.key) };
             },
             .chacha20_poly1305_sha256 => {
                 const value = traffic_secret.sha256() catch return error.HashMismatch;
-                keys.key = std.crypto.tls.hkdfExpandLabel(
-                    HkdfSha256,
-                    value,
-                    "key",
-                    "",
-                    32,
-                );
-                keys.iv = std.crypto.tls.hkdfExpandLabel(
-                    HkdfSha256,
-                    value,
-                    "iv",
-                    "",
-                    iv_len,
-                );
+                deriveSha256KeyAndIv(32, &keys, &value);
             },
             .sm4_gcm_sm3 => {
                 const value = traffic_secret.sm3() catch return error.HashMismatch;
@@ -131,13 +142,48 @@ pub const Keys = struct {
                     "",
                     iv_len,
                 );
+                keys.prepared = .{ .sm4_gcm = sm4.GcmContext.init(
+                    keys.key[0..sm4.Gcm.key_length].*,
+                ) };
+            },
+            .sm4_ccm_sm3 => {
+                const value = traffic_secret.sm3() catch return error.HashMismatch;
+                keys.key[0..sm4.Ccm.key_length].* = std.crypto.tls.hkdfExpandLabel(
+                    HkdfSm3,
+                    value,
+                    "key",
+                    "",
+                    sm4.Ccm.key_length,
+                );
+                keys.iv = std.crypto.tls.hkdfExpandLabel(
+                    HkdfSm3,
+                    value,
+                    "iv",
+                    "",
+                    iv_len,
+                );
+                keys.prepared = .{ .sm4_ccm = sm4.Ccm.init(
+                    keys.key[0..sm4.Ccm.key_length].*,
+                ) };
             },
         }
         return keys;
     }
 
+    fn deriveSha256KeyAndIv(
+        comptime key_len: usize,
+        keys: *Keys,
+        value: *const sha256.Digest,
+    ) void {
+        var expander: sha256.PreparedHmac = undefined;
+        expander.initInto(value);
+        defer expander.deinit();
+        keys.key[0..key_len].* = expander.expandLabel("key", "", key_len);
+        keys.iv = expander.expandLabel("iv", "", iv_len);
+    }
+
     pub fn deinit(self: *Keys) void {
-        if (self.aes_gcm) |*context| context.deinit();
+        self.prepared.deinit();
         std.crypto.secureZero(u8, &self.key);
         std.crypto.secureZero(u8, &self.iv);
         self.* = undefined;
@@ -179,61 +225,133 @@ pub const Keys = struct {
             return error.InvalidPlaintextLength;
         }
         const ciphertext_len = plaintext.len + 1 + padding_len;
-        const record_len = header_len + ciphertext_len + tag_len;
+        const suite_tag_len = self.suite.tagLen();
+        const record_len = header_len + ciphertext_len + suite_tag_len;
         if (record.len < record_len) return error.InvalidCiphertextLength;
 
         record[0] = content_type_application_data;
         record[1..3].* = legacy_record_version;
-        std.mem.writeInt(u16, record[3..5], @intCast(ciphertext_len + tag_len), .big);
+        std.mem.writeInt(
+            u16,
+            record[3..5],
+            @intCast(ciphertext_len + suite_tag_len),
+            .big,
+        );
         var inner: [max_inner_plaintext_len]u8 = undefined;
         @memcpy(inner[0..plaintext.len], plaintext);
         inner[plaintext.len] = inner_type;
         @memset(inner[plaintext.len + 1 .. ciphertext_len], 0);
         const nonce = recordNonce(self.iv, sequence_number);
         const ciphertext = record[header_len..][0..ciphertext_len];
-        const tag = record[header_len + ciphertext_len ..][0..tag_len];
+        const tag = record[header_len + ciphertext_len ..][0..suite_tag_len];
         switch (self.suite) {
             .aes_128_gcm_sha256 => {
-                if (self.aes_gcm) |*context| context.encrypt(
-                    ciphertext,
-                    tag,
-                    inner[0..ciphertext_len],
-                    record[0..header_len],
-                    nonce,
-                ) else Aes128Gcm.encrypt(
-                    ciphertext,
-                    tag,
-                    inner[0..ciphertext_len],
-                    record[0..header_len],
-                    nonce,
-                    self.key[0..Aes128Gcm.key_length].*,
-                );
+                switch (self.prepared) {
+                    .aes_gcm => |*context| context.encrypt(
+                        ciphertext,
+                        tag[0..16],
+                        inner[0..ciphertext_len],
+                        record[0..header_len],
+                        nonce,
+                    ),
+                    else => Aes128Gcm.encrypt(
+                        ciphertext,
+                        tag[0..16],
+                        inner[0..ciphertext_len],
+                        record[0..header_len],
+                        nonce,
+                        self.key[0..Aes128Gcm.key_length].*,
+                    ),
+                }
             },
             .aes_256_gcm_sha384 => {
-                if (self.aes_gcm) |*context| context.encrypt(
+                switch (self.prepared) {
+                    .aes_gcm => |*context| context.encrypt(
+                        ciphertext,
+                        tag[0..16],
+                        inner[0..ciphertext_len],
+                        record[0..header_len],
+                        nonce,
+                    ),
+                    else => Aes256Gcm.encrypt(
+                        ciphertext,
+                        tag[0..16],
+                        inner[0..ciphertext_len],
+                        record[0..header_len],
+                        nonce,
+                        self.key,
+                    ),
+                }
+            },
+            .aes_128_ccm_sha256 => switch (self.prepared) {
+                .aes_ccm => |*context| context.encrypt(
                     ciphertext,
-                    tag,
+                    tag[0..16],
                     inner[0..ciphertext_len],
                     record[0..header_len],
                     nonce,
-                ) else Aes256Gcm.encrypt(
+                ),
+                else => aes_ccm.encrypt(
                     ciphertext,
-                    tag,
+                    tag[0..16],
                     inner[0..ciphertext_len],
                     record[0..header_len],
                     nonce,
-                    self.key,
-                );
+                    self.key[0..aes_ccm.Aes128Ccm.key_length].*,
+                ),
+            },
+            .aes_128_ccm_8_sha256 => switch (self.prepared) {
+                .aes_ccm_8 => |*context| context.encrypt(
+                    ciphertext,
+                    tag[0..8],
+                    inner[0..ciphertext_len],
+                    record[0..header_len],
+                    nonce,
+                ),
+                else => aes_ccm.Aes128Ccm8.encryptOneShot(
+                    ciphertext,
+                    tag[0..8],
+                    inner[0..ciphertext_len],
+                    record[0..header_len],
+                    nonce,
+                    self.key[0..aes_ccm.Aes128Ccm8.key_length].*,
+                ),
             },
             .chacha20_poly1305_sha256 => prepared_chacha.encrypt(
                 ciphertext,
-                tag,
+                tag[0..16],
                 inner[0..ciphertext_len],
                 record[0..header_len],
                 nonce,
                 self.key,
             ),
-            .sm4_gcm_sm3 => sm4.Gcm.encrypt(ciphertext, tag, inner[0..ciphertext_len], record[0..header_len], nonce, self.key[0..16].*),
+            .sm4_gcm_sm3 => switch (self.prepared) {
+                .sm4_gcm => |*context| context.encrypt(
+                    ciphertext,
+                    tag[0..16],
+                    inner[0..ciphertext_len],
+                    record[0..header_len],
+                    nonce,
+                ),
+                else => sm4.Gcm.encrypt(ciphertext, tag[0..16], inner[0..ciphertext_len], record[0..header_len], nonce, self.key[0..16].*),
+            },
+            .sm4_ccm_sm3 => switch (self.prepared) {
+                .sm4_ccm => |*context| context.encrypt(
+                    ciphertext,
+                    tag[0..16],
+                    inner[0..ciphertext_len],
+                    record[0..header_len],
+                    nonce,
+                ),
+                else => sm4.Ccm.encryptOneShot(
+                    ciphertext,
+                    tag[0..16],
+                    inner[0..ciphertext_len],
+                    record[0..header_len],
+                    nonce,
+                    self.key[0..sm4.Ccm.key_length].*,
+                ),
+            },
         }
         return record_len;
     }
@@ -244,7 +362,8 @@ pub const Keys = struct {
         record: []const u8,
         plaintext: []u8,
     ) Error!Opened {
-        if (record.len < header_len + tag_len + 1) return error.InvalidRecord;
+        const suite_tag_len = self.suite.tagLen();
+        if (record.len < header_len + suite_tag_len + 1) return error.InvalidRecord;
         if (record[0] != content_type_application_data or
             !std.mem.eql(u8, record[1..3], &legacy_record_version))
         {
@@ -252,58 +371,128 @@ pub const Keys = struct {
         }
         const encrypted_len = std.mem.readInt(u16, record[3..5], .big);
         if (encrypted_len != record.len - header_len or
-            encrypted_len <= tag_len or
+            encrypted_len <= suite_tag_len or
             encrypted_len > max_ciphertext_len)
         {
             return error.InvalidRecord;
         }
-        const ciphertext_len = encrypted_len - tag_len;
+        const ciphertext_len = encrypted_len - suite_tag_len;
         if (plaintext.len < ciphertext_len) return error.InvalidPlaintextLength;
         const nonce = recordNonce(self.iv, sequence_number);
         const ciphertext = record[header_len..][0..ciphertext_len];
-        const tag = record[header_len + ciphertext_len ..][0..tag_len].*;
+        const tag = record[header_len + ciphertext_len ..][0..suite_tag_len];
         switch (self.suite) {
             .aes_128_gcm_sha256 => {
-                if (self.aes_gcm) |*context| context.decrypt(
-                    plaintext[0..ciphertext_len],
-                    ciphertext,
-                    tag,
-                    record[0..header_len],
-                    nonce,
-                ) catch return error.AuthenticationFailed else Aes128Gcm.decrypt(
-                    plaintext[0..ciphertext_len],
-                    ciphertext,
-                    tag,
-                    record[0..header_len],
-                    nonce,
-                    self.key[0..Aes128Gcm.key_length].*,
-                ) catch return error.AuthenticationFailed;
+                switch (self.prepared) {
+                    .aes_gcm => |*context| context.decrypt(
+                        plaintext[0..ciphertext_len],
+                        ciphertext,
+                        tag[0..16].*,
+                        record[0..header_len],
+                        nonce,
+                    ) catch return error.AuthenticationFailed,
+                    else => Aes128Gcm.decrypt(
+                        plaintext[0..ciphertext_len],
+                        ciphertext,
+                        tag[0..16].*,
+                        record[0..header_len],
+                        nonce,
+                        self.key[0..Aes128Gcm.key_length].*,
+                    ) catch return error.AuthenticationFailed,
+                }
             },
             .aes_256_gcm_sha384 => {
-                if (self.aes_gcm) |*context| context.decrypt(
-                    plaintext[0..ciphertext_len],
-                    ciphertext,
-                    tag,
-                    record[0..header_len],
-                    nonce,
-                ) catch return error.AuthenticationFailed else Aes256Gcm.decrypt(
-                    plaintext[0..ciphertext_len],
-                    ciphertext,
-                    tag,
-                    record[0..header_len],
-                    nonce,
-                    self.key,
-                ) catch return error.AuthenticationFailed;
+                switch (self.prepared) {
+                    .aes_gcm => |*context| context.decrypt(
+                        plaintext[0..ciphertext_len],
+                        ciphertext,
+                        tag[0..16].*,
+                        record[0..header_len],
+                        nonce,
+                    ) catch return error.AuthenticationFailed,
+                    else => Aes256Gcm.decrypt(
+                        plaintext[0..ciphertext_len],
+                        ciphertext,
+                        tag[0..16].*,
+                        record[0..header_len],
+                        nonce,
+                        self.key,
+                    ) catch return error.AuthenticationFailed,
+                }
+            },
+            .aes_128_ccm_sha256 => {
+                switch (self.prepared) {
+                    .aes_ccm => |*context| context.decrypt(
+                        plaintext[0..ciphertext_len],
+                        ciphertext,
+                        tag[0..16].*,
+                        record[0..header_len],
+                        nonce,
+                    ) catch return error.AuthenticationFailed,
+                    else => aes_ccm.decrypt(
+                        plaintext[0..ciphertext_len],
+                        ciphertext,
+                        tag[0..16].*,
+                        record[0..header_len],
+                        nonce,
+                        self.key[0..aes_ccm.Aes128Ccm.key_length].*,
+                    ) catch return error.AuthenticationFailed,
+                }
+            },
+            .aes_128_ccm_8_sha256 => {
+                switch (self.prepared) {
+                    .aes_ccm_8 => |*context| context.decrypt(
+                        plaintext[0..ciphertext_len],
+                        ciphertext,
+                        tag[0..8].*,
+                        record[0..header_len],
+                        nonce,
+                    ) catch return error.AuthenticationFailed,
+                    else => aes_ccm.Aes128Ccm8.decryptOneShot(
+                        plaintext[0..ciphertext_len],
+                        ciphertext,
+                        tag[0..8].*,
+                        record[0..header_len],
+                        nonce,
+                        self.key[0..aes_ccm.Aes128Ccm8.key_length].*,
+                    ) catch return error.AuthenticationFailed,
+                }
             },
             .chacha20_poly1305_sha256 => prepared_chacha.decrypt(
                 plaintext[0..ciphertext_len],
                 ciphertext,
-                tag,
+                tag[0..16].*,
                 record[0..header_len],
                 nonce,
                 self.key,
             ) catch return error.AuthenticationFailed,
-            .sm4_gcm_sm3 => sm4.Gcm.decrypt(plaintext[0..ciphertext_len], ciphertext, tag, record[0..header_len], nonce, self.key[0..16].*) catch return error.AuthenticationFailed,
+            .sm4_gcm_sm3 => switch (self.prepared) {
+                .sm4_gcm => |*context| context.decrypt(
+                    plaintext[0..ciphertext_len],
+                    ciphertext,
+                    tag[0..16].*,
+                    record[0..header_len],
+                    nonce,
+                ) catch return error.AuthenticationFailed,
+                else => sm4.Gcm.decrypt(plaintext[0..ciphertext_len], ciphertext, tag[0..16].*, record[0..header_len], nonce, self.key[0..16].*) catch return error.AuthenticationFailed,
+            },
+            .sm4_ccm_sm3 => switch (self.prepared) {
+                .sm4_ccm => |*context| context.decrypt(
+                    plaintext[0..ciphertext_len],
+                    ciphertext,
+                    tag[0..16].*,
+                    record[0..header_len],
+                    nonce,
+                ) catch return error.AuthenticationFailed,
+                else => sm4.Ccm.decryptOneShot(
+                    plaintext[0..ciphertext_len],
+                    ciphertext,
+                    tag[0..16].*,
+                    record[0..header_len],
+                    nonce,
+                    self.key[0..sm4.Ccm.key_length].*,
+                ) catch return error.AuthenticationFailed,
+            },
         }
         var opened_len = ciphertext_len;
         while (opened_len > 0 and plaintext[opened_len - 1] == 0) {
@@ -341,8 +530,11 @@ test "TLS 1.3 records round-trip and authenticate headers" {
     inline for ([_]cipher_suite.Suite{
         .aes_128_gcm_sha256,
         .aes_256_gcm_sha384,
+        .aes_128_ccm_sha256,
+        .aes_128_ccm_8_sha256,
         .chacha20_poly1305_sha256,
         .sm4_gcm_sm3,
+        .sm4_ccm_sm3,
     }) |suite| {
         const tls_secret = switch (suite.hash()) {
             .sha256 => secret.Secret.fromSha256([_]u8{0x42} ** 32),
@@ -354,6 +546,10 @@ test "TLS 1.3 records round-trip and authenticate headers" {
         var record: [256]u8 = undefined;
         const plaintext = "record plaintext";
         const len = try keys.seal(7, content_type_application_data, plaintext, &record);
+        try std.testing.expectEqual(
+            header_len + plaintext.len + 1 + suite.tagLen(),
+            len,
+        );
         var opened: [plaintext.len + 1]u8 = undefined;
         const parsed = try keys.open(7, record[0..len], &opened);
         try std.testing.expectEqual(content_type_application_data, parsed.content_type);
@@ -367,8 +563,11 @@ test "TLS 1.3 records round-trip explicit zero padding" {
     inline for ([_]cipher_suite.Suite{
         .aes_128_gcm_sha256,
         .aes_256_gcm_sha384,
+        .aes_128_ccm_sha256,
+        .aes_128_ccm_8_sha256,
         .chacha20_poly1305_sha256,
         .sm4_gcm_sm3,
+        .sm4_ccm_sm3,
     }) |suite| {
         const tls_secret = switch (suite.hash()) {
             .sha256 => secret.Secret.fromSha256([_]u8{0x52} ** 32),
@@ -389,7 +588,7 @@ test "TLS 1.3 records round-trip explicit zero padding" {
             &encoded,
         );
         try std.testing.expectEqual(
-            header_len + content.len + 1 + padding_len + tag_len,
+            header_len + content.len + 1 + padding_len + suite.tagLen(),
             encoded_len,
         );
 

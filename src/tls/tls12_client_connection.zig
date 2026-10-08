@@ -2,7 +2,7 @@
 //!
 //! The first integrated profile is deliberately narrow and modern:
 //! The state supports the modern ECDHE-RSA/ECDHE-ECDSA AES-GCM and ChaCha20
-//! suites over P-256/P-384, mandatory Extended Master Secret and secure
+//! suites over P-256/P-384/P-521, mandatory Extended Master Secret and secure
 //! renegotiation signaling, and optional client identity responses. It owns
 //! transcript ordering, authenticates the server certificate and ephemeral
 //! share, and changes traffic keys only across the two CCS boundaries.
@@ -57,6 +57,7 @@ pub const Config = struct {
     server_name: ?[]const u8 = null,
     client_private_key: ?*[key_exchange.p256.secret_len]u8 = null,
     client_private_key_p384: ?*[key_exchange.p384.secret_len]u8 = null,
+    client_private_key_p521: ?*[key_exchange.p521.secret_len]u8 = null,
     policy: handshake.Policy = .{},
     tls13_cipher_suites: []const cipher_suite.Suite = &.{},
     client_hello_key_share: ?client_hello.OfferedKeyShare = null,
@@ -66,7 +67,12 @@ pub const Config = struct {
     /// Optional RFC 8446 certificate-signature constraints carried by the
     /// shared ClientHello codec for version-negotiating callers.
     certificate_signature_schemes: ?[]const u16 = null,
-    request_ocsp: bool = false,
+    /// Request a stapled OCSP response by default so RFC 7633 Must-Staple
+    /// certificates can be validated without a caller opt-in.
+    request_ocsp: bool = true,
+    /// Override RFC 6961 multi-stapling advertisement. Null follows
+    /// `request_ocsp`, preserving one-switch opt-out while allowing v2-only.
+    request_ocsp_multi: ?bool = null,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     server_verifier: auth.ClientVerifier,
     client_identity: ?client_auth.ClientIdentity = null,
@@ -92,6 +98,18 @@ pub const ReceiveResult = struct {
     event: ?Event,
 };
 
+pub const ReceiveIntoEvent = union(enum) {
+    client_flight: void,
+    change_cipher_spec: void,
+    peer_alert: alert.Alert,
+    established: void,
+};
+
+pub const ReceiveIntoResult = struct {
+    consumed: usize,
+    event: ?ReceiveIntoEvent,
+};
+
 pub const ApplicationReceiveResult = struct {
     consumed: usize,
     event: ?Established.ApplicationEvent,
@@ -101,6 +119,7 @@ const Pending = struct {
     allocator: std.mem.Allocator,
     client_private_key: ?[key_exchange.p256.secret_len]u8,
     client_private_key_p384: ?[key_exchange.p384.secret_len]u8,
+    client_private_key_p521: ?[key_exchange.p521.secret_len]u8,
     client_random: [32]u8,
     client_hello: []u8,
     server_flight: std.ArrayList(u8) = .empty,
@@ -132,6 +151,9 @@ const Pending = struct {
             std.crypto.secureZero(u8, private_key);
         }
         if (self.client_private_key_p384) |*private_key| {
+            std.crypto.secureZero(u8, private_key);
+        }
+        if (self.client_private_key_p521) |*private_key| {
             std.crypto.secureZero(u8, private_key);
         }
         std.crypto.secureZero(u8, self.client_hello);
@@ -376,7 +398,7 @@ pub fn ClientConnection(
         stage: Stage = .server_flight,
         records: stream.RecordDeframer = .{},
         messages: stream.HandshakeReassembler(max_handshake_message_len) = .{},
-        pending: ?Pending,
+        pending: Pending,
 
         /// Consume and wipe `config.client_private_key`, append a TLS 1.2-only
         /// ClientHello record, and retain the one-shot P-256 state.
@@ -384,6 +406,18 @@ pub fn ClientConnection(
             config: Config,
             output: *std.ArrayList(u8),
         ) Error!Self {
+            var result: Self = undefined;
+            try result.initInto(config, output);
+            return result;
+        }
+
+        /// Initialize caller-owned storage without returning the inline record
+        /// and handshake buffers through an error union.
+        pub fn initInto(
+            self: *Self,
+            config: Config,
+            output: *std.ArrayList(u8),
+        ) Error!void {
             try validatePolicy(config.policy);
             if (config.resumption != null and config.ticket_resumption != null) {
                 return error.UnsupportedProfile;
@@ -439,11 +473,24 @@ pub fn ClientConnection(
             errdefer if (private_key_p384) |*value| {
                 std.crypto.secureZero(u8, value);
             };
+            var private_key_p521: ?[key_exchange.p521.secret_len]u8 = if (config.client_private_key_p521) |value|
+                value.*
+            else
+                null;
+            if (config.client_private_key_p521) |value| {
+                std.crypto.secureZero(u8, value);
+            }
+            errdefer if (private_key_p521) |*value| {
+                std.crypto.secureZero(u8, value);
+            };
             for (config.policy.groups) |group| switch (group) {
                 key_exchange.named_group_secp256r1 => if (private_key == null) {
                     return error.UnsupportedProfile;
                 },
                 key_exchange.named_group_secp384r1 => if (private_key_p384 == null) {
+                    return error.UnsupportedProfile;
+                },
+                key_exchange.named_group_secp521r1 => if (private_key_p521 == null) {
                     return error.UnsupportedProfile;
                 },
                 else => return error.UnsupportedProfile,
@@ -482,6 +529,8 @@ pub fn ClientConnection(
                 .certificate_signature_schemes = config.certificate_signature_schemes,
                 .alpn_protocols = config.policy.alpn_protocols,
                 .request_ocsp = config.request_ocsp,
+                .request_ocsp_multi = config.request_ocsp_multi orelse
+                    config.request_ocsp,
                 .offer_extended_master_secret = true,
                 .record_size_limit = config.policy.record_size_limit,
                 .certificate_compression_algorithms = config.certificate_compression_algorithms,
@@ -509,23 +558,25 @@ pub fn ClientConnection(
                 0x0301,
                 hello.items,
             );
-            return .{
+            self.*.allocator = config.allocator;
+            self.*.policy = config.policy;
+            self.*.server_name = config.server_name;
+            self.*.server_verifier = config.server_verifier;
+            self.*.client_identity = config.client_identity;
+            self.*.key_logger = config.key_log;
+            self.*.now_seconds = config.now_seconds;
+            self.*.stage = .server_flight;
+            self.*.records.buffered = 0;
+            self.*.messages.buffered = 0;
+            self.*.pending = .{
                 .allocator = config.allocator,
-                .policy = config.policy,
-                .server_name = config.server_name,
-                .server_verifier = config.server_verifier,
-                .client_identity = config.client_identity,
-                .key_logger = config.key_log,
-                .now_seconds = config.now_seconds,
-                .pending = .{
-                    .allocator = config.allocator,
-                    .client_private_key = private_key,
-                    .client_private_key_p384 = private_key_p384,
-                    .client_random = config.random,
-                    .client_hello = owned_hello,
-                    .resumption = resumption,
-                    .ticket_resumption = ticket_resumption,
-                },
+                .client_private_key = private_key,
+                .client_private_key_p384 = private_key_p384,
+                .client_private_key_p521 = private_key_p521,
+                .client_random = config.random,
+                .client_hello = owned_hello,
+                .resumption = resumption,
+                .ticket_resumption = ticket_resumption,
             };
         }
 
@@ -624,6 +675,14 @@ pub fn ClientConnection(
             errdefer if (private_key_p384) |*value| {
                 std.crypto.secureZero(u8, value);
             };
+            var private_key_p521: ?[key_exchange.p521.secret_len]u8 =
+                if (config.client_private_key_p521) |value| value.* else null;
+            if (config.client_private_key_p521) |value| {
+                std.crypto.secureZero(u8, value);
+            }
+            errdefer if (private_key_p521) |*value| {
+                std.crypto.secureZero(u8, value);
+            };
             for (config.policy.groups) |group| switch (group) {
                 key_exchange.named_group_secp256r1 => {
                     if (private_key == null or !try parsed.supportsGroup(group)) {
@@ -632,6 +691,13 @@ pub fn ClientConnection(
                 },
                 key_exchange.named_group_secp384r1 => {
                     if (private_key_p384 == null or
+                        !try parsed.supportsGroup(group))
+                    {
+                        return error.UnsupportedProfile;
+                    }
+                },
+                key_exchange.named_group_secp521r1 => {
+                    if (private_key_p521 == null or
                         !try parsed.supportsGroup(group))
                     {
                         return error.UnsupportedProfile;
@@ -659,6 +725,7 @@ pub fn ClientConnection(
                     .allocator = config.allocator,
                     .client_private_key = private_key,
                     .client_private_key_p384 = private_key_p384,
+                    .client_private_key_p521 = private_key_p521,
                     .client_random = config.random,
                     .client_hello = owned_hello,
                     .resumption = resumption,
@@ -677,8 +744,37 @@ pub fn ClientConnection(
             input: []const u8,
             output: *std.ArrayList(u8),
         ) Error!ReceiveResult {
+            var established: Established = undefined;
+            const result = try self.receiveInto(
+                input,
+                output,
+                &established,
+            );
+            return .{
+                .consumed = result.consumed,
+                .event = if (result.event) |event| switch (event) {
+                    .client_flight => .{ .client_flight = {} },
+                    .change_cipher_spec => .{ .change_cipher_spec = {} },
+                    .peer_alert => |received| .{ .peer_alert = received },
+                    .established => .{ .established = established },
+                } else null,
+            };
+        }
+
+        /// Feed transport bytes and write an established connection directly
+        /// into caller-owned storage when the returned event is `.established`.
+        pub fn receiveInto(
+            self: *Self,
+            input: []const u8,
+            output: *std.ArrayList(u8),
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
             if (self.stage == .failed) return error.ConnectionFailed;
-            return self.receiveInner(input, output) catch |err| {
+            return self.receiveInner(
+                input,
+                output,
+                established_output,
+            ) catch |err| {
                 self.fail();
                 return err;
             };
@@ -688,7 +784,8 @@ pub fn ClientConnection(
             self: *Self,
             input: []const u8,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
             const framed_result = try self.records.push(input);
             const framed = framed_result.framed orelse return .{
                 .consumed = framed_result.consumed,
@@ -715,6 +812,7 @@ pub fn ClientConnection(
                     framed_result.consumed,
                     framed,
                     output,
+                    established_output,
                 ),
                 .established => error.AlreadyEstablished,
                 .failed => error.ConnectionFailed,
@@ -726,7 +824,7 @@ pub fn ClientConnection(
             consumed: usize,
             framed: stream.FramedRecord,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
+        ) Error!ReceiveIntoResult {
             if (framed.content_type == 21) {
                 return self.acceptPlaintextAlert(consumed, framed.fragment);
             }
@@ -737,7 +835,7 @@ pub fn ClientConnection(
                 remaining = remaining[message_result.consumed..];
                 const message = message_result.message orelse continue;
                 try self.validateServerFlightMessage(message);
-                const pending = &(self.pending orelse unreachable);
+                const pending = &self.pending;
                 if (pending.server_flight.items.len >
                     max_server_flight_len -| message.len)
                 {
@@ -774,7 +872,7 @@ pub fn ClientConnection(
             self: *Self,
             message: []const u8,
         ) Error!void {
-            const pending = &(self.pending orelse unreachable);
+            const pending = &self.pending;
             if (message.len < 4) return error.UnexpectedHandshakeMessage;
             if (pending.message_count == 2 and
                 message[0] == handshake.handshake_type_certificate_status)
@@ -802,7 +900,7 @@ pub fn ClientConnection(
             self: *Self,
             output: *std.ArrayList(u8),
         ) Error!void {
-            const pending = &(self.pending orelse unreachable);
+            const pending = &self.pending;
             const messages = try handshake.splitServerFlight(
                 pending.server_flight.items,
             );
@@ -814,9 +912,11 @@ pub fn ClientConnection(
             const offered_client_hello = try client_hello.parse(
                 pending.client_hello,
             );
-            const ocsp_response = try validateServerOcspStatus(
+            try validateServerOcspNegotiation(
                 offered_client_hello.requests_ocsp,
+                offered_client_hello.requests_ocsp_multi,
                 server_hello.status_request_acknowledged,
+                server_hello.status_request_v2_acknowledged,
                 messages.certificate_status,
             );
             try checkDowngradeSentinel(
@@ -838,30 +938,55 @@ pub fn ClientConnection(
                 messages.certificate,
             );
             defer certificate.deinit(self.allocator);
+            var ocsp_responses: ?[]?[]const u8 = null;
+            defer if (ocsp_responses) |responses| {
+                self.allocator.free(responses);
+            };
+            const ocsp_response: ?[]const u8 = if (messages.certificate_status) |status|
+                if (server_hello.status_request_v2_acknowledged) blk: {
+                    const responses = try handshake.parseCertificateStatusV2(
+                        self.allocator,
+                        status,
+                        certificate.entries.len,
+                    );
+                    ocsp_responses = responses;
+                    break :blk responses[0];
+                } else try handshake.parseCertificateStatus(status)
+            else
+                null;
             if (!try offered_client_hello.supportsCertificateChain(
                 certificate.entries,
             )) {
                 return error.UnsupportedSignatureScheme;
             }
-            try self.server_verifier.verifyTrustWithOcsp(
-                self.server_name,
-                certificate.entries,
-                ocsp_response,
-            );
+            if (ocsp_responses) |responses| {
+                try self.server_verifier.verifyTrustWithOcspResponses(
+                    self.server_name,
+                    certificate.entries,
+                    responses,
+                );
+            } else {
+                try self.server_verifier.verifyTrustWithOcsp(
+                    self.server_name,
+                    certificate.entries,
+                    ocsp_response,
+                );
+            }
             const server_key_exchange =
-                try handshake.parseAndVerifyServerKeyExchange(
+                try handshake.parseAndVerifyServerKeyExchangeWithVerifier(
                     messages.server_key_exchange,
                     certificate.entries[0],
                     pending.client_random,
                     server_hello.random,
                     server_hello.suite,
                     self.policy,
+                    self.server_verifier,
                 );
             try handshake.parseServerHelloDone(messages.server_hello_done);
 
             var client_public_storage =
-                [_]u8{0} ** key_exchange.p384.public_len;
-            var shared_storage = [_]u8{0} ** key_exchange.p384.shared_len;
+                [_]u8{0} ** key_exchange.p521.public_len;
+            var shared_storage = [_]u8{0} ** key_exchange.p521.shared_len;
             const client_public: []const u8 = switch (server_key_exchange.group) {
                 key_exchange.named_group_secp256r1 => blk: {
                     const private_key = pending.client_private_key orelse
@@ -879,8 +1004,20 @@ pub fn ClientConnection(
                     const private_key = pending.client_private_key_p384 orelse
                         return error.UnsupportedProfile;
                     const public = try key_exchange.p384.publicKey(private_key);
+                    client_public_storage[0..public.len].* = public;
+                    const shared = try key_exchange.p384.sharedSecret(
+                        private_key,
+                        server_key_exchange.public_key,
+                    );
+                    shared_storage[0..shared.len].* = shared;
+                    break :blk client_public_storage[0..public.len];
+                },
+                key_exchange.named_group_secp521r1 => blk: {
+                    const private_key = pending.client_private_key_p521 orelse
+                        return error.UnsupportedProfile;
+                    const public = try key_exchange.p521.publicKey(private_key);
                     client_public_storage = public;
-                    shared_storage = try key_exchange.p384.sharedSecret(
+                    shared_storage = try key_exchange.p521.sharedSecret(
                         private_key,
                         server_key_exchange.public_key,
                     );
@@ -890,7 +1027,8 @@ pub fn ClientConnection(
             };
             const shared_secret: []const u8 = switch (server_key_exchange.group) {
                 key_exchange.named_group_secp256r1 => shared_storage[0..key_exchange.p256.shared_len],
-                key_exchange.named_group_secp384r1 => &shared_storage,
+                key_exchange.named_group_secp384r1 => shared_storage[0..key_exchange.p384.shared_len],
+                key_exchange.named_group_secp521r1 => &shared_storage,
                 else => unreachable,
             };
             defer std.crypto.secureZero(u8, &client_public_storage);
@@ -899,6 +1037,9 @@ pub fn ClientConnection(
                 std.crypto.secureZero(u8, value);
             }
             if (pending.client_private_key_p384) |*value| {
+                std.crypto.secureZero(u8, value);
+            }
+            if (pending.client_private_key_p521) |*value| {
                 std.crypto.secureZero(u8, value);
             }
 
@@ -1108,7 +1249,7 @@ pub fn ClientConnection(
             self: *Self,
             message: []const u8,
         ) Error!bool {
-            const pending = &(self.pending orelse unreachable);
+            const pending = &self.pending;
             const server_hello = try handshake.parseServerHello(
                 message,
                 self.policy,
@@ -1181,6 +1322,9 @@ pub fn ClientConnection(
             if (pending.client_private_key_p384) |*private_key| {
                 std.crypto.secureZero(u8, private_key);
             }
+            if (pending.client_private_key_p521) |*private_key| {
+                std.crypto.secureZero(u8, private_key);
+            }
             pending.suite = session.suite;
             pending.server_random = server_hello.random;
             pending.transcript_state = state;
@@ -1228,12 +1372,12 @@ pub fn ClientConnection(
             self: *Self,
             consumed: usize,
             framed: stream.FramedRecord,
-        ) Error!ReceiveResult {
+        ) Error!ReceiveIntoResult {
             if (framed.content_type == 21) {
                 return self.acceptPlaintextAlert(consumed, framed.fragment);
             }
             if (framed.content_type == 22) {
-                const pending = &(self.pending orelse unreachable);
+                const pending = &self.pending;
                 if (!pending.expect_new_session_ticket or
                     pending.received_new_session_ticket)
                 {
@@ -1271,7 +1415,7 @@ pub fn ClientConnection(
             {
                 return error.InvalidChangeCipherSpec;
             }
-            const pending = &(self.pending orelse unreachable);
+            const pending = &self.pending;
             if (pending.expect_new_session_ticket and
                 !pending.received_new_session_ticket)
             {
@@ -1289,8 +1433,9 @@ pub fn ClientConnection(
             consumed: usize,
             framed: stream.FramedRecord,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
-            const pending = &(self.pending orelse unreachable);
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
+            const pending = &self.pending;
             var plaintext: [64]u8 = undefined;
             const opened = try pending.server_traffic.?.open(
                 framed.bytes,
@@ -1298,7 +1443,7 @@ pub fn ClientConnection(
             );
             if (opened.content_type == 21) {
                 const received = try alert.parse(plaintext[0..opened.len]);
-                const event: Event = .{ .peer_alert = received };
+                const event: ReceiveIntoEvent = .{ .peer_alert = received };
                 self.fail();
                 return .{ .consumed = consumed, .event = event };
             }
@@ -1357,9 +1502,10 @@ pub fn ClientConnection(
                 );
                 pending.transcript_state.?.update(&client_finished);
             }
+            self.establishInto(established_output);
             return .{
                 .consumed = consumed,
-                .event = .{ .established = self.establish() },
+                .event = .{ .established = {} },
             };
         }
 
@@ -1367,39 +1513,50 @@ pub fn ClientConnection(
             self: *Self,
             consumed: usize,
             bytes: []const u8,
-        ) Error!ReceiveResult {
+        ) Error!ReceiveIntoResult {
             const received = try alert.parse(bytes);
-            const event: Event = .{ .peer_alert = received };
+            const event: ReceiveIntoEvent = .{ .peer_alert = received };
             self.fail();
             return .{ .consumed = consumed, .event = event };
         }
 
-        fn establish(self: *Self) Established {
-            const pending = &(self.pending orelse unreachable);
+        fn establishInto(
+            self: *Self,
+            established_output: *Established,
+        ) void {
+            const pending = &self.pending;
             key_log.emit(
                 self.key_logger,
                 key_log.client_random,
                 &pending.client_random,
                 &pending.master_secret.?,
             );
-            const established = Established{
-                .allocator = self.allocator,
-                .read = pending.server_traffic.?,
-                .write = pending.client_traffic.?,
-                .master_secret = pending.master_secret.?,
-                .client_random = pending.client_random,
-                .server_random = pending.server_random.?,
-                .suite = pending.suite.?,
-                .selected_alpn = pending.selected_alpn,
-                .peer_certificate_chain = pending.peer_certificate_chain.?,
-                .resumed = pending.resumed,
-                .session_id = pending.negotiated_session_id,
-                .session_id_len = pending.negotiated_session_id_len,
-                .session_ticket = pending.new_session_ticket,
-                .session_ticket_lifetime_hint_seconds = pending.new_session_ticket_lifetime_hint_seconds,
-                .local_record_size_limit = pending.local_record_size_limit,
-                .peer_record_size_limit = pending.peer_record_size_limit,
-            };
+            established_output.*.allocator = self.allocator;
+            established_output.*.read = pending.server_traffic.?;
+            established_output.*.write = pending.client_traffic.?;
+            established_output.*.master_secret = pending.master_secret.?;
+            established_output.*.client_random = pending.client_random;
+            established_output.*.server_random = pending.server_random.?;
+            established_output.*.suite = pending.suite.?;
+            established_output.*.selected_alpn = pending.selected_alpn;
+            established_output.*.peer_certificate_chain =
+                pending.peer_certificate_chain.?;
+            established_output.*.resumed = pending.resumed;
+            established_output.*.session_id = pending.negotiated_session_id;
+            established_output.*.session_id_len =
+                pending.negotiated_session_id_len;
+            established_output.*.session_ticket = pending.new_session_ticket;
+            established_output.*.session_ticket_lifetime_hint_seconds =
+                pending.new_session_ticket_lifetime_hint_seconds;
+            established_output.*.local_record_size_limit =
+                pending.local_record_size_limit;
+            established_output.*.peer_record_size_limit =
+                pending.peer_record_size_limit;
+            established_output.*.records.buffered = 0;
+            established_output.*.local_closed = false;
+            established_output.*.peer_closed = false;
+            established_output.*.failed = false;
+            established_output.*.secrets_extracted = false;
             pending.server_traffic = null;
             pending.client_traffic = null;
             pending.master_secret = null;
@@ -1407,9 +1564,7 @@ pub fn ClientConnection(
             pending.peer_certificate_chain = null;
             pending.new_session_ticket = null;
             pending.deinit();
-            self.pending = null;
             self.stage = .established;
-            return established;
         }
 
         fn fail(self: *Self) void {
@@ -1418,8 +1573,13 @@ pub fn ClientConnection(
         }
 
         fn cleanup(self: *Self) void {
-            if (self.pending) |*pending| pending.deinit();
-            self.pending = null;
+            switch (self.stage) {
+                .server_flight,
+                .server_change_cipher_spec,
+                .server_finished,
+                => self.pending.deinit(),
+                .established, .failed => {},
+            }
         }
     };
 }
@@ -1430,7 +1590,8 @@ fn validatePolicy(policy: handshake.Policy) Error!void {
     }
     for (policy.groups) |group| {
         if (group != key_exchange.named_group_secp256r1 and
-            group != key_exchange.named_group_secp384r1)
+            group != key_exchange.named_group_secp384r1 and
+            group != key_exchange.named_group_secp521r1)
         {
             return error.UnsupportedProfile;
         }
@@ -1481,20 +1642,21 @@ fn checkDowngradeSentinel(
     )) return error.DowngradeDetected;
 }
 
-fn validateServerOcspStatus(
+fn validateServerOcspNegotiation(
     offered: bool,
+    offered_multi: bool,
     acknowledged: bool,
+    acknowledged_multi: bool,
     certificate_status: ?[]const u8,
-) Error!?[]const u8 {
+) Error!void {
     if ((acknowledged and !offered) or
-        acknowledged != (certificate_status != null))
+        (acknowledged_multi and !offered_multi) or
+        (acknowledged and acknowledged_multi) or
+        (acknowledged or acknowledged_multi) !=
+            (certificate_status != null))
     {
         return error.UnexpectedHandshakeMessage;
     }
-    return if (certificate_status) |status|
-        try handshake.parseCertificateStatus(status)
-    else
-        null;
 }
 
 fn copyCertificateChain(
@@ -1638,13 +1800,13 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
     var client_wire: std.ArrayList(u8) = .empty;
     defer client_wire.deinit(allocator);
     const Client = ClientConnection(64 * 1024, 64 * 1024);
-    var client = try Client.init(.{
+    var client: Client = undefined;
+    try client.initInto(.{
         .allocator = allocator,
         .random = [_]u8{0x91} ** 32,
         .server_name = "localhost",
         .client_private_key = &client_private,
         .policy = policy,
-        .request_ocsp = true,
         .server_verifier = .{ .verify_trust = expectTestOcsp },
         .request_session_ticket = true,
         .key_log = client_key_log.logger(),
@@ -1659,7 +1821,8 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
     var server_private = [_]u8{0} ** key_exchange.p256.secret_len;
     server_private[server_private.len - 1] = 2;
     const Server = server_module.ServerConnection(64 * 1024, 64 * 1024);
-    var server = Server.init(.{
+    var server: Server = undefined;
+    server.initInto(.{
         .allocator = allocator,
         .policy = policy,
         .server_random = [_]u8{0x92} ** 32,
@@ -1714,9 +1877,14 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
     try std.testing.expect(saw_client_flight);
     server_wire.clearRetainingCapacity();
 
-    var established_server: ?server_module.Established = null;
+    var established_server_storage: server_module.Established = undefined;
+    var established_server: ?*server_module.Established = null;
     for (client_wire.items) |byte| {
-        const received = try server.receive(&.{byte}, &server_wire);
+        const received = try server.receiveInto(
+            &.{byte},
+            &server_wire,
+            &established_server_storage,
+        );
         try std.testing.expectEqual(@as(usize, 1), received.consumed);
         if (received.event) |event| switch (event) {
             .server_flight,
@@ -1724,22 +1892,27 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
             .change_cipher_spec,
             => {},
             .peer_alert => return error.UnexpectedPeerAlert,
-            .established => |value| established_server = value,
+            .established => established_server = &established_server_storage,
         };
     }
     try std.testing.expect(established_server != null);
     defer established_server.?.deinit();
     client_wire.clearRetainingCapacity();
 
-    var established_client: ?Established = null;
+    var established_client_storage: Established = undefined;
+    var established_client: ?*Established = null;
     for (server_wire.items) |byte| {
-        const received = try client.receive(&.{byte}, &client_wire);
+        const received = try client.receiveInto(
+            &.{byte},
+            &client_wire,
+            &established_client_storage,
+        );
         try std.testing.expectEqual(@as(usize, 1), received.consumed);
         if (received.event) |event| switch (event) {
             .client_flight => return error.UnexpectedClientFlight,
             .change_cipher_spec => {},
             .peer_alert => return error.UnexpectedPeerAlert,
-            .established => |value| established_client = value,
+            .established => established_client = &established_client_storage,
         };
     }
     try std.testing.expect(established_client != null);
@@ -2218,6 +2391,7 @@ test "TLS 1.2 client rejects a bad encrypted server Finished and locks" {
             .allocator = allocator,
             .client_private_key = [_]u8{0} ** key_exchange.p256.secret_len,
             .client_private_key_p384 = null,
+            .client_private_key_p521 = null,
             .client_random = client_random,
             .client_hello = try allocator.dupe(u8, "hello"),
             .suite = suite,
@@ -2283,6 +2457,48 @@ test "TLS 1.2 client rejects an authenticated downgrade sentinel" {
         checkDowngradeSentinel(hello.items, downgrade_random),
     );
     try checkDowngradeSentinel(hello.items, [_]u8{0xa6} ** 32);
+}
+
+test "high-level TLS 1.2 client requests OCSP by default with opt-out" {
+    const allocator = std.testing.allocator;
+    const Client = ClientConnection(4096, 256);
+
+    var default_private = [_]u8{0} ** key_exchange.p256.secret_len;
+    default_private[default_private.len - 1] = 1;
+    var default_wire: std.ArrayList(u8) = .empty;
+    defer default_wire.deinit(allocator);
+    var default_client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0xa7} ** 32,
+        .server_name = "example.com",
+        .client_private_key = &default_private,
+        .server_verifier = .{},
+    }, &default_wire);
+    defer default_client.deinit();
+    const default_hello = try client_hello.parse(
+        default_wire.items[record13.header_len..],
+    );
+    try std.testing.expect(default_hello.requests_ocsp);
+    try std.testing.expect(default_hello.requests_ocsp_multi);
+
+    var opt_out_private = [_]u8{0} ** key_exchange.p256.secret_len;
+    opt_out_private[opt_out_private.len - 1] = 2;
+    var opt_out_wire: std.ArrayList(u8) = .empty;
+    defer opt_out_wire.deinit(allocator);
+    var opt_out_client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0xa8} ** 32,
+        .server_name = "example.com",
+        .client_private_key = &opt_out_private,
+        .request_ocsp = false,
+        .server_verifier = .{},
+    }, &opt_out_wire);
+    defer opt_out_client.deinit();
+    const opt_out_hello = try client_hello.parse(
+        opt_out_wire.items[record13.header_len..],
+    );
+    try std.testing.expect(!opt_out_hello.requests_ocsp);
+    try std.testing.expect(!opt_out_hello.requests_ocsp_multi);
 }
 
 test "TLS 1.2 client and server complete every AEAD suite on P-256" {
@@ -2576,25 +2792,148 @@ test "TLS 1.2 OCSP negotiation rejects missing and unsolicited status" {
         std.testing.allocator,
         "ocsp",
     );
+    try validateServerOcspNegotiation(true, false, true, false, status.items);
     try std.testing.expectEqualStrings(
         "ocsp",
-        (try validateServerOcspStatus(true, true, status.items)).?,
+        try handshake.parseCertificateStatus(status.items),
     );
+    try validateServerOcspNegotiation(true, false, false, false, null);
+    try std.testing.expectError(
+        error.UnexpectedHandshakeMessage,
+        validateServerOcspNegotiation(true, false, true, false, null),
+    );
+    try std.testing.expectError(
+        error.UnexpectedHandshakeMessage,
+        validateServerOcspNegotiation(false, false, true, false, status.items),
+    );
+    try std.testing.expectError(
+        error.UnexpectedHandshakeMessage,
+        validateServerOcspNegotiation(true, false, false, false, status.items),
+    );
+
+    var multi_status: std.ArrayList(u8) = .empty;
+    defer multi_status.deinit(std.testing.allocator);
+    try handshake.writeCertificateStatusV2(
+        &multi_status,
+        std.testing.allocator,
+        &.{ "leaf", "issuer" },
+    );
+    try validateServerOcspNegotiation(
+        true,
+        true,
+        false,
+        true,
+        multi_status.items,
+    );
+    const responses = try handshake.parseCertificateStatusV2(
+        std.testing.allocator,
+        multi_status.items,
+        2,
+    );
+    defer std.testing.allocator.free(responses);
+    try std.testing.expectEqualStrings("leaf", responses[0].?);
+    try std.testing.expectEqualStrings("issuer", responses[1].?);
+    try std.testing.expectError(
+        error.UnexpectedHandshakeMessage,
+        validateServerOcspNegotiation(
+            true,
+            true,
+            true,
+            true,
+            multi_status.items,
+        ),
+    );
+    try std.testing.expectError(
+        error.UnexpectedHandshakeMessage,
+        validateServerOcspNegotiation(
+            true,
+            false,
+            false,
+            true,
+            multi_status.items,
+        ),
+    );
+}
+
+test "TLS 1.2 RFC 6961 validates leaf and intermediate OCSP responses" {
+    const allocator = std.testing.allocator;
+    const server_module = @import("tls12_server_connection.zig");
+    const rsa = @import("../crypto/rsa.zig");
+    const rsa_vectors = @import("../crypto/testdata/rsa_signing.zig");
+    const path_vectors = @import("../x509/testdata/path_vectors.zig");
+    const trust = @import("../x509/trust.zig");
+    const root = decodeHex(path_vectors.rsa_multi_staple_root_hex);
+    const intermediate = decodeHex(
+        path_vectors.rsa_multi_staple_intermediate_hex,
+    );
+    const leaf = decodeHex(path_vectors.rsa_multi_staple_leaf_hex);
+    const leaf_ocsp = decodeHex(path_vectors.rsa_multi_staple_leaf_ocsp_hex);
+    const intermediate_ocsp = decodeHex(
+        path_vectors.rsa_multi_staple_intermediate_ocsp_hex,
+    );
+    const private_key_der = decodeHex(rsa_vectors.private_key_pkcs8_hex);
+    const private_key = try rsa.PrivateKey.fromDer(&private_key_der);
+    var prepared_key = try private_key.prepare();
+    defer prepared_key.deinit();
+    const now = 1_790_821_380;
+
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(allocator);
+    try bundle.bytes.appendSlice(allocator, &root);
+    try bundle.parseCert(allocator, 0, now);
+    const verifier = trust.BundleVerifier{
+        .bundle = &bundle,
+        .now_seconds = now,
+        .stapled_ocsp = .if_present,
+    };
+    const responses = [_]?[]const u8{ &leaf_ocsp, &intermediate_ocsp };
+    const policy = handshake.Policy{
+        .ocsp_responses = &responses,
+    };
+
+    var client_private = [_]u8{0} ** key_exchange.p256.secret_len;
+    client_private[client_private.len - 1] = 11;
+    var client_wire: std.ArrayList(u8) = .empty;
+    defer client_wire.deinit(allocator);
+    const Client = ClientConnection(64 * 1024, 64 * 1024);
+    var client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0xd6} ** 32,
+        .server_name = "multi-staple.localhost",
+        .client_private_key = &client_private,
+        .policy = policy,
+        .server_verifier = verifier.clientVerifier(),
+    }, &client_wire);
+    defer client.deinit();
+
+    var server_private = [_]u8{0} ** key_exchange.p256.secret_len;
+    server_private[server_private.len - 1] = 12;
+    const Server = server_module.ServerConnection(64 * 1024, 64 * 1024);
+    var server = Server.init(.{
+        .allocator = allocator,
+        .policy = policy,
+        .server_random = [_]u8{0xd7} ** 32,
+        .server_private_key = &server_private,
+        .certificate_chain = &.{ &leaf, &intermediate },
+        .signer = .{ .rsa_pss = .{
+            .prepared_key = &prepared_key,
+            .io = std.testing.io,
+        } },
+    });
+    defer server.deinit();
+
+    var server_wire: std.ArrayList(u8) = .empty;
+    defer server_wire.deinit(allocator);
+    const server_result = try server.receive(client_wire.items, &server_wire);
     try std.testing.expectEqual(
-        @as(?[]const u8, null),
-        try validateServerOcspStatus(true, false, null),
+        std.meta.Tag(server_module.Event).server_flight,
+        std.meta.activeTag(server_result.event.?),
     );
-    try std.testing.expectError(
-        error.UnexpectedHandshakeMessage,
-        validateServerOcspStatus(true, true, null),
-    );
-    try std.testing.expectError(
-        error.UnexpectedHandshakeMessage,
-        validateServerOcspStatus(false, true, status.items),
-    );
-    try std.testing.expectError(
-        error.UnexpectedHandshakeMessage,
-        validateServerOcspStatus(true, false, status.items),
+    client_wire.clearRetainingCapacity();
+    const client_result = try client.receive(server_wire.items, &client_wire);
+    try std.testing.expectEqual(
+        std.meta.Tag(Event).client_flight,
+        std.meta.activeTag(client_result.event.?),
     );
 }
 

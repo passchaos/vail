@@ -9,10 +9,15 @@ const prepared = vail.crypto.chacha20_poly1305;
 const iterations: usize = 200_000;
 
 pub fn main(init: std.process.Init) !void {
-    const key = [_]u8{0x42} ** ChaCha20Poly1305.key_length;
-    const nonce = [_]u8{0x43} ** ChaCha20Poly1305.nonce_length;
-    const aad = "quic short header";
-    const plaintext = [_]u8{0x51} ** 1200;
+    var key = [_]u8{0x42} ** ChaCha20Poly1305.key_length;
+    var nonce = [_]u8{0x43} ** ChaCha20Poly1305.nonce_length;
+    var aad_buffer = "quic short header".*;
+    var plaintext = [_]u8{0x51} ** 1200;
+    std.mem.doNotOptimizeAway(&key);
+    std.mem.doNotOptimizeAway(&nonce);
+    std.mem.doNotOptimizeAway(&aad_buffer);
+    std.mem.doNotOptimizeAway(&plaintext);
+    const aad: []const u8 = &aad_buffer;
     var ciphertext: [plaintext.len]u8 = undefined;
     var tag: [ChaCha20Poly1305.tag_length]u8 = undefined;
     var poly_key: [Poly1305.key_length]u8 = undefined;
@@ -64,6 +69,29 @@ pub fn main(init: std.process.Init) !void {
     }
     const aead_ns = nowNs(init.io) -| start;
 
+    var standard_opened: [plaintext.len]u8 = undefined;
+    start = nowNs(init.io);
+    for (0..iterations) |_| {
+        ChaCha20Poly1305.encrypt(
+            &ciphertext,
+            &tag,
+            &plaintext,
+            aad,
+            nonce,
+            key,
+        );
+        try ChaCha20Poly1305.decrypt(
+            &standard_opened,
+            &ciphertext,
+            tag,
+            aad,
+            nonce,
+            key,
+        );
+        checksum +%= standard_opened[0];
+    }
+    const aead_round_trip_ns = nowNs(init.io) -| start;
+
     start = nowNs(init.io);
     for (0..iterations) |_| {
         context.encrypt(
@@ -77,6 +105,21 @@ pub fn main(init: std.process.Init) !void {
     }
     const prepared_ns = nowNs(init.io) -| start;
 
+    start = nowNs(init.io);
+    for (0..iterations) |_| {
+        prepared.encrypt(
+            &ciphertext,
+            &tag,
+            &plaintext,
+            aad,
+            nonce,
+            key,
+        );
+        checksum +%= ciphertext[0];
+    }
+    const prepared_one_shot_ns = nowNs(init.io) -| start;
+
+    context.encrypt(&ciphertext, &tag, &plaintext, aad, nonce);
     var opened: [plaintext.len]u8 = undefined;
     var invalid_tag = tag;
     invalid_tag[0] ^= 1;
@@ -93,6 +136,19 @@ pub fn main(init: std.process.Init) !void {
         };
     }
     const prepared_authenticate_ns = nowNs(init.io) -| start;
+
+    start = nowNs(init.io);
+    for (0..iterations) |_| {
+        try context.decrypt(
+            &opened,
+            &ciphertext,
+            tag,
+            aad,
+            nonce,
+        );
+        checksum +%= opened[0];
+    }
+    const prepared_open_ns = nowNs(init.io) -| start;
 
     start = nowNs(init.io);
     for (0..iterations) |_| {
@@ -116,15 +172,20 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         "poly-key={d} ns stream={d} ns poly1305={d} ns aead={d} ns " ++
-            "prepared={d} ns prepared-auth-fail={d} ns " ++
+            "aead-open+seal={d} ns " ++
+            "prepared={d} ns prepared-one-shot={d} ns " ++
+            "prepared-auth-fail={d} ns prepared-open={d} ns " ++
             "prepared-open+seal={d} ns checksum={d}\n",
         .{
             key_ns / iterations,
             stream_ns / iterations,
             poly_ns / iterations,
             aead_ns / iterations,
+            aead_round_trip_ns / iterations,
             prepared_ns / iterations,
+            prepared_one_shot_ns / iterations,
             prepared_authenticate_ns / iterations,
+            prepared_open_ns / iterations,
             prepared_round_trip_ns / iterations,
             checksum,
         },
@@ -138,6 +199,8 @@ pub fn main(init: std.process.Init) !void {
         .{ .len = 32, .iterations = 500_000 },
         .{ .len = 64, .iterations = 500_000 },
         .{ .len = 256, .iterations = 300_000 },
+        .{ .len = 512, .iterations = 250_000 },
+        .{ .len = 1024, .iterations = 200_000 },
         .{ .len = 1200, .iterations = 200_000 },
         .{ .len = 16 * 1024, .iterations = 20_000 },
     }) |case| try benchmarkSize(init.io, case.len, case.iterations);

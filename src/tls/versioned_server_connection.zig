@@ -60,26 +60,62 @@ pub fn ServerConnection(
             event: ?Event,
         };
 
-        const State = union(enum) {
+        pub const Established = union(enum) {
+            tls13: Tls13.Established,
+            tls12: server12.Established,
+
+            pub fn deinit(self: *Established) void {
+                switch (self.*) {
+                    .tls13 => |*established| established.deinit(),
+                    .tls12 => |*established| established.deinit(),
+                }
+                self.* = undefined;
+            }
+        };
+
+        pub const ReceiveIntoEvent = union(enum) {
+            tls13: Tls13.ReceiveIntoEvent,
+            tls12: server12.ReceiveIntoEvent,
+        };
+
+        pub const ReceiveIntoResult = struct {
+            consumed: usize,
+            event: ?ReceiveIntoEvent,
+        };
+
+        const State = enum {
             initial,
-            tls13: Tls13,
-            tls12: Tls12,
+            tls13,
+            tls12,
             failed,
         };
 
         config: Config,
         state: State = .initial,
+        tls13: Tls13 = undefined,
+        tls12: Tls12 = undefined,
         records: stream.RecordDeframer = .{},
         messages: stream.HandshakeReassembler(max_handshake_message_len) = .{},
 
         pub fn init(config: Config) Self {
-            return .{ .config = config };
+            var self: Self = undefined;
+            self.initInto(config);
+            return self;
+        }
+
+        /// Initialize the version-selecting server directly in caller-owned
+        /// storage without touching inactive union payloads.
+        pub fn initInto(self: *Self, config: Config) void {
+            self.*.config = config;
+            self.*.state = .initial;
+            self.*.records.buffered = 0;
+            self.*.messages.buffered = 0;
         }
 
         pub fn protocol(self: *const Self) ?Protocol {
             return switch (self.state) {
-                .tls13 => .tls13,
-                .tls12 => .tls12,
+                .tls13 => Protocol.tls13,
+                .tls12 => Protocol.tls12,
                 else => null,
             };
         }
@@ -87,8 +123,8 @@ pub fn ServerConnection(
         pub fn deinit(self: *Self) void {
             switch (self.state) {
                 .initial => self.wipeAllKeyMaterial(),
-                .tls13 => |*connection| connection.deinit(),
-                .tls12 => |*connection| connection.deinit(),
+                .tls13 => self.tls13.deinit(),
+                .tls12 => self.tls12.deinit(),
                 .failed => {},
             }
             self.* = undefined;
@@ -99,27 +135,71 @@ pub fn ServerConnection(
             input: []const u8,
             output: *std.ArrayList(u8),
         ) Error!ReceiveResult {
+            var established: Established = undefined;
+            const result = try self.receiveInto(
+                input,
+                output,
+                &established,
+            );
+            return .{
+                .consumed = result.consumed,
+                .event = if (result.event) |event| switch (event) {
+                    .tls13 => |nested| .{ .tls13 = legacy13Event(
+                        nested,
+                        &established,
+                    ) },
+                    .tls12 => |nested| .{ .tls12 = legacy12Event(
+                        nested,
+                        &established,
+                    ) },
+                } else null,
+            };
+        }
+
+        /// Feed transport bytes and transfer an established TLS 1.2 or TLS
+        /// 1.3 connection directly into caller-owned union storage.
+        pub fn receiveInto(
+            self: *Self,
+            input: []const u8,
+            output: *std.ArrayList(u8),
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
             return switch (self.state) {
-                .initial => self.receiveInitial(input, output) catch |err| {
+                .initial => self.receiveInitialInto(
+                    input,
+                    output,
+                    established_output,
+                ) catch |err| {
                     self.wipeAllKeyMaterial();
                     self.state = .failed;
                     return err;
                 },
-                .tls13 => |*connection| wrap13(
-                    try connection.receive(input, output),
-                ),
-                .tls12 => |*connection| wrap12(
-                    try connection.receive(input, output),
-                ),
+                .tls13 => blk: {
+                    established_output.* = .{ .tls13 = undefined };
+                    break :blk wrap13(try self.tls13.receiveInto(
+                        input,
+                        output,
+                        &established_output.tls13,
+                    ));
+                },
+                .tls12 => blk: {
+                    established_output.* = .{ .tls12 = undefined };
+                    break :blk wrap12(try self.tls12.receiveInto(
+                        input,
+                        output,
+                        &established_output.tls12,
+                    ));
+                },
                 .failed => error.ConnectionFailed,
             };
         }
 
-        fn receiveInitial(
+        fn receiveInitialInto(
             self: *Self,
             input: []const u8,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
             const framed_result = try self.records.push(input);
             const framed = framed_result.framed orelse return .{
                 .consumed = framed_result.consumed,
@@ -141,20 +221,21 @@ pub fn ServerConnection(
             const parsed = try client_hello.parse(message);
             if (self.config.enable_tls13 and parsed.supportsVersion(0x0304)) {
                 self.wipeTls12KeyMaterial();
-                self.state = .{ .tls13 = Tls13.init(self.config.tls13) };
+                self.tls13 = Tls13.init(self.config.tls13);
+                self.state = .tls13;
+                established_output.* = .{ .tls13 = undefined };
                 const output_start = output.items.len;
-                const delegated = switch (self.state) {
-                    .tls13 => |*connection| try replayClientHello(
-                        Tls13,
-                        Tls13.ReceiveResult,
-                        connection,
-                        self.config.tls13.allocator,
-                        framed.legacy_version,
-                        message,
-                        output,
-                    ),
-                    else => unreachable,
-                };
+                const delegated = try replayClientHelloInto(
+                    Tls13,
+                    Tls13.ReceiveIntoResult,
+                    Tls13.Established,
+                    &self.tls13,
+                    self.config.tls13.allocator,
+                    framed.legacy_version,
+                    message,
+                    output,
+                    &established_output.tls13,
+                );
                 try frameTls13FirstMessage(
                     output,
                     self.config.tls13.allocator,
@@ -176,19 +257,20 @@ pub fn ServerConnection(
                 return error.NoSupportedProtocolVersion;
             }
             self.wipeTls13KeyMaterial();
-            self.state = .{ .tls12 = Tls12.init(self.config.tls12) };
-            const delegated = switch (self.state) {
-                .tls12 => |*connection| try replayClientHello(
-                    Tls12,
-                    server12.ReceiveResult,
-                    connection,
-                    self.config.tls12.allocator,
-                    framed.legacy_version,
-                    message,
-                    output,
-                ),
-                else => unreachable,
-            };
+            self.tls12 = Tls12.init(self.config.tls12);
+            self.state = .tls12;
+            established_output.* = .{ .tls12 = undefined };
+            const delegated = try replayClientHelloInto(
+                Tls12,
+                server12.ReceiveIntoResult,
+                server12.Established,
+                &self.tls12,
+                self.config.tls12.allocator,
+                framed.legacy_version,
+                message,
+                output,
+                &established_output.tls12,
+            );
             return .{
                 .consumed = framed_result.consumed,
                 .event = if (delegated.event) |event|
@@ -209,6 +291,9 @@ pub fn ServerConnection(
             if (self.config.tls12.server_private_key_p384) |private_key| {
                 std.crypto.secureZero(u8, private_key);
             }
+            if (self.config.tls12.server_private_key_p521) |private_key| {
+                std.crypto.secureZero(u8, private_key);
+            }
         }
 
         fn wipeAllKeyMaterial(self: *Self) void {
@@ -216,7 +301,7 @@ pub fn ServerConnection(
             self.wipeTls12KeyMaterial();
         }
 
-        fn wrap13(result: Tls13.ReceiveResult) ReceiveResult {
+        fn wrap13(result: Tls13.ReceiveIntoResult) ReceiveIntoResult {
             return .{
                 .consumed = result.consumed,
                 .event = if (result.event) |event|
@@ -226,13 +311,41 @@ pub fn ServerConnection(
             };
         }
 
-        fn wrap12(result: server12.ReceiveResult) ReceiveResult {
+        fn wrap12(result: server12.ReceiveIntoResult) ReceiveIntoResult {
             return .{
                 .consumed = result.consumed,
                 .event = if (result.event) |event|
                     .{ .tls12 = event }
                 else
                     null,
+            };
+        }
+
+        fn legacy13Event(
+            event: Tls13.ReceiveIntoEvent,
+            established: *Established,
+        ) Tls13.Event {
+            return switch (event) {
+                .hello_retry_request => .{ .hello_retry_request = {} },
+                .server_flight => .{ .server_flight = {} },
+                .compatibility_change_cipher_spec => .{ .compatibility_change_cipher_spec = {} },
+                .early_data => |bytes| .{ .early_data = bytes },
+                .end_of_early_data => .{ .end_of_early_data = {} },
+                .peer_alert => |received| .{ .peer_alert = received },
+                .established => .{ .established = established.tls13 },
+            };
+        }
+
+        fn legacy12Event(
+            event: server12.ReceiveIntoEvent,
+            established: *Established,
+        ) server12.Event {
+            return switch (event) {
+                .server_flight => .{ .server_flight = {} },
+                .client_key_exchange => .{ .client_key_exchange = {} },
+                .change_cipher_spec => .{ .change_cipher_spec = {} },
+                .peer_alert => |received| .{ .peer_alert = received },
+                .established => .{ .established = established.tls12 },
             };
         }
     };
@@ -262,14 +375,16 @@ fn frameTls13FirstMessage(
     try output.insertSlice(allocator, start, &header);
 }
 
-fn replayClientHello(
+fn replayClientHelloInto(
     comptime Connection: type,
     comptime Result: type,
+    comptime Established: type,
     connection: *Connection,
     allocator: std.mem.Allocator,
     legacy_version: u16,
     message: []const u8,
     output: *std.ArrayList(u8),
+    established_output: *Established,
 ) Error!Result {
     var replay: std.ArrayList(u8) = .empty;
     defer replay.deinit(allocator);
@@ -289,7 +404,11 @@ fn replayClientHello(
     }
     offset = 0;
     while (offset < replay.items.len) {
-        last = try connection.receive(replay.items[offset..], output);
+        last = try connection.receiveInto(
+            replay.items[offset..],
+            output,
+            established_output,
+        );
         if (last.consumed == 0) return error.ConnectionFailed;
         offset += last.consumed;
         if (last.event != null and offset != replay.items.len) {

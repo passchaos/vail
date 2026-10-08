@@ -25,14 +25,26 @@ pub fn main(init: std.process.Init) !void {
         .generateDeterministic(
         [_]u8{0x33} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
     );
+    var prepared_signer = try vail.crypto.ed25519.PreparedSigner.init(
+        signing_key,
+    );
+    defer prepared_signer.deinit();
     const certificate = signing_key.public_key.toBytes();
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(allocator);
     var checksum: u64 = 0;
+    var flight_len: usize = 0;
 
     const start = nowNs(init.io);
     for (0..iterations) |iteration| {
         output.clearRetainingCapacity();
+        try output.appendSlice(allocator, &.{
+            vail.tls.record.content_type_handshake,
+            3,
+            3,
+            0,
+            0,
+        });
         var material = vail.tls.key_exchange.ServerKeyMaterial{
             .x25519 = [_]u8{@truncate(iteration + 1)} **
                 vail.tls.key_exchange.secret_len,
@@ -47,21 +59,41 @@ pub fn main(init: std.process.Init) !void {
             .server_random = [_]u8{0x34} ** 32,
             .key_material = &material,
             .certificate_chain = &.{&certificate},
-            .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+            .signer = .{ .ed25519 = .{
+                .key_pair = signing_key,
+                .prepared = &prepared_signer,
+            } },
         });
         defer server.deinit();
-        const result = try server.receive(client_record.items, &output);
+        var established: Server.Established = undefined;
+        const result = try server.receiveInto(
+            client_record.items,
+            &output,
+            &established,
+        );
         if (result.event == null or
             std.meta.activeTag(result.event.?) != .server_flight)
         {
             return error.HandshakeDidNotAdvance;
         }
+        const server_hello_len = 4 +
+            (@as(usize, output.items[6]) << 16) +
+            (@as(usize, output.items[7]) << 8) +
+            output.items[8];
+        std.mem.writeInt(
+            u16,
+            output.items[3..5],
+            @intCast(server_hello_len),
+            .big,
+        );
+        flight_len = output.items.len;
         checksum +%= output.items[output.items.len - 1];
     }
     const elapsed = nowNs(init.io) -| start;
     std.debug.print(
-        "x25519_ed25519_aes128={d} ns/server-connection-flight checksum={d}\n",
-        .{ elapsed / iterations, checksum },
+        "x25519_ed25519_aes128={d} ns/server-connection-flight " ++
+            "input={d} output={d} checksum={d}\n",
+        .{ elapsed / iterations, client_record.items.len, flight_len, checksum },
     );
 }
 

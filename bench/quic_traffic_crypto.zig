@@ -18,9 +18,10 @@ pub fn main(init: std.process.Init) !void {
 
     inline for (.{
         traffic.Suite.aes_128_gcm_sha256,
+        traffic.Suite.aes_128_ccm_sha256,
         traffic.Suite.chacha20_poly1305_sha256,
     }) |suite| {
-        const keys = traffic.Keys.derive(suite, secret, .{});
+        const keys = try traffic.Keys.derive(suite, secret, .{});
         var prepared = traffic.PreparedKeys.init(keys);
         defer prepared.deinit();
         const seal_start = nowNs(init.io);

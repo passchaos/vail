@@ -11,7 +11,10 @@ pub const Suite = enum(u16) {
     aes_128_gcm_sha256 = 0x1301,
     aes_256_gcm_sha384 = 0x1302,
     chacha20_poly1305_sha256 = 0x1303,
+    aes_128_ccm_sha256 = 0x1304,
+    aes_128_ccm_8_sha256 = 0x1305,
     sm4_gcm_sm3 = 0x00c6,
+    sm4_ccm_sm3 = 0x00c7,
 
     pub fn wireValue(self: Suite) u16 {
         return @intFromEnum(self);
@@ -20,9 +23,12 @@ pub const Suite = enum(u16) {
     pub fn fromWire(value: u16) ?Suite {
         return switch (value) {
             @intFromEnum(Suite.sm4_gcm_sm3) => .sm4_gcm_sm3,
+            @intFromEnum(Suite.sm4_ccm_sm3) => .sm4_ccm_sm3,
             @intFromEnum(Suite.aes_128_gcm_sha256) => .aes_128_gcm_sha256,
             @intFromEnum(Suite.aes_256_gcm_sha384) => .aes_256_gcm_sha384,
             @intFromEnum(Suite.chacha20_poly1305_sha256) => .chacha20_poly1305_sha256,
+            @intFromEnum(Suite.aes_128_ccm_sha256) => .aes_128_ccm_sha256,
+            @intFromEnum(Suite.aes_128_ccm_8_sha256) => .aes_128_ccm_8_sha256,
             else => null,
         };
     }
@@ -30,7 +36,10 @@ pub const Suite = enum(u16) {
     pub fn keyLen(self: Suite) usize {
         return switch (self) {
             .aes_128_gcm_sha256,
+            .aes_128_ccm_sha256,
+            .aes_128_ccm_8_sha256,
             .sm4_gcm_sm3,
+            .sm4_ccm_sm3,
             => 16,
             .aes_256_gcm_sha384, .chacha20_poly1305_sha256 => 32,
         };
@@ -39,23 +48,31 @@ pub const Suite = enum(u16) {
     pub fn hash(self: Suite) secret.Hash {
         return switch (self) {
             .aes_128_gcm_sha256,
+            .aes_128_ccm_sha256,
+            .aes_128_ccm_8_sha256,
             .chacha20_poly1305_sha256,
             => .sha256,
             .aes_256_gcm_sha384 => .sha384,
             .sm4_gcm_sm3 => .sm3,
+            .sm4_ccm_sm3 => .sm3,
         };
     }
 
     /// Conservative TLS record confidentiality limit per traffic-secret
     /// generation. AES-GCM follows the 2^24 full-size-record bound used to
-    /// keep distinguishing advantage below 2^-60. SM4-GCM uses the same
-    /// conservative GCM bound pending a tighter algorithm-specific analysis.
+    /// keep distinguishing advantage below 2^-60. AES-CCM uses the stricter
+    /// floor of QUIC's 2^21.5 bound because RFC 8446 defines no CCM-specific
+    /// limit. SM4-GCM uses the GCM bound pending a tighter analysis.
     pub fn tlsConfidentialityLimit(self: Suite) u64 {
         return switch (self) {
             .aes_128_gcm_sha256,
             .aes_256_gcm_sha384,
             .sm4_gcm_sm3,
             => @as(u64, 1) << 24,
+            .aes_128_ccm_sha256,
+            .aes_128_ccm_8_sha256,
+            .sm4_ccm_sm3,
+            => @as(u64, 1) << 21,
             .chacha20_poly1305_sha256 => std.math.maxInt(u64),
         };
     }
@@ -67,19 +84,38 @@ pub const Suite = enum(u16) {
             .aes_256_gcm_sha384,
             .sm4_gcm_sm3,
             => @as(u64, 1) << 23,
+            .aes_128_ccm_sha256,
+            .aes_128_ccm_8_sha256,
+            .sm4_ccm_sm3,
+            => @as(u64, 1) << 21,
             .chacha20_poly1305_sha256 => @as(u64, 1) << 62,
         };
     }
 
-    /// RFC 9001 §6.6 per-connection authentication-failure limits.
+    /// Per-connection authentication-failure limits. The 8-byte CCM tag uses
+    /// the conservative 2^7 cap from RFC 9147; QUIC rejects that suite.
     pub fn integrityLimit(self: Suite) u64 {
         return switch (self) {
             .aes_128_gcm_sha256,
             .aes_256_gcm_sha384,
             .sm4_gcm_sm3,
             => @as(u64, 1) << 52,
+            .aes_128_ccm_sha256 => @as(u64, 1) << 21,
+            .sm4_ccm_sm3 => @as(u64, 1) << 21,
+            .aes_128_ccm_8_sha256 => @as(u64, 1) << 7,
             .chacha20_poly1305_sha256 => @as(u64, 1) << 36,
         };
+    }
+
+    pub fn tagLen(self: Suite) usize {
+        return switch (self) {
+            .aes_128_ccm_8_sha256 => 8,
+            else => 16,
+        };
+    }
+
+    pub fn quicCompatible(self: Suite) bool {
+        return self != .aes_128_ccm_8_sha256;
     }
 };
 
@@ -89,6 +125,7 @@ pub const default_preference = [_]Suite{
     .aes_128_gcm_sha256,
     .aes_256_gcm_sha384,
     .chacha20_poly1305_sha256,
+    .aes_128_ccm_sha256,
 };
 
 /// RFC 8998 deployments need the ShangMi suite enabled deliberately because
@@ -96,6 +133,12 @@ pub const default_preference = [_]Suite{
 /// algorithm set nor accept the GM/T certificate profile.
 pub const shangmi_preference = [_]Suite{
     .sm4_gcm_sm3,
+    .sm4_ccm_sm3,
+};
+
+pub const ccm_preference = [_]Suite{
+    .aes_128_ccm_sha256,
+    .aes_128_ccm_8_sha256,
 };
 
 pub const SelectionPolicy = enum {
@@ -221,6 +264,40 @@ test "TLS 1.3 cipher-suite selection supports both preference policies" {
         secret.Hash.sm3,
         Suite.fromWire(0x00c6).?.hash(),
     );
+    try std.testing.expectEqual(
+        Suite.sm4_ccm_sm3,
+        Suite.fromWire(0x00c7).?,
+    );
+    try std.testing.expectEqual(
+        Suite.sm4_ccm_sm3,
+        try selectFromWire(&.{ 0x00, 0xc7 }, &shangmi_preference, .client_order),
+    );
+    try std.testing.expectEqual(
+        secret.Hash.sha256,
+        Suite.fromWire(0x1304).?.hash(),
+    );
+    try std.testing.expectEqual(
+        Suite.aes_128_ccm_8_sha256,
+        Suite.fromWire(0x1305).?,
+    );
+    try std.testing.expectEqual(@as(usize, 8), Suite.aes_128_ccm_8_sha256.tagLen());
+    try std.testing.expect(!Suite.aes_128_ccm_8_sha256.quicCompatible());
+    try std.testing.expect(!containsWire(
+        &.{ 0x13, 0x01, 0x13, 0x04 },
+        .aes_128_ccm_8_sha256,
+    ));
+    try std.testing.expectEqual(
+        Suite.aes_128_ccm_8_sha256,
+        try selectFromWire(&.{ 0x13, 0x05 }, &ccm_preference, .client_order),
+    );
+    try std.testing.expectError(
+        error.NoSharedCipherSuite,
+        selectFromWire(&.{ 0x13, 0x05 }, &default_preference, .server_order),
+    );
+    try std.testing.expectEqual(
+        Suite.aes_128_ccm_sha256,
+        try selectFromWire(&.{ 0x13, 0x04 }, &default_preference, .client_order),
+    );
 }
 
 test "TLS 1.3 cipher-suite selection validates local and wire lists" {
@@ -239,7 +316,7 @@ test "TLS 1.3 cipher-suite selection validates local and wire lists" {
     try std.testing.expectError(
         error.NoSharedCipherSuite,
         selectFromWire(
-            &.{ 0x13, 0x04 },
+            &.{ 0x13, 0xff },
             &default_preference,
             .server_order,
         ),

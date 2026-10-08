@@ -12,6 +12,7 @@ use std::time::Duration;
 #[derive(Debug)]
 struct NoVerifier {
     pkcs1: bool,
+    p521: bool,
     expect_ocsp: bool,
 }
 
@@ -53,6 +54,9 @@ impl ServerCertVerifier for NoVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, Error> {
+        if self.p521 && dss.scheme != SignatureScheme::ECDSA_NISTP521_SHA512 {
+            return Err(Error::General("unexpected TLS 1.2 signature scheme".into()));
+        }
         rustls::crypto::verify_tls12_signature(
             message,
             cert,
@@ -78,6 +82,8 @@ impl ServerCertVerifier for NoVerifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         if self.pkcs1 {
             vec![SignatureScheme::RSA_PKCS1_SHA256]
+        } else if self.p521 {
+            vec![SignatureScheme::ECDSA_NISTP521_SHA512]
         } else {
             vec![
                 SignatureScheme::RSA_PSS_SHA256,
@@ -92,12 +98,17 @@ fn main() {
     let _exe = args.next();
     let mode = args.next();
     let pkcs1 = matches!(mode.as_deref(), Some("pkcs1" | "mtls-pkcs1"));
+    let p521 = mode.as_deref() == Some("p521");
     let mtls = mode.as_deref() == Some("mtls-pkcs1");
     let expect_ocsp = mode.as_deref() == Some("ocsp");
     let key_log_enabled = mode.as_deref() == Some("keylog");
     let builder = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerifier { pkcs1, expect_ocsp }));
+        .with_custom_certificate_verifier(Arc::new(NoVerifier {
+            pkcs1,
+            p521,
+            expect_ocsp,
+        }));
     let mut config = if mtls {
         let cert_path = args.next().expect("client certificate path");
         let key_path = args.next().expect("client private-key path");
@@ -142,6 +153,9 @@ fn main() {
         conn.write_tls(&mut socket).unwrap();
     }
     println!("rustls TLS 1.2 connected");
+    if p521 {
+        println!("rustls P-521 TLS 1.2 signature verified");
+    }
 
     conn.writer().write_all(b"ping").unwrap();
     while conn.wants_write() {

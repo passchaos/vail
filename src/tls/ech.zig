@@ -7,13 +7,13 @@
 
 const std = @import("std");
 const hpke = @import("../crypto/hpke.zig");
+const X25519 = @import("../crypto/x25519.zig").X25519;
 const client_hello = @import("client_hello.zig");
+const extension_set = @import("extension_set.zig");
 const psk = @import("psk.zig");
 const secret = @import("secret.zig");
 const sm3 = @import("../crypto/sm3.zig");
 const transcript = @import("transcript.zig");
-
-const X25519 = std.crypto.dh.X25519;
 
 pub const version: u16 = 0xfe0d;
 pub const extension_type: u16 = version;
@@ -1292,7 +1292,8 @@ fn decodeClientHelloInner(
 
     var expanded_extensions: std.ArrayList(u8) = .empty;
     defer expanded_extensions.deinit(allocator);
-    var seen = std.StaticBitSet(65536).initEmpty();
+    var seen: extension_set.Set = undefined;
+    seen.reset();
     var saw_inner_ech = false;
     var saw_outer_extensions = false;
     var outer_search_pos: usize = 0;
@@ -1323,7 +1324,7 @@ fn decodeClientHelloInner(
                 );
                 if (referenced == extension_type or
                     referenced == outer_extensions_type or
-                    seen.isSet(referenced))
+                    seen.containsOrInsert(referenced))
                 {
                     return error.InvalidInnerClientHello;
                 }
@@ -1332,12 +1333,12 @@ fn decodeClientHelloInner(
                     &outer_search_pos,
                     referenced,
                 );
-                seen.set(referenced);
                 try expanded_extensions.appendSlice(allocator, raw);
             }
         } else {
-            if (seen.isSet(typ)) return error.InvalidInnerClientHello;
-            seen.set(typ);
+            if (seen.containsOrInsert(typ)) {
+                return error.InvalidInnerClientHello;
+            }
             if (typ == extension_type) {
                 if (try parseClientHelloExtension(payload) != .inner) {
                     return error.InvalidInnerClientHello;
@@ -1415,15 +1416,17 @@ fn parseConfigFraming(encoded: []const u8) Error!void {
 }
 
 fn validateConfigExtensions(extensions: []const u8) Error!void {
-    var seen = std.StaticBitSet(65536).initEmpty();
+    var seen: extension_set.Set = undefined;
+    seen.reset();
     var pos: usize = 0;
     while (pos < extensions.len) {
         const typ = readInt(u16, extensions, &pos) catch
             return error.InvalidConfig;
         _ = readU16Vector(extensions, &pos) catch
             return error.InvalidConfig;
-        if (seen.isSet(typ)) return error.DuplicateConfigExtension;
-        seen.set(typ);
+        if (seen.containsOrInsert(typ)) {
+            return error.DuplicateConfigExtension;
+        }
         // RFC 9849 currently defines no config extensions. Unknown extension
         // types with the high bit set are mandatory and make this config
         // unsuitable, while optional unknown extensions are preserved.

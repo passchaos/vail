@@ -10,7 +10,7 @@ const secret = @import("../tls/secret.zig");
 const transcript = @import("../tls/transcript.zig");
 const traffic = @import("traffic_crypto.zig");
 
-pub const Error = key_schedule.Error;
+pub const Error = key_schedule.Error || error{UnsupportedCipherSuite};
 
 pub const DirectionalKeys = struct {
     client: traffic.Keys,
@@ -34,6 +34,7 @@ pub fn keysForSecret(
         labels,
     ) catch |err| switch (err) {
         error.HashMismatch => error.HashMismatch,
+        error.UnsupportedCipherSuite => error.UnsupportedCipherSuite,
     };
 }
 

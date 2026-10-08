@@ -92,7 +92,12 @@ pub const Config = struct {
     tls12_session_ticket: ?[]const u8 = null,
     offer_extended_master_secret: bool = false,
     alpn_protocols: []const []const u8 = &.{},
-    request_ocsp: bool = false,
+    /// Request a stapled OCSP response by default so RFC 7633 Must-Staple
+    /// certificates can be validated without a caller opt-in.
+    request_ocsp: bool = true,
+    /// RFC 6961 multi-stapling request for version-negotiating TLS 1.2
+    /// ClientHellos. TLS 1.3-only clients leave this disabled.
+    request_ocsp_multi: bool = false,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{
         .zlib,
         .brotli,
@@ -164,6 +169,7 @@ pub fn ClientConnection(
             allocator: std.mem.Allocator,
             application: Application,
             master_secret: secret.Secret,
+            exporter_master_secret: secret.Secret,
             transcript_after_client_finished: transcript.Digest,
             selected_alpn: ?[]u8,
             peer_certificate_chain: [][]const u8,
@@ -213,9 +219,26 @@ pub fn ClientConnection(
                 return self.application.dangerousExtractSecrets();
             }
 
+            /// Export application keying material as specified by RFC 8446
+            /// section 7.5. The context may be empty but is always hashed.
+            pub fn exportKeyingMaterial(
+                self: *const Established,
+                label: []const u8,
+                context: []const u8,
+                output: []u8,
+            ) key_schedule.Error!void {
+                try key_schedule.exportKeyingMaterialFor(
+                    self.exporter_master_secret,
+                    label,
+                    context,
+                    output,
+                );
+            }
+
             pub fn deinit(self: *Established) void {
                 self.application.deinit();
                 self.master_secret.deinit();
+                self.exporter_master_secret.deinit();
                 if (self.selected_alpn) |alpn| self.allocator.free(alpn);
                 if (self.local_application_settings) |settings| {
                     self.allocator.free(settings);
@@ -257,6 +280,20 @@ pub fn ClientConnection(
             event: ?Event,
         };
 
+        pub const ReceiveIntoEvent = union(enum) {
+            hello_retry_request: void,
+            server_hello: void,
+            compatibility_change_cipher_spec: void,
+            peer_alert: alert.Alert,
+            ech_rejected: EchRejection,
+            established: void,
+        };
+
+        pub const ReceiveIntoResult = struct {
+            consumed: usize,
+            event: ?ReceiveIntoEvent,
+        };
+
         const PendingHandshake = struct {
             allocator: std.mem.Allocator,
             suite: cipher_suite.Suite,
@@ -283,7 +320,6 @@ pub fn ClientConnection(
                 self.server_handshake_secret.deinit();
                 self.allocator.free(self.server_hello_bytes);
                 self.plaintext_flight.deinit(self.allocator);
-                self.* = undefined;
             }
         };
 
@@ -364,6 +400,7 @@ pub fn ClientConnection(
         offer_extended_master_secret: bool,
         alpn_protocols: []const []const u8,
         request_ocsp: bool,
+        request_ocsp_multi: bool,
         certificate_compression_algorithms: []const certificate_compression.Algorithm,
         max_decompressed_certificate_len: usize,
         record_size_limit: ?u16,
@@ -388,7 +425,8 @@ pub fn ClientConnection(
         early_data_sent: usize = 0,
         records: stream.RecordDeframer = .{},
         hello_messages: stream.HandshakeReassembler(4096) = .{},
-        pending: ?PendingHandshake = null,
+        pending: PendingHandshake = undefined,
+        has_pending: bool = false,
 
         /// Consume `config.key_material`, append a complete plaintext
         /// ClientHello record to `output`, and retain the transcript/private
@@ -397,10 +435,23 @@ pub fn ClientConnection(
             config: Config,
             output: *std.ArrayList(u8),
         ) Error!Self {
+            var self: Self = undefined;
+            try self.initInto(config, output);
+            return self;
+        }
+
+        /// Caller-owned form of `init` which constructs the connection
+        /// directly in its final storage.
+        pub fn initInto(
+            self: *Self,
+            config: Config,
+            output: *std.ArrayList(u8),
+        ) Error!void {
             if (config.ech != null and
                 (config.tls12_session_ticket != null or
                     config.additional_cipher_suites.len != 0 or
-                    config.offer_extended_master_secret))
+                    config.offer_extended_master_secret or
+                    config.request_ocsp_multi))
             {
                 return error.EchIncompatibleOptions;
             }
@@ -455,6 +506,7 @@ pub fn ClientConnection(
                 .certificate_signature_schemes = config.certificate_signature_schemes,
                 .alpn_protocols = config.alpn_protocols,
                 .request_ocsp = config.request_ocsp,
+                .request_ocsp_multi = config.request_ocsp_multi,
                 .offer_extended_master_secret = config.offer_extended_master_secret,
                 .record_size_limit = config.record_size_limit,
                 .certificate_authorities = config.certificate_authorities,
@@ -531,6 +583,8 @@ pub fn ClientConnection(
                         .supported_versions = config.supported_versions,
                         .signature_schemes = config.signature_schemes,
                         .certificate_signature_schemes = config.certificate_signature_schemes,
+                        .request_ocsp = config.request_ocsp,
+                        .request_ocsp_multi = config.request_ocsp_multi,
                         .record_size_limit = config.record_size_limit,
                     },
                 );
@@ -624,47 +678,62 @@ pub fn ClientConnection(
                 }
             }
             errdefer if (early_write) |*state| state.deinit();
-            return .{
-                .allocator = config.allocator,
-                .server_verifier = config.server_verifier,
-                .server_certificate_type = config.server_certificate_type,
-                .server_name = config.server_name,
-                .client_identity = config.client_identity,
-                .request_resumption = config.request_resumption,
-                .ticket_request = config.ticket_request,
-                .application_settings = config.application_settings,
-                .application_settings_codepoint = config.application_settings_codepoint,
-                .random = config.random,
-                .cipher_suites = config.cipher_suites,
-                .additional_cipher_suites = config.additional_cipher_suites,
-                .supported_versions = config.supported_versions,
-                .signature_schemes = config.signature_schemes,
-                .certificate_signature_schemes = config.certificate_signature_schemes,
-                .offer_extended_master_secret = config.offer_extended_master_secret,
-                .alpn_protocols = config.alpn_protocols,
-                .request_ocsp = config.request_ocsp,
-                .certificate_compression_algorithms = config.certificate_compression_algorithms,
-                .max_decompressed_certificate_len = config.max_decompressed_certificate_len,
-                .record_size_limit = config.record_size_limit,
-                .certificate_authorities = config.certificate_authorities,
-                .key_logger = config.key_log,
-                .client_hello_bytes = owned_hello,
-                .exchange = exchange,
-                .retry_material = retry_material,
-                .ech_context = ech_context,
-                .ech_outer_random = if (config.ech) |value|
-                    value.outer_random
-                else
-                    null,
-                .ech_outer_client_hello_bytes = owned_outer_hello,
-                .resumption = resumption,
-                .early_write = early_write,
-            };
+            self.*.allocator = config.allocator;
+            self.*.server_verifier = config.server_verifier;
+            self.*.server_certificate_type = config.server_certificate_type;
+            self.*.server_name = config.server_name;
+            self.*.client_identity = config.client_identity;
+            self.*.request_resumption = config.request_resumption;
+            self.*.ticket_request = config.ticket_request;
+            self.*.application_settings = config.application_settings;
+            self.*.application_settings_codepoint =
+                config.application_settings_codepoint;
+            self.*.random = config.random;
+            self.*.cipher_suites = config.cipher_suites;
+            self.*.additional_cipher_suites = config.additional_cipher_suites;
+            self.*.supported_versions = config.supported_versions;
+            self.*.signature_schemes = config.signature_schemes;
+            self.*.certificate_signature_schemes =
+                config.certificate_signature_schemes;
+            self.*.offer_extended_master_secret =
+                config.offer_extended_master_secret;
+            self.*.alpn_protocols = config.alpn_protocols;
+            self.*.request_ocsp = config.request_ocsp;
+            self.*.request_ocsp_multi = config.request_ocsp_multi;
+            self.*.certificate_compression_algorithms =
+                config.certificate_compression_algorithms;
+            self.*.max_decompressed_certificate_len =
+                config.max_decompressed_certificate_len;
+            self.*.record_size_limit = config.record_size_limit;
+            self.*.certificate_authorities = config.certificate_authorities;
+            self.*.key_logger = config.key_log;
+            self.*.stage = .server_hello;
+            self.*.client_hello_bytes = owned_hello;
+            self.*.exchange = exchange;
+            self.*.retry_material = retry_material;
+            self.*.retry_transcript = null;
+            self.*.retry_suite = null;
+            self.*.ech_context = ech_context;
+            self.*.ech_outer_random = if (config.ech) |value|
+                value.outer_random
+            else
+                null;
+            self.*.ech_outer_client_hello_bytes = owned_outer_hello;
+            self.*.ech_hrr_accepted = false;
+            self.*.ech_rejected = false;
+            self.*.ech_accepted = false;
+            self.*.retried = false;
+            self.*.saw_retry_change_cipher_spec = false;
+            self.*.resumption = resumption;
+            self.*.early_write = early_write;
+            self.*.early_data_sent = 0;
+            self.*.records.buffered = 0;
+            self.*.hello_messages.buffered = 0;
+            self.*.has_pending = false;
         }
 
         pub fn deinit(self: *Self) void {
             self.cleanup();
-            self.* = undefined;
         }
 
         pub fn receive(
@@ -672,8 +741,39 @@ pub fn ClientConnection(
             input: []const u8,
             output: *std.ArrayList(u8),
         ) Error!ReceiveResult {
+            var established: Established = undefined;
+            const result = try self.receiveInto(
+                input,
+                output,
+                &established,
+            );
+            return .{
+                .consumed = result.consumed,
+                .event = if (result.event) |event| switch (event) {
+                    .hello_retry_request => .{ .hello_retry_request = {} },
+                    .server_hello => .{ .server_hello = {} },
+                    .compatibility_change_cipher_spec => .{ .compatibility_change_cipher_spec = {} },
+                    .peer_alert => |received| .{ .peer_alert = received },
+                    .ech_rejected => |rejection| .{ .ech_rejected = rejection },
+                    .established => .{ .established = established },
+                } else null,
+            };
+        }
+
+        /// Feed transport bytes and write an established connection directly
+        /// into caller-owned storage when the returned event is `.established`.
+        pub fn receiveInto(
+            self: *Self,
+            input: []const u8,
+            output: *std.ArrayList(u8),
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
             if (self.stage == .failed) return error.ConnectionFailed;
-            return self.receiveInner(input, output) catch |err| {
+            return self.receiveInner(
+                input,
+                output,
+                established_output,
+            ) catch |err| {
                 self.fail();
                 return err;
             };
@@ -713,10 +813,15 @@ pub fn ClientConnection(
             self: *Self,
             input: []const u8,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
             return switch (self.stage) {
                 .server_hello => self.receiveServerHello(input, output),
-                .server_flight => self.receiveServerFlight(input, output),
+                .server_flight => self.receiveServerFlight(
+                    input,
+                    output,
+                    established_output,
+                ),
                 .established => error.AlreadyEstablished,
                 .failed => error.ConnectionFailed,
             };
@@ -726,7 +831,7 @@ pub fn ClientConnection(
             self: *Self,
             input: []const u8,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
+        ) Error!ReceiveIntoResult {
             const record_result = try self.records.push(input);
             const framed = record_result.framed orelse return .{
                 .consumed = record_result.consumed,
@@ -877,6 +982,7 @@ pub fn ClientConnection(
                     .certificate_signature_schemes = self.certificate_signature_schemes,
                     .alpn_protocols = self.alpn_protocols,
                     .request_ocsp = self.request_ocsp,
+                    .request_ocsp_multi = self.request_ocsp_multi,
                     .offer_extended_master_secret = self.offer_extended_master_secret,
                     .record_size_limit = self.record_size_limit,
                     .certificate_authorities = self.certificate_authorities,
@@ -952,6 +1058,8 @@ pub fn ClientConnection(
                         .supported_versions = self.supported_versions,
                         .signature_schemes = self.signature_schemes,
                         .certificate_signature_schemes = self.certificate_signature_schemes,
+                        .request_ocsp = self.request_ocsp,
+                        .request_ocsp_multi = self.request_ocsp_multi,
                         .record_size_limit = self.record_size_limit,
                     },
                 );
@@ -1022,7 +1130,6 @@ pub fn ClientConnection(
                 return error.EchContextFailed;
             self.server_name = public_name;
             self.alpn_protocols = &.{};
-            self.request_ocsp = false;
             self.certificate_compression_algorithms = &.{};
             self.server_certificate_type = .x509;
             self.client_identity = null;
@@ -1161,25 +1268,41 @@ pub fn ClientConnection(
             errdefer client_records.deinit();
             const owned_server_hello = try self.allocator.dupe(u8, message);
             errdefer self.allocator.free(owned_server_hello);
-            self.pending = .{
-                .allocator = self.allocator,
-                .suite = parsed_server.cipher_suite,
-                .server_hello_bytes = owned_server_hello,
-                .handshake_secret = handshake.handshake_secret,
-                .client_handshake_secret = handshake.client_traffic_secret,
-                .server_handshake_secret = handshake.server_traffic_secret,
-                .transcript_prefix = transcript_prefix,
-                .resumed = resumed,
-                .early_data_offered = early_data_offered,
-                .server_records = server_records,
-                .client_records = client_records,
-                .saw_change_cipher_spec = self.saw_retry_change_cipher_spec,
-            };
-            if (self.record_size_limit) |limit| {
-                self.pending.?.receiver.setMaxCiphertextFragmentLen(
-                    try record_size_limit.maxCiphertextFragment(limit),
-                );
+            const max_ciphertext_fragment_len = if (self.record_size_limit) |limit|
+                try record_size_limit.maxCiphertextFragmentWithTag(
+                    limit,
+                    parsed_server.cipher_suite.tagLen(),
+                )
+            else
+                null;
+            self.pending.allocator = self.allocator;
+            self.pending.suite = parsed_server.cipher_suite;
+            self.pending.server_hello_bytes = owned_server_hello;
+            self.pending.handshake_secret = handshake.handshake_secret;
+            self.pending.client_handshake_secret =
+                handshake.client_traffic_secret;
+            self.pending.server_handshake_secret =
+                handshake.server_traffic_secret;
+            self.pending.transcript_prefix = transcript_prefix;
+            self.pending.resumed = resumed;
+            self.pending.early_data_offered = early_data_offered;
+            self.pending.server_records = server_records;
+            self.pending.client_records = client_records;
+            self.pending.receiver.records.buffered = 0;
+            self.pending.receiver.handshakes.buffered = 0;
+            self.pending.receiver.max_ciphertext_fragment_len =
+                record.max_ciphertext_len;
+            self.pending.receiver.pending_start = 0;
+            self.pending.receiver.pending_end = 0;
+            self.pending.receiver.peer_closed = false;
+            self.pending.receiver.failed = false;
+            self.pending.plaintext_flight = .empty;
+            self.pending.saw_change_cipher_spec =
+                self.saw_retry_change_cipher_spec;
+            if (max_ciphertext_fragment_len) |limit| {
+                self.pending.receiver.setMaxCiphertextFragmentLen(limit);
             }
+            self.has_pending = true;
             self.stage = .server_flight;
         }
 
@@ -1187,8 +1310,10 @@ pub fn ClientConnection(
             self: *Self,
             input: []const u8,
             output: *std.ArrayList(u8),
-        ) Error!ReceiveResult {
-            const pending = &(self.pending orelse unreachable);
+            established_output: *Established,
+        ) Error!ReceiveIntoResult {
+            std.debug.assert(self.has_pending);
+            const pending = &self.pending;
             var consumed: usize = 0;
             while (true) {
                 const result = try pending.receiver.push(
@@ -1214,7 +1339,9 @@ pub fn ClientConnection(
                         };
                     },
                     .alert => |peer_alert| {
-                        const event: Event = .{ .peer_alert = peer_alert };
+                        const event: ReceiveIntoEvent = .{
+                            .peer_alert = peer_alert,
+                        };
                         self.fail();
                         return .{ .consumed = consumed, .event = event };
                     },
@@ -1237,7 +1364,10 @@ pub fn ClientConnection(
                             }
                             return .{
                                 .consumed = consumed,
-                                .event = try self.finishServerFlight(output),
+                                .event = try self.finishServerFlight(
+                                    output,
+                                    established_output,
+                                ),
                             };
                         }
                         if (consumed == input.len and
@@ -1253,8 +1383,10 @@ pub fn ClientConnection(
         fn finishServerFlight(
             self: *Self,
             output: *std.ArrayList(u8),
-        ) Error!Event {
-            const pending = &(self.pending orelse unreachable);
+            established_output: *Established,
+        ) Error!ReceiveIntoEvent {
+            std.debug.assert(self.has_pending);
+            const pending = &self.pending;
             var client_messages: std.ArrayList(u8) = .empty;
             defer client_messages.deinit(self.allocator);
             var verified = try client_handshake
@@ -1330,7 +1462,7 @@ pub fn ClientConnection(
                     encrypted_alert[0..encrypted_len],
                 );
                 pending.deinit();
-                self.pending = null;
+                self.has_pending = false;
                 if (self.client_hello_bytes) |bytes| {
                     self.allocator.free(bytes);
                 }
@@ -1351,7 +1483,8 @@ pub fn ClientConnection(
             else
                 null;
             errdefer if (alpn_copy) |selected| self.allocator.free(selected);
-            var application = try Application.initWithRecordSizeLimits(
+            var application: Application = undefined;
+            try application.initIntoWithRecordSizeLimits(
                 verified.cipher_suite,
                 verified.application.server_traffic_secret,
                 verified.application.client_traffic_secret,
@@ -1359,6 +1492,12 @@ pub fn ClientConnection(
                 verified.peer_record_size_limit,
             );
             errdefer application.deinit();
+            var exporter_master_secret = try key_schedule
+                .deriveExporterMasterSecretFor(
+                verified.application.master_secret,
+                verified.transcript_after_server_finished,
+            );
+            errdefer exporter_master_secret.deinit();
             if (self.key_logger) |logger| {
                 logger.log(
                     key_log.client_traffic_secret_0,
@@ -1371,16 +1510,10 @@ pub fn ClientConnection(
                     verified.application.server_traffic_secret.bytes(),
                 );
                 if (logger.willLog(key_log.exporter_secret)) {
-                    var exporter = try key_schedule
-                        .deriveExporterMasterSecretFor(
-                        verified.application.master_secret,
-                        verified.transcript_after_server_finished,
-                    );
-                    defer exporter.deinit();
                     logger.logEnabled(
                         key_log.exporter_secret,
                         &self.random,
-                        exporter.bytes(),
+                        exporter_master_secret.bytes(),
                     );
                 }
             }
@@ -1436,10 +1569,11 @@ pub fn ClientConnection(
 
             verified.application.client_traffic_secret.deinit();
             verified.application.server_traffic_secret.deinit();
-            const established = Established{
+            established_output.* = .{
                 .allocator = self.allocator,
                 .application = application,
                 .master_secret = verified.application.master_secret,
+                .exporter_master_secret = exporter_master_secret,
                 .transcript_after_client_finished = verified.transcript_after_client_finished,
                 .selected_alpn = alpn_copy,
                 .peer_certificate_chain = verified.peer_certificate_chain,
@@ -1461,7 +1595,7 @@ pub fn ClientConnection(
             verified.peer_application_settings = null;
             verified_owned = false;
             pending.deinit();
-            self.pending = null;
+            self.has_pending = false;
             if (self.client_hello_bytes) |bytes| self.allocator.free(bytes);
             self.client_hello_bytes = null;
             self.stage = .established;
@@ -1469,7 +1603,7 @@ pub fn ClientConnection(
                 self.allocator.free(bytes);
             }
             self.ech_outer_client_hello_bytes = null;
-            return .{ .established = established };
+            return .{ .established = {} };
         }
 
         fn fail(self: *Self) void {
@@ -1488,8 +1622,8 @@ pub fn ClientConnection(
                 resumption.deinit();
             }
             self.resumption = null;
-            if (self.pending) |*pending| pending.deinit();
-            self.pending = null;
+            if (self.has_pending) self.pending.deinit();
+            self.has_pending = false;
             if (self.ech_context) |*context| context.deinit();
             self.ech_context = null;
             if (self.client_hello_bytes) |bytes| self.allocator.free(bytes);
@@ -1653,6 +1787,85 @@ const TestKeyLogCapture = struct {
     }
 };
 
+test "high-level TLS 1.3 client requests OCSP by default with opt-out" {
+    const allocator = std.testing.allocator;
+    const Client = ClientConnection(4096, 256);
+
+    var default_material = key_exchange.ClientKeyMaterial{
+        .x25519 = [_]u8{0x16} ** key_exchange.secret_len,
+    };
+    var default_wire: std.ArrayList(u8) = .empty;
+    defer default_wire.deinit(allocator);
+    var default_client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0x17} ** 32,
+        .server_name = "example.com",
+        .key_material = &default_material,
+        .server_verifier = .{},
+    }, &default_wire);
+    defer default_client.deinit();
+    const default_hello = try client_hello.parse(
+        default_wire.items[record.header_len..],
+    );
+    try std.testing.expect(default_hello.requests_ocsp);
+    try std.testing.expect(!default_hello.requests_ocsp_multi);
+
+    var opt_out_material = key_exchange.ClientKeyMaterial{
+        .x25519 = [_]u8{0x18} ** key_exchange.secret_len,
+    };
+    var opt_out_wire: std.ArrayList(u8) = .empty;
+    defer opt_out_wire.deinit(allocator);
+    var opt_out_client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0x19} ** 32,
+        .server_name = "example.com",
+        .key_material = &opt_out_material,
+        .request_ocsp = false,
+        .server_verifier = .{},
+    }, &opt_out_wire);
+    defer opt_out_client.deinit();
+    const opt_out_hello = try client_hello.parse(
+        opt_out_wire.items[record.header_len..],
+    );
+    try std.testing.expect(!opt_out_hello.requests_ocsp);
+}
+
+test "caller-owned client initialization matches value-returning API" {
+    const allocator = std.testing.allocator;
+    const Client = ClientConnection(4096, 256);
+    const private = [_]u8{0x24} ** key_exchange.secret_len;
+    var returned_material = key_exchange.ClientKeyMaterial{
+        .x25519 = private,
+    };
+    var caller_owned_material = key_exchange.ClientKeyMaterial{
+        .x25519 = private,
+    };
+    var returned_wire: std.ArrayList(u8) = .empty;
+    defer returned_wire.deinit(allocator);
+    var caller_owned_wire: std.ArrayList(u8) = .empty;
+    defer caller_owned_wire.deinit(allocator);
+    const config = Config{
+        .allocator = allocator,
+        .random = [_]u8{0x25} ** 32,
+        .server_name = "example.com",
+        .key_material = &returned_material,
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .server_verifier = .{},
+    };
+    var returned = try Client.init(config, &returned_wire);
+    defer returned.deinit();
+    var caller_owned: Client = undefined;
+    var caller_owned_config = config;
+    caller_owned_config.key_material = &caller_owned_material;
+    try caller_owned.initInto(caller_owned_config, &caller_owned_wire);
+    defer caller_owned.deinit();
+    try std.testing.expectEqualSlices(
+        u8,
+        returned_wire.items,
+        caller_owned_wire.items,
+    );
+}
+
 test "client requests future TLS 1.3 resumption without offering a PSK" {
     const allocator = std.testing.allocator;
     const Client = ClientConnection(4096, 256);
@@ -1742,6 +1955,12 @@ test "client and server states establish over one-byte transport reads" {
     const Server = @import("server_connection.zig").ServerConnection(
         64 * 1024,
         256,
+    );
+    try std.testing.expect(
+        @sizeOf(Client.ReceiveIntoResult) < @sizeOf(Client.ReceiveResult),
+    );
+    try std.testing.expect(
+        @sizeOf(Server.ReceiveIntoResult) < @sizeOf(Server.ReceiveResult),
     );
     const signing_key = try std.crypto.sign.Ed25519.KeyPair
         .generateDeterministic(
@@ -1946,16 +2165,21 @@ test "client and server states establish over one-byte transport reads" {
 
     var client_finished: std.ArrayList(u8) = .empty;
     defer client_finished.deinit(allocator);
-    var client_established: ?Client.Established = null;
+    var established_client: Client.Established = undefined;
+    var client_established = false;
     for (server_wire.items) |byte| {
-        const received = try client.receive(&.{byte}, &client_finished);
+        const received = try client.receiveInto(
+            &.{byte},
+            &client_finished,
+            &established_client,
+        );
         if (received.event) |event| switch (event) {
             .server_hello,
             .compatibility_change_cipher_spec,
             => {},
-            .established => |established| {
-                try std.testing.expect(client_established == null);
-                client_established = established;
+            .established => {
+                try std.testing.expect(!client_established);
+                client_established = true;
             },
             .hello_retry_request => return error.UnexpectedHelloRetryRequest,
             .peer_alert => return error.PeerAbortedHandshake,
@@ -1964,8 +2188,7 @@ test "client and server states establish over one-byte transport reads" {
             ),
         };
     }
-    var established_client = client_established orelse
-        return error.ClientDidNotEstablish;
+    if (!client_established) return error.ClientDidNotEstablish;
     defer established_client.deinit();
     try std.testing.expectEqualStrings(
         "h2",
@@ -2004,24 +2227,25 @@ test "client and server states establish over one-byte transport reads" {
         established_client.peer_application_settings.?,
     );
 
-    var server_established: ?Server.Established = null;
+    var established_server: Server.Established = undefined;
+    var server_established = false;
     var client_flight_offset: usize = 0;
     while (client_flight_offset < client_finished.items.len or
-        server_established == null)
+        !server_established)
     {
-        const received = try server.receive(
+        const received = try server.receiveInto(
             client_finished.items[client_flight_offset..],
             &server_flight,
+            &established_server,
         );
         client_flight_offset += received.consumed;
         if (received.event) |event| switch (event) {
-            .established => |value| server_established = value,
+            .established => server_established = true,
             else => {},
         } else if (received.consumed == 0) {
             return error.ServerStateStalled;
         }
     }
-    var established_server = server_established.?;
     defer established_server.deinit();
     try std.testing.expectEqual(
         @as(usize, client_certificate_chain.len),
@@ -2059,6 +2283,38 @@ test "client and server states establish over one-byte transport reads" {
     try std.testing.expectEqualStrings(
         "client-h2-settings",
         established_server.peer_application_settings.?,
+    );
+    var client_exporter: [64]u8 = undefined;
+    var server_exporter: [64]u8 = undefined;
+    try established_client.exportKeyingMaterial(
+        "vail connection test",
+        "bound context",
+        &client_exporter,
+    );
+    try established_server.exportKeyingMaterial(
+        "vail connection test",
+        "bound context",
+        &server_exporter,
+    );
+    try std.testing.expectEqual(client_exporter, server_exporter);
+    var other_context: [64]u8 = undefined;
+    try established_client.exportKeyingMaterial(
+        "vail connection test",
+        "other context",
+        &other_context,
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &client_exporter,
+        &other_context,
+    ));
+    try std.testing.expectError(
+        error.InvalidExporterInput,
+        established_client.exportKeyingMaterial(
+            &([_]u8{'x'} ** 250),
+            "bound context",
+            &client_exporter,
+        ),
     );
     try client_key_log.expectMatches(
         &server_key_log,
@@ -2821,6 +3077,10 @@ test "ECH client switches to the outer transcript when not accepted" {
         },
     }, &client_wire);
     defer client.deinit();
+    const initial_outer = try client_hello.parse(
+        client_wire.items[record.header_len..],
+    );
+    try std.testing.expect(initial_outer.requests_ocsp);
 
     var forged_hello: std.ArrayList(u8) = .empty;
     defer forged_hello.deinit(allocator);
@@ -2849,6 +3109,7 @@ test "ECH client switches to the outer transcript when not accepted" {
         "public.example",
         fallback_hello.server_name.?,
     );
+    try std.testing.expect(fallback_hello.requests_ocsp);
 }
 
 test "ECH rejection authenticates public name and returns retry configs" {
@@ -2999,6 +3260,8 @@ test "ECH rejection authenticates public name and returns retry configs" {
     );
     try std.testing.expect(second_outer.encrypted_client_hello != null);
     const parsed_first_outer = try client_hello.parse(first_outer);
+    try std.testing.expect(parsed_first_outer.requests_ocsp);
+    try std.testing.expect(second_outer.requests_ocsp);
     try std.testing.expectEqualSlices(
         u8,
         parsed_first_outer.random,
@@ -3613,7 +3876,8 @@ test "client and server states complete PSK-DHE resumption" {
         .server_flight => {},
         else => return error.ExpectedServerFlight,
     }
-    try std.testing.expect((server.pending orelse unreachable).resumed);
+    try std.testing.expect(server.has_pending);
+    try std.testing.expect(server.pending.resumed);
 
     const server_hello_len = 4 +
         ((@as(usize, server_output.items[1]) << 16) |
@@ -4082,8 +4346,9 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
     var replay_server_output: std.ArrayList(u8) = .empty;
     defer replay_server_output.deinit(allocator);
     _ = try replay_server.receive(replay_wire.items, &replay_server_output);
+    try std.testing.expect(replay_server.has_pending);
     try std.testing.expect(
-        !(replay_server.pending orelse unreachable).early_data_accepted,
+        !replay_server.pending.early_data_accepted,
     );
     const discarded = try replay_server.receive(
         replay_wire.items[replay_hello_len..],
