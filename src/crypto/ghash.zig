@@ -296,15 +296,24 @@ const Product = struct {
     mid: u128,
 };
 
-inline fn multiply(x: u128, y: u128) Product {
+const PmullProduct = struct {
+    hi: Repr,
+    lo: Repr,
+    mid: Repr,
+};
+
+/// Keep operands and the unreduced product in SIMD registers across byte
+/// reversal, carryless multiplication, and four-way accumulation.
+inline fn multiplyPmull(x: Repr, y: Repr) PmullProduct {
     return .{
-        .hi = clmul(x, y, 0x11),
-        .lo = clmul(x, y, 0x00),
-        .mid = clmul(x, y, 0x10) ^ clmul(y, x, 0x10),
+        .hi = clmulPmullRepr(x, y, 0x11),
+        .lo = clmulPmullRepr(x, y, 0x00),
+        .mid = clmulPmullRepr(x, y, 0x10) ^
+            clmulPmullRepr(y, x, 0x10),
     };
 }
 
-inline fn xorProduct(product: *Product, other: Product) void {
+inline fn xorPmullProduct(product: *PmullProduct, other: PmullProduct) void {
     product.hi ^= other.hi;
     product.lo ^= other.lo;
     product.mid ^= other.mid;
@@ -356,42 +365,42 @@ noinline fn hashBlocksPmull(
 ) u128 {
     std.debug.assert(block_count >= 2 and block_count <= 16);
     std.debug.assert(blocks.len == block_count * Ghash.block_length);
-    var product = multiply(
-        accumulator ^ std.mem.readInt(u128, blocks[0..16], .big),
-        powers[block_count - 1],
+    var product = multiplyPmull(
+        @as(Repr, @bitCast(accumulator)) ^ loadBlockPmull(blocks, 0),
+        loadPowerPmull(powers, block_count - 1),
     );
     var index: usize = 1;
     while (index + 3 < block_count) : (index += 4) {
-        const first = multiply(
-            loadBlock(blocks, index),
-            powers[block_count - 1 - index],
+        const first = multiplyPmull(
+            loadBlockPmull(blocks, index),
+            loadPowerPmull(powers, block_count - 1 - index),
         );
-        const second = multiply(
-            loadBlock(blocks, index + 1),
-            powers[block_count - 2 - index],
+        const second = multiplyPmull(
+            loadBlockPmull(blocks, index + 1),
+            loadPowerPmull(powers, block_count - 2 - index),
         );
-        const third = multiply(
-            loadBlock(blocks, index + 2),
-            powers[block_count - 3 - index],
+        const third = multiplyPmull(
+            loadBlockPmull(blocks, index + 2),
+            loadPowerPmull(powers, block_count - 3 - index),
         );
-        const fourth = multiply(
-            loadBlock(blocks, index + 3),
-            powers[block_count - 4 - index],
+        const fourth = multiplyPmull(
+            loadBlockPmull(blocks, index + 3),
+            loadPowerPmull(powers, block_count - 4 - index),
         );
         product.hi ^= first.hi ^ second.hi ^ third.hi ^ fourth.hi;
         product.lo ^= first.lo ^ second.lo ^ third.lo ^ fourth.lo;
         product.mid ^= first.mid ^ second.mid ^ third.mid ^ fourth.mid;
     }
     while (index < block_count) : (index += 1) {
-        xorProduct(
+        xorPmullProduct(
             &product,
-            multiply(
-                loadBlock(blocks, index),
-                powers[block_count - 1 - index],
+            multiplyPmull(
+                loadBlockPmull(blocks, index),
+                loadPowerPmull(powers, block_count - 1 - index),
             ),
         );
     }
-    return reduce(product);
+    return reducePmull(product);
 }
 
 noinline fn hashWithSuffixPmull(
@@ -404,54 +413,74 @@ noinline fn hashWithSuffixPmull(
     std.debug.assert(input_block_count >= 1 and input_block_count <= 15);
     std.debug.assert(input.len == input_block_count * Ghash.block_length);
     const total_block_count = input_block_count + 1;
-    var product = multiply(
-        accumulator ^ std.mem.readInt(u128, input[0..16], .big),
-        powers[total_block_count - 1],
+    var product = multiplyPmull(
+        @as(Repr, @bitCast(accumulator)) ^ loadBlockPmull(input, 0),
+        loadPowerPmull(powers, total_block_count - 1),
     );
     var index: usize = 1;
     while (index + 3 < input_block_count) : (index += 4) {
-        const first = multiply(
-            loadBlock(input, index),
-            powers[total_block_count - 1 - index],
+        const first = multiplyPmull(
+            loadBlockPmull(input, index),
+            loadPowerPmull(powers, total_block_count - 1 - index),
         );
-        const second = multiply(
-            loadBlock(input, index + 1),
-            powers[total_block_count - 2 - index],
+        const second = multiplyPmull(
+            loadBlockPmull(input, index + 1),
+            loadPowerPmull(powers, total_block_count - 2 - index),
         );
-        const third = multiply(
-            loadBlock(input, index + 2),
-            powers[total_block_count - 3 - index],
+        const third = multiplyPmull(
+            loadBlockPmull(input, index + 2),
+            loadPowerPmull(powers, total_block_count - 3 - index),
         );
-        const fourth = multiply(
-            loadBlock(input, index + 3),
-            powers[total_block_count - 4 - index],
+        const fourth = multiplyPmull(
+            loadBlockPmull(input, index + 3),
+            loadPowerPmull(powers, total_block_count - 4 - index),
         );
         product.hi ^= first.hi ^ second.hi ^ third.hi ^ fourth.hi;
         product.lo ^= first.lo ^ second.lo ^ third.lo ^ fourth.lo;
         product.mid ^= first.mid ^ second.mid ^ third.mid ^ fourth.mid;
     }
     while (index < input_block_count) : (index += 1) {
-        xorProduct(
+        xorPmullProduct(
             &product,
-            multiply(
-                loadBlock(input, index),
-                powers[total_block_count - 1 - index],
+            multiplyPmull(
+                loadBlockPmull(input, index),
+                loadPowerPmull(powers, total_block_count - 1 - index),
             ),
         );
     }
-    xorProduct(
+    xorPmullProduct(
         &product,
-        multiply(std.mem.readInt(u128, suffix, .big), powers[0]),
+        multiplyPmull(loadBlockPmull(suffix, 0), loadPowerPmull(powers, 0)),
     );
-    return reduce(product);
+    return reducePmull(product);
 }
 
-inline fn loadBlock(input: []const u8, index: usize) u128 {
-    return std.mem.readInt(
-        u128,
-        input[index * Ghash.block_length ..][0..Ghash.block_length],
-        .big,
+inline fn loadBlockPmull(input: []const u8, index: usize) Repr {
+    const offset = index * Ghash.block_length;
+    const raw: @Vector(Ghash.block_length, u8) =
+        input[offset..][0..Ghash.block_length].*;
+    const reversed = @shuffle(
+        u8,
+        raw,
+        undefined,
+        @Vector(Ghash.block_length, i32){
+            15, 14, 13, 12, 11, 10, 9, 8,
+            7,  6,  5,  4,  3,  2,  1, 0,
+        },
     );
+    return @bitCast(reversed);
+}
+
+inline fn loadPowerPmull(powers: *const [16]u128, index: usize) Repr {
+    return @bitCast(powers[index]);
+}
+
+inline fn reducePmull(product: PmullProduct) u128 {
+    return reduce(.{
+        .hi = @bitCast(product.hi),
+        .lo = @bitCast(product.lo),
+        .mid = @bitCast(product.mid),
+    });
 }
 
 fn hashOne(
@@ -549,25 +578,33 @@ fn clmulVpclmul(x: u128, y: u128, comptime selector: u8) u128 {
 }
 
 fn clmulPmull(x: u128, y: u128, comptime selector: u8) u128 {
+    return @bitCast(clmulPmullRepr(
+        @bitCast(x),
+        @bitCast(y),
+        selector,
+    ));
+}
+
+fn clmulPmullRepr(x: Repr, y: Repr, comptime selector: u8) Repr {
     const result = switch (selector) {
         0x11 => asm ("pmull2 %[out].1q, %[x].2d, %[y].2d"
             : [out] "=w" (-> @Vector(2, u64)),
-            : [x] "w" (@as(@Vector(2, u64), @bitCast(x))),
-              [y] "w" (@as(@Vector(2, u64), @bitCast(y))),
+            : [x] "w" (x),
+              [y] "w" (y),
         ),
         0x00 => asm ("pmull %[out].1q, %[x].1d, %[y].1d"
             : [out] "=w" (-> @Vector(2, u64)),
-            : [x] "w" (@as(@Vector(2, u64), @bitCast(x))),
-              [y] "w" (@as(@Vector(2, u64), @bitCast(y))),
+            : [x] "w" (x),
+              [y] "w" (y),
         ),
         0x10 => asm ("pmull %[out].1q, %[x].1d, %[y].1d"
             : [out] "=w" (-> @Vector(2, u64)),
-            : [x] "w" (@as(@Vector(2, u64), @bitCast(x >> 64))),
-              [y] "w" (@as(@Vector(2, u64), @bitCast(y))),
+            : [x] "w" (@shuffle(u64, x, undefined, @Vector(2, i32){ 1, 0 })),
+              [y] "w" (y),
         ),
         else => unreachable,
     };
-    return @bitCast(result);
+    return result;
 }
 
 inline fn clmul(x: u128, y: u128, comptime selector: u8) u128 {
