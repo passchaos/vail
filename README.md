@@ -578,6 +578,22 @@ the netz receive binaries were
 `61ac4cd751b7bd8287ef21596919df76b3dc278097023e96914ffdb7c91cdb13`
 and `270ea2e206430f27a53babf8ee6d590d720f5b1c2e5aacecb30ff000e0cdf687`.
 
+A second ARM64 step keeps byte-reversed message blocks, cached GHASH powers,
+and unreduced products in two-lane NEON values through PMULL accumulation,
+eliminating scalar loads, reversals, and general/SIMD-register transfers from
+the inner loop. Seven clean CPU-0 fixed-binary pairs reduced the same
+1,200-byte AES-128-GCM seal median from 851 to 763 ns/op (10.34%) and combined
+open plus seal from 1,699 to 1,527 ns/op (10.12%), with every pair faster.
+Nine corresponding netz state-service pairs reduced 1,149-byte DATAGRAM receive
+from 2,641 to 2,565 ns/packet (2.88%, 9/9 wins), while seven caller-buffer
+delivery pairs moved from 2,681 to 2,618 ns/packet (2.35%, 7/7 wins). The netz
+benchmark ELF `.text` increased by 252 bytes. The fixed Vail binary hashes were
+`d4790dc20fb2824ec1ca0ef8bab4afda054f5d420db0593f78be5ba9b7e65428`
+and `cc60e806dc7132be2630a834eef4cd9c68dcd490a23f10c3fa32bea857b201cc`;
+the netz receive binaries were
+`270ea2e206430f27a53babf8ee6d590d720f5b1c2e5aacecb30ff000e0cdf687`
+and `cce686dfd90cbb5a31d05b97650398f356814f536319abf6c600f49999348f45`.
+
 ChaCha20-Poly1305 uses a prepared pure-Zig core on x86_64 AVX2 and aarch64
 NEON targets. It emits eight ChaCha blocks together on AVX2 and four on NEON,
 derives the Poly1305 one-time key in the first wide batch, and uses a
