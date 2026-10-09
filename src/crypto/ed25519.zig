@@ -153,10 +153,9 @@ pub const PreparedVerifier = struct {
     pub fn init(public_key: StdEd25519.PublicKey) InitError!PreparedVerifier {
         const public_key_bytes = public_key.toBytes();
         const public_point = try Curve.fromBytes(public_key_bytes);
-        try public_point.rejectIdentity();
+        if (curveIdentity(public_point)) return error.IdentityElement;
         const verification_point = public_point.clearCofactor().neg();
-        verification_point.rejectIdentity() catch
-            return error.WeakPublicKey;
+        if (curveIdentity(verification_point)) return error.WeakPublicKey;
         return .{
             .public_key_bytes = public_key_bytes,
             .public_table = buildPublicComb(verification_point),
@@ -221,7 +220,22 @@ pub fn verify(
     if (comptime point_adx.enabled and decode_adx.enabled) {
         return verifyAdx(signature, message, public_key);
     }
-    return signature.verify(message, public_key);
+    return signature.verify(message, public_key) catch |err| switch (err) {
+        error.IdentityElement => {
+            // Zig std currently treats every x=0 point as the identity. The
+            // y=-1 point has order two instead, so preserve Vail's portable
+            // distinction between the identity and other low-order keys.
+            const public_point = Curve.fromBytes(public_key.toBytes()) catch
+                return err;
+            if (!curveIdentity(public_point) and
+                curveIdentity(public_point.clearCofactor()))
+            {
+                return error.WeakPublicKey;
+            }
+            return err;
+        },
+        else => return err,
+    };
 }
 
 fn verifyAdx(
@@ -680,6 +694,10 @@ fn adxIdentityPoint() AdxPoint {
     return .{ 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 };
 }
 
+fn curveIdentity(point: Curve) bool {
+    return point.x.isZero() and point.y.equivalent(point.z);
+}
+
 fn adxAffineIdentity(point: [8]u64) bool {
     return adxFieldZero(point[0..4].*) and
         point[4] == 1 and point[5] == 0 and
@@ -951,6 +969,16 @@ test "Ed25519 prepared verifier has a bounded caller-owned footprint" {
     try std.testing.expectEqual(
         @as(usize, 15_392),
         @sizeOf(PreparedVerifier),
+    );
+}
+
+test "Ed25519 prepared verifier classifies non-identity low-order keys" {
+    var order_two = [_]u8{0xff} ** StdEd25519.PublicKey.encoded_length;
+    order_two[0] = 0xec;
+    order_two[31] = 0x7f;
+    try std.testing.expectError(
+        error.WeakPublicKey,
+        PreparedVerifier.init(try StdEd25519.PublicKey.fromBytes(order_two)),
     );
 }
 
