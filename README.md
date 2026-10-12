@@ -73,10 +73,14 @@ The current foundation provides:
   CertificateRequest signature-algorithm vectors remain acceptable as RFC 5246
   and RFC 8446 permit. A present certificate-authorities extension must contain
   at least one non-empty DistinguishedName; servers omit it when any issuer is
-  acceptable. Initial-handshake CertificateRequest context is required to be
-  empty; the generic codec still preserves non-empty contexts for post-handshake
-  authentication. Per-identity OCSP and precompressed Certificate variants
-  remain attached to the selected identity;
+  acceptable. RFC 8446 OID filters are encoded with duplicate-OID rejection;
+  clients reject repeated recognized filters, and recognized Key Usage and
+  Extended Key Usage values constrain the end-entity certificate, including
+  subset matching and the prohibition on requesting anyExtendedKeyUsage, while
+  unknown OIDs are ignored. Initial-handshake
+  CertificateRequest context is required to be empty; the generic codec still
+  preserves non-empty contexts for post-handshake authentication. Per-identity
+  OCSP and precompressed Certificate variants remain attached to the selected identity;
 - TLS 1.3 RFC 7250 Raw Public Key authentication in both directions, including
   strict ClientHello/EncryptedExtensions certificate-type negotiation, exact
   DER SubjectPublicKeyInfo pins, single-key Certificate messages, RPK mTLS,

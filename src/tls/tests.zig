@@ -621,6 +621,112 @@ test "CertificateRequest preserves repeated signature scheme values" {
     try std.testing.expect(parsed.supportsCertificateCompression(.brotli));
 }
 
+test "CertificateRequest OID filters select matching X509 leaf" {
+    const allocator = std.testing.allocator;
+    const certificate = @embedFile("../x509/testdata/ed25519-crl-good.der");
+    const key_usage_oid = [_]u8{ 0x55, 0x1d, 0x0f };
+    const extended_key_usage_oid = [_]u8{ 0x55, 0x1d, 0x25 };
+    const unknown_oid = [_]u8{ 0x2b, 0x06, 0x01, 0x04, 0x01, 0x7f };
+    const digital_signature = [_]u8{ 0x03, 0x02, 0x07, 0x80 };
+    const client_auth_usage = [_]u8{
+        0x30, 0x0a, 0x06, 0x08,
+        0x2b, 0x06, 0x01, 0x05,
+        0x05, 0x07, 0x03, 0x02,
+    };
+    const server_auth_usage = [_]u8{
+        0x30, 0x0a, 0x06, 0x08,
+        0x2b, 0x06, 0x01, 0x05,
+        0x05, 0x07, 0x03, 0x01,
+    };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try client_auth.writeRequestWithOptions(&encoded, allocator, .{
+        .request_context = "request",
+        .oid_filters = &.{
+            .{ .oid = &key_usage_oid, .values = &digital_signature },
+            .{ .oid = &extended_key_usage_oid, .values = &client_auth_usage },
+            .{ .oid = &unknown_oid, .values = "opaque-value" },
+        },
+    });
+    const matching = try client_auth.parseRequest(encoded.items);
+    try std.testing.expect(matching.oid_filters.len != 0);
+    try std.testing.expect(try matching.supportsCertificateChain(&.{certificate}));
+
+    encoded.clearRetainingCapacity();
+    try client_auth.writeRequestWithOptions(&encoded, allocator, .{
+        .request_context = "request",
+        .oid_filters = &.{.{
+            .oid = &extended_key_usage_oid,
+            .values = &server_auth_usage,
+        }},
+    });
+    const mismatching = try client_auth.parseRequest(encoded.items);
+    try std.testing.expect(!try mismatching.supportsCertificateChain(
+        &.{certificate},
+    ));
+}
+
+test "CertificateRequest OID filters reject invalid and duplicate entries" {
+    const allocator = std.testing.allocator;
+    const extended_key_usage_oid = [_]u8{ 0x55, 0x1d, 0x25 };
+    const any_extended_key_usage = [_]u8{
+        0x30, 0x06, 0x06, 0x04,
+        0x55, 0x1d, 0x25, 0x00,
+    };
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.writeRequestWithOptions(&encoded, allocator, .{
+            .request_context = "request",
+            .oid_filters = &.{.{ .oid = &.{0x80}, .values = &.{} }},
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.writeRequestWithOptions(&encoded, allocator, .{
+            .request_context = "request",
+            .oid_filters = &.{.{
+                .oid = &extended_key_usage_oid,
+                .values = &any_extended_key_usage,
+            }},
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.writeRequestWithOptions(&encoded, allocator, .{
+            .request_context = "request",
+            .oid_filters = &.{
+                .{ .oid = &.{ 0x2b, 0x01 }, .values = &.{} },
+                .{ .oid = &.{ 0x2b, 0x01 }, .values = &.{} },
+            },
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+
+    try client_auth.writeRequestWithOptions(&encoded, allocator, .{
+        .request_context = "request",
+        .oid_filters = &.{
+            .{ .oid = &.{ 0x55, 0x1d, 0x0f }, .values = &.{} },
+            .{ .oid = &.{ 0x55, 0x1d, 0x10 }, .values = &.{} },
+        },
+    });
+    const second_oid = std.mem.lastIndexOf(
+        u8,
+        encoded.items,
+        &.{ 0x03, 0x55, 0x1d, 0x10, 0x00, 0x00 },
+    ).?;
+    encoded.items[second_oid + 3] = 0x0f;
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.parseRequest(encoded.items),
+    );
+}
+
 test "CertificateRequest rejects an empty certificate authorities vector" {
     const encoded = [_]u8{
         0x0d, 0x00, 0x00, 0x11,

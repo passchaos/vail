@@ -8,10 +8,12 @@ const key_schedule = @import("key_schedule.zig");
 const secret = @import("secret.zig");
 const transcript = @import("transcript.zig");
 const distinguished_name = @import("../x509/distinguished_name.zig");
+const x509_trust = @import("../x509/trust.zig");
 
 pub const handshake_type_certificate_request: u8 = 0x0d;
 const ext_signature_algorithms: u16 = 0x000d;
 const ext_certificate_authorities: u16 = 0x002f;
+const ext_oid_filters: u16 = 0x0030;
 const ext_signature_algorithms_cert: u16 = 0x0032;
 const ext_compress_certificate: u16 =
     certificate_compression.extension_type_compress_certificate;
@@ -55,6 +57,13 @@ pub const ServerPolicy = struct {
     certificate_type: auth.CertificateType = .x509,
 };
 
+/// DER object-identifier contents and DER-encoded extension values from the
+/// RFC 8446 OIDFilter structure.
+pub const OidFilter = struct {
+    oid: []const u8,
+    values: []const u8,
+};
+
 /// RFC 8446 requires the CertificateRequest context to be empty in the main
 /// handshake. Non-empty values are reserved for post-handshake authentication.
 pub fn validateInitialRequestContext(
@@ -69,6 +78,8 @@ pub const ParsedRequest = struct {
     certificate_signature_algorithms: ?[]const u8,
     /// Length-prefixed DER DistinguishedNames from certificate_authorities.
     certificate_authorities: []const u8,
+    /// Encoded OIDFilter entries, without their outer u16 vector length.
+    oid_filters: []const u8,
     supports_ed25519: bool,
     supports_ecdsa_p256_sha256: bool,
     supports_ecdsa_p384_sha384: bool,
@@ -105,10 +116,15 @@ pub const ParsedRequest = struct {
     pub fn supportsCertificateChain(
         self: ParsedRequest,
         chain: []const []const u8,
-    ) auth.Error!bool {
-        const algorithms = self.certificate_signature_algorithms orelse
-            return true;
-        return auth.certificateChainSupportsSchemes(chain, algorithms);
+    ) Error!bool {
+        if (self.certificate_signature_algorithms) |algorithms| {
+            if (!try auth.certificateChainSupportsSchemes(chain, algorithms)) {
+                return false;
+            }
+        }
+        if (self.oid_filters.len == 0) return true;
+        if (chain.len == 0) return false;
+        return oidFiltersMatchCertificate(self.oid_filters, chain[0]);
     }
 
     pub fn supportsSigner(
@@ -137,7 +153,7 @@ pub const ParsedRequest = struct {
     pub fn acceptsIdentity(
         self: ParsedRequest,
         identity: ClientIdentity,
-    ) auth.Error!bool {
+    ) Error!bool {
         if (!self.supportsSigner(identity.signer)) return false;
         if (identity.certificate_type == .raw_public_key) return true;
         if (!try self.supportsCertificateChain(identity.certificate_chain)) {
@@ -489,6 +505,7 @@ pub fn writeRequestWithCompression(
 pub const RequestOptions = struct {
     request_context: []const u8,
     certificate_authorities: []const []const u8 = &.{},
+    oid_filters: []const OidFilter = &.{},
     compression_algorithms: []const certificate_compression.Algorithm = &.{},
     certificate_signature_schemes: ?[]const u16 = null,
 };
@@ -627,6 +644,11 @@ pub fn writeRequestWithOptions(
             try appendInt(&extensions, allocator, u16, scheme);
         }
     }
+    try appendOidFiltersExtension(
+        &extensions,
+        allocator,
+        options.oid_filters,
+    );
     if (compression_algorithms.len != 0) {
         certificate_compression.validateAlgorithms(
             compression_algorithms,
@@ -749,6 +771,7 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
     var signature_algorithms: []const u8 = &.{};
     var certificate_signature_algorithms: ?[]const u8 = null;
     var certificate_authorities: []const u8 = &.{};
+    var oid_filters: []const u8 = &.{};
     var certificate_compression_algorithms: []const u8 = &.{};
     var saw_signature_algorithms = false;
     var seen_extensions: extension_set.Set = undefined;
@@ -856,6 +879,8 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
                     name_len,
                 );
             }
+        } else if (typ == ext_oid_filters) {
+            oid_filters = try parseOidFilters(payload);
         } else if (typ == ext_compress_certificate) {
             certificate_compression_algorithms =
                 try parseCompressionAlgorithms(payload);
@@ -874,6 +899,7 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
         .signature_algorithms = signature_algorithms,
         .certificate_signature_algorithms = certificate_signature_algorithms,
         .certificate_authorities = certificate_authorities,
+        .oid_filters = oid_filters,
         .supports_ed25519 = supports_ed25519,
         .supports_ecdsa_p256_sha256 = supports_ecdsa_p256,
         .supports_ecdsa_p384_sha384 = supports_ecdsa_p384,
@@ -890,6 +916,109 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
         .supports_ml_dsa_87 = supports_ml_dsa_87,
         .certificate_compression_algorithms = certificate_compression_algorithms,
     };
+}
+
+fn appendOidFiltersExtension(
+    extensions: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    configured: []const OidFilter,
+) Error!void {
+    if (configured.len == 0) return;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    for (configured, 0..) |filter, index| {
+        if (filter.oid.len == 0 or filter.oid.len > std.math.maxInt(u8) or
+            filter.values.len > std.math.maxInt(u16))
+        {
+            return error.InvalidCertificateRequest;
+        }
+        _ = x509_trust.validateOidFilter(
+            filter.oid,
+            filter.values,
+        ) catch return error.InvalidCertificateRequest;
+        for (configured[0..index]) |previous| {
+            if (std.mem.eql(u8, filter.oid, previous.oid)) {
+                return error.InvalidCertificateRequest;
+            }
+        }
+        const entry_len = 1 + filter.oid.len + 2 + filter.values.len;
+        if (entry_len > std.math.maxInt(u16) - encoded.items.len - 2) {
+            return error.InvalidCertificateRequest;
+        }
+        try encoded.append(allocator, @intCast(filter.oid.len));
+        try encoded.appendSlice(allocator, filter.oid);
+        try appendInt(&encoded, allocator, u16, filter.values.len);
+        try encoded.appendSlice(allocator, filter.values);
+    }
+    try appendInt(extensions, allocator, u16, ext_oid_filters);
+    try appendInt(extensions, allocator, u16, 2 + encoded.items.len);
+    try appendInt(extensions, allocator, u16, encoded.items.len);
+    try extensions.appendSlice(allocator, encoded.items);
+}
+
+const OidFilterIterator = struct {
+    bytes: []const u8,
+    pos: usize = 0,
+
+    fn next(self: *OidFilterIterator) Error!?OidFilter {
+        if (self.pos == self.bytes.len) return null;
+        const oid_len = try readByte(self.bytes, &self.pos);
+        if (oid_len == 0) return error.InvalidCertificateRequest;
+        const oid = try readSlice(self.bytes, &self.pos, oid_len);
+        const values_len = try readInt(u16, self.bytes, &self.pos);
+        const values = try readSlice(self.bytes, &self.pos, values_len);
+        return .{ .oid = oid, .values = values };
+    }
+};
+
+fn parseOidFilters(payload: []const u8) Error![]const u8 {
+    var pos: usize = 0;
+    const filters_len = try readInt(u16, payload, &pos);
+    const filters = try readSlice(payload, &pos, filters_len);
+    if (pos != payload.len) return error.InvalidCertificateRequest;
+
+    var saw_key_usage = false;
+    var saw_extended_key_usage = false;
+    var iterator = OidFilterIterator{ .bytes = filters };
+    while (try iterator.next()) |filter| {
+        const kind = x509_trust.validateOidFilter(
+            filter.oid,
+            filter.values,
+        ) catch return error.InvalidCertificateRequest;
+        switch (kind) {
+            .unrecognized => {},
+            .key_usage => {
+                if (saw_key_usage) return error.InvalidCertificateRequest;
+                saw_key_usage = true;
+            },
+            .extended_key_usage => {
+                if (saw_extended_key_usage) {
+                    return error.InvalidCertificateRequest;
+                }
+                saw_extended_key_usage = true;
+            },
+        }
+    }
+    return filters;
+}
+
+fn oidFiltersMatchCertificate(
+    filters: []const u8,
+    certificate_der: []const u8,
+) Error!bool {
+    var iterator = OidFilterIterator{ .bytes = filters };
+    while (try iterator.next()) |filter| {
+        const result = x509_trust.matchOidFilter(
+            certificate_der,
+            filter.oid,
+            filter.values,
+        ) catch |err| return switch (err) {
+            error.InvalidOidFilter => error.InvalidCertificateRequest,
+            error.InvalidCertificate => error.InvalidCertificate,
+        };
+        if (result == .mismatch) return false;
+    }
+    return true;
 }
 
 fn parseSignatureAlgorithmList(payload: []const u8) Error![]const u8 {

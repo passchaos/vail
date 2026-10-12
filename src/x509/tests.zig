@@ -2031,6 +2031,77 @@ test "bundle verifier parses basic constraints and key usage strictly" {
     try std.testing.expect(!key_cert_sign.crl_sign);
 }
 
+test "RFC 8446 OID filters match key usage and extended key usage" {
+    const client_certificate = @embedFile("testdata/ed25519-crl-good.der");
+    const key_usage_oid = [_]u8{ 0x55, 0x1d, 0x0f };
+    const extended_key_usage_oid = [_]u8{ 0x55, 0x1d, 0x25 };
+    const unknown_oid = [_]u8{ 0x2b, 0x06, 0x01, 0x04, 0x01, 0x7f };
+
+    try std.testing.expectEqual(
+        trust.OidFilterMatch.match,
+        try trust.matchOidFilter(
+            client_certificate,
+            &key_usage_oid,
+            &.{ 0x03, 0x02, 0x07, 0x80 },
+        ),
+    );
+    try std.testing.expectEqual(
+        trust.OidFilterMatch.mismatch,
+        try trust.matchOidFilter(
+            client_certificate,
+            &key_usage_oid,
+            &.{ 0x03, 0x02, 0x02, 0x04 },
+        ),
+    );
+    try std.testing.expectEqual(
+        trust.OidFilterMatch.match,
+        try trust.matchOidFilter(
+            client_certificate,
+            &extended_key_usage_oid,
+            &.{
+                0x30, 0x0a, 0x06, 0x08,
+                0x2b, 0x06, 0x01, 0x05,
+                0x05, 0x07, 0x03, 0x02,
+            },
+        ),
+    );
+    try std.testing.expectEqual(
+        trust.OidFilterMatch.mismatch,
+        try trust.matchOidFilter(
+            client_certificate,
+            &extended_key_usage_oid,
+            &.{
+                0x30, 0x0a, 0x06, 0x08,
+                0x2b, 0x06, 0x01, 0x05,
+                0x05, 0x07, 0x03, 0x01,
+            },
+        ),
+    );
+    try std.testing.expectEqual(
+        trust.OidFilterMatch.match,
+        try trust.matchOidFilter(client_certificate, &key_usage_oid, &.{}),
+    );
+    try std.testing.expectEqual(
+        trust.OidFilterMatch.unrecognized,
+        try trust.matchOidFilter(
+            client_certificate,
+            &unknown_oid,
+            "opaque-value",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidOidFilter,
+        trust.validateOidFilter(&.{0x80}, &.{}),
+    );
+    try std.testing.expectError(
+        error.InvalidOidFilter,
+        trust.validateOidFilter(
+            &extended_key_usage_oid,
+            &.{ 0x30, 0x06, 0x06, 0x04, 0x55, 0x1d, 0x25, 0x00 },
+        ),
+    );
+}
+
 test "AKI and SKI codecs are strict while routing remains compatible" {
     try std.testing.expectEqualSlices(
         u8,

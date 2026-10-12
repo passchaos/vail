@@ -1500,6 +1500,83 @@ const CertificateUsage = struct {
     authority_key_identifier: ?[]const u8 = null,
 };
 
+const oid_key_usage = [_]u8{ 0x55, 0x1d, 0x0f };
+const oid_extended_key_usage = [_]u8{ 0x55, 0x1d, 0x25 };
+const oid_any_extended_key_usage = [_]u8{ 0x55, 0x1d, 0x25, 0x00 };
+
+pub const OidFilterMatch = enum {
+    unrecognized,
+    mismatch,
+    match,
+};
+
+pub const OidFilterKind = enum {
+    unrecognized,
+    key_usage,
+    extended_key_usage,
+};
+
+pub const OidFilterError = error{
+    InvalidOidFilter,
+    InvalidCertificate,
+};
+
+/// Validate an RFC 8446 certificate-extension filter understood by Vail.
+/// Unknown extension OIDs are valid and reported separately so callers can
+/// ignore them as the RFC requires.
+pub fn validateOidFilter(
+    oid: []const u8,
+    values: []const u8,
+) OidFilterError!OidFilterKind {
+    validateOid(oid) catch return error.InvalidOidFilter;
+    if (std.mem.eql(u8, oid, &oid_key_usage)) {
+        if (values.len != 0) {
+            _ = parseKeyUsage(values) catch return error.InvalidOidFilter;
+        }
+        return .key_usage;
+    }
+    if (std.mem.eql(u8, oid, &oid_extended_key_usage)) {
+        if (values.len != 0) {
+            const usage = parseExtendedKeyUsage(values) catch
+                return error.InvalidOidFilter;
+            if (usage.any) return error.InvalidOidFilter;
+        }
+        return .extended_key_usage;
+    }
+    return .unrecognized;
+}
+
+/// Match one RFC 8446 OID filter against an end-entity certificate. Unknown
+/// extension OIDs are reported separately so the TLS caller can skip them.
+pub fn matchOidFilter(
+    certificate_der: []const u8,
+    oid: []const u8,
+    values: []const u8,
+) OidFilterError!OidFilterMatch {
+    const kind = try validateOidFilter(oid, values);
+    if (kind == .unrecognized) return .unrecognized;
+    const certificate_value = (certificateExtensionValue(
+        certificate_der,
+        oid,
+    ) catch return error.InvalidCertificate) orelse return .mismatch;
+    if (values.len == 0) return .match;
+
+    if (kind == .key_usage) {
+        const requested = parseKeyUsage(values) catch
+            return error.InvalidOidFilter;
+        const certificate = parseKeyUsage(certificate_value) catch
+            return error.InvalidCertificate;
+        return if ((certificate.bits & requested.bits) == requested.bits)
+            .match
+        else
+            .mismatch;
+    }
+    return if (extendedKeyUsageContainsAll(
+        certificate_value,
+        values,
+    ) catch return error.InvalidCertificate) .match else .mismatch;
+}
+
 const UsageCache = union(enum) {
     unparsed,
     valid: CertificateUsage,
@@ -1750,6 +1827,41 @@ fn certificateUsage(certificate_der: []const u8) !CertificateUsage {
             result.policy_extensions.inhibit_any_policy != null))
     {
         return error.InvalidCertificatePolicy;
+    }
+    return result;
+}
+
+fn certificateExtensionValue(
+    certificate_der: []const u8,
+    target_oid: []const u8,
+) !?[]const u8 {
+    const extensions = try certificateExtensions(certificate_der) orelse
+        return null;
+    var result: ?[]const u8 = null;
+    var reader = DerReader{ .bytes = extensions.value };
+    while (try reader.next()) |extension| {
+        if (extension.tag != 0x30) {
+            return error.InvalidCertificateExtension;
+        }
+        var fields = DerReader{ .bytes = extension.value };
+        const oid = try fields.require(0x06);
+        try validateOid(oid.value);
+        var value = (try fields.next()) orelse
+            return error.InvalidCertificateExtension;
+        if (value.tag == 0x01) {
+            if (value.value.len != 1 or value.value[0] != 0xff) {
+                return error.InvalidCertificateExtension;
+            }
+            value = (try fields.next()) orelse
+                return error.InvalidCertificateExtension;
+        }
+        if (value.tag != 0x04 or try fields.next() != null) {
+            return error.InvalidCertificateExtension;
+        }
+        if (std.mem.eql(u8, oid.value, target_oid)) {
+            if (result != null) return error.InvalidCertificateExtension;
+            result = value.value;
+        }
     }
     return result;
 }
@@ -2604,6 +2716,7 @@ const KeyUsage = struct {
     digital_signature: bool,
     key_cert_sign: bool,
     crl_sign: bool,
+    bits: u16,
 };
 
 fn parseKeyUsage(encoded: []const u8) !KeyUsage {
@@ -2634,6 +2747,8 @@ fn parseKeyUsage(encoded: []const u8) !KeyUsage {
         .digital_signature = (bits.value[1] & 0x80) != 0,
         .key_cert_sign = (bits.value[1] & 0x04) != 0,
         .crl_sign = (bits.value[1] & 0x02) != 0,
+        .bits = (@as(u16, bits.value[1]) << 8) |
+            if (bits.value.len == 3) @as(u16, bits.value[2]) else 0,
     };
 }
 
@@ -2712,6 +2827,35 @@ fn parseExtendedKeyUsage(encoded: []const u8) !ExtendedKeyUsage {
         );
     }
     return result;
+}
+
+fn extendedKeyUsageContainsAll(
+    certificate_encoded: []const u8,
+    requested_encoded: []const u8,
+) !bool {
+    _ = try parseExtendedKeyUsage(certificate_encoded);
+    const requested_usage = try parseExtendedKeyUsage(requested_encoded);
+    if (requested_usage.any) return error.InvalidCertificateExtension;
+
+    const certificate = try singleInner(certificate_encoded, 0x30);
+    const requested = try singleInner(requested_encoded, 0x30);
+    var requested_oids = DerReader{ .bytes = requested.value };
+    while (try requested_oids.next()) |requested_oid| {
+        var found = false;
+        var certificate_oids = DerReader{ .bytes = certificate.value };
+        while (try certificate_oids.next()) |certificate_oid| {
+            if (std.mem.eql(
+                u8,
+                requested_oid.value,
+                certificate_oid.value,
+            )) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
 }
 
 fn nonNegativeInteger(integer: Tlv) !usize {
