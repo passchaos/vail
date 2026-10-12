@@ -62,8 +62,11 @@ The current foundation provides:
   `certificate_authorities` DER DistinguishedName hints. TLS 1.3
   `signature_algorithms_cert` is encoded and strictly parsed in ClientHello
   and CertificateRequest, preserved across HRR/ECH, and enforced independently
-  from CertificateVerify when selecting or authenticating X.509 chains, while
-  keeping per-identity OCSP and precompressed Certificate variants together;
+  from CertificateVerify when selecting or authenticating X.509 chains. A
+  client sends its identity only when the signing algorithm, certificate chain,
+  and acceptable CA names all match the request; otherwise it emits the
+  RFC-required empty Certificate message. Per-identity OCSP and precompressed
+  Certificate variants remain attached to the selected identity;
 - TLS 1.3 RFC 7250 Raw Public Key authentication in both directions, including
   strict ClientHello/EncryptedExtensions certificate-type negotiation, exact
   DER SubjectPublicKeyInfo pins, single-key Certificate messages, RPK mTLS,

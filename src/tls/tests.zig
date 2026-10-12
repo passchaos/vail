@@ -415,6 +415,10 @@ test "CertificateRequest advertises built-in signature schemes" {
     );
     const parsed = try client_auth.parseRequest(encoded.items);
     try std.testing.expectEqualStrings("request", parsed.request_context);
+    try std.testing.expectEqualStrings(
+        "\x00\x0aca-subject",
+        parsed.certificate_authorities,
+    );
     try std.testing.expect(parsed.supports_ed25519);
     try std.testing.expect(parsed.supports_ecdsa_p256_sha256);
     try std.testing.expect(parsed.supports_ecdsa_p384_sha384);

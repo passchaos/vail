@@ -6,6 +6,7 @@ const certificate_compression = @import("certificate_compression.zig");
 const key_schedule = @import("key_schedule.zig");
 const secret = @import("secret.zig");
 const transcript = @import("transcript.zig");
+const distinguished_name = @import("../x509/distinguished_name.zig");
 
 pub const handshake_type_certificate_request: u8 = 0x0d;
 const ext_signature_algorithms: u16 = 0x000d;
@@ -57,6 +58,8 @@ pub const ParsedRequest = struct {
     request_context: []const u8,
     signature_algorithms: []const u8,
     certificate_signature_algorithms: ?[]const u8,
+    /// Length-prefixed DER DistinguishedNames from certificate_authorities.
+    certificate_authorities: []const u8,
     supports_ed25519: bool,
     supports_ecdsa_p256_sha256: bool,
     supports_ecdsa_p384_sha384: bool,
@@ -99,6 +102,44 @@ pub const ParsedRequest = struct {
         return auth.certificateChainSupportsSchemes(chain, algorithms);
     }
 
+    pub fn supportsSigner(
+        self: ParsedRequest,
+        signer: auth.Signer,
+    ) bool {
+        return switch (signer.scheme()) {
+            auth.signature_scheme_ed25519 => self.supports_ed25519,
+            auth.signature_scheme_ecdsa_secp256r1_sha256 => self.supports_ecdsa_p256_sha256,
+            auth.signature_scheme_ecdsa_secp384r1_sha384 => self.supports_ecdsa_p384_sha384,
+            auth.signature_scheme_ecdsa_secp521r1_sha512 => self.supports_ecdsa_p521_sha512,
+            auth.signature_scheme_sm2sig_sm3 => self.supports_sm2sig_sm3,
+            auth.signature_scheme_ml_dsa_44 => self.supports_ml_dsa_44,
+            auth.signature_scheme_ml_dsa_65 => self.supports_ml_dsa_65,
+            auth.signature_scheme_ml_dsa_87 => self.supports_ml_dsa_87,
+            auth.signature_scheme_rsa_pss_rsae_sha256 => self.supports_rsa_pss_rsae_sha256,
+            auth.signature_scheme_rsa_pss_rsae_sha384 => self.supports_rsa_pss_rsae_sha384,
+            auth.signature_scheme_rsa_pss_rsae_sha512 => self.supports_rsa_pss_rsae_sha512,
+            auth.signature_scheme_rsa_pss_pss_sha256 => self.supports_rsa_pss_pss_sha256,
+            auth.signature_scheme_rsa_pss_pss_sha384 => self.supports_rsa_pss_pss_sha384,
+            auth.signature_scheme_rsa_pss_pss_sha512 => self.supports_rsa_pss_pss_sha512,
+            else => false,
+        };
+    }
+
+    pub fn acceptsIdentity(
+        self: ParsedRequest,
+        identity: ClientIdentity,
+    ) auth.Error!bool {
+        if (!self.supportsSigner(identity.signer)) return false;
+        if (identity.certificate_type == .raw_public_key) return true;
+        if (!try self.supportsCertificateChain(identity.certificate_chain)) {
+            return false;
+        }
+        return certificateChainMatchesAuthorities(
+            identity.certificate_chain,
+            self.certificate_authorities,
+        );
+    }
+
     pub fn supportsCertificateCompression(
         self: ParsedRequest,
         algorithm: certificate_compression.Algorithm,
@@ -117,6 +158,84 @@ pub const ParsedRequest = struct {
         return false;
     }
 };
+
+/// Return whether an X.509 chain has an issuer named by a TLS
+/// certificate_authorities vector. An empty vector permits every issuer.
+pub fn certificateChainMatchesAuthorities(
+    chain: []const []const u8,
+    encoded_authorities: []const u8,
+) bool {
+    if (encoded_authorities.len == 0) return true;
+    for (chain) |certificate_der| {
+        const certificate = std.crypto.Certificate.parse(.{
+            .buffer = certificate_der,
+            .index = 0,
+        }) catch continue;
+        if (certificateAuthoritiesContainIssuer(
+            encoded_authorities,
+            certificate.issuer(),
+        )) return true;
+    }
+    return false;
+}
+
+fn certificateAuthoritiesContainIssuer(
+    encoded_authorities: []const u8,
+    issuer: []const u8,
+) bool {
+    var offset: usize = 0;
+    while (offset < encoded_authorities.len) {
+        if (encoded_authorities.len - offset < 2) return false;
+        const name_len = std.mem.readInt(
+            u16,
+            encoded_authorities[offset..][0..2],
+            .big,
+        );
+        offset += 2;
+        if (name_len == 0 or name_len > encoded_authorities.len - offset) {
+            return false;
+        }
+        const encoded_name = encoded_authorities[offset..][0..name_len];
+        offset += name_len;
+        const name = derSequenceContents(encoded_name) orelse continue;
+        if (distinguished_name.eql(name, issuer) catch false) return true;
+    }
+    return false;
+}
+
+fn derSequenceContents(encoded: []const u8) ?[]const u8 {
+    if (encoded.len < 2 or encoded[0] != 0x30) return null;
+    var offset: usize = 2;
+    var payload_len: usize = encoded[1];
+    if ((payload_len & 0x80) != 0) {
+        const length_bytes = payload_len & 0x7f;
+        if (length_bytes == 0 or
+            length_bytes > @sizeOf(usize) or
+            length_bytes > encoded.len - offset or
+            encoded[offset] == 0)
+        {
+            return null;
+        }
+        payload_len = 0;
+        for (encoded[offset..][0..length_bytes]) |byte| {
+            payload_len = std.math.shlExact(
+                usize,
+                payload_len,
+                8,
+            ) catch return null;
+            payload_len = std.math.add(
+                usize,
+                payload_len,
+                @as(usize, byte),
+            ) catch return null;
+        }
+        if (payload_len < 128) return null;
+        offset += length_bytes;
+    }
+    const end = std.math.add(usize, offset, payload_len) catch return null;
+    if (end != encoded.len) return null;
+    return encoded[offset..end];
+}
 
 pub const Verification = struct {
     certificate: auth.ParsedCertificate,
@@ -620,9 +739,11 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
     var supports_ml_dsa_87 = false;
     var signature_algorithms: []const u8 = &.{};
     var certificate_signature_algorithms: ?[]const u8 = null;
+    var certificate_authorities: []const u8 = &.{};
     var certificate_compression_algorithms: []const u8 = &.{};
     var saw_signature_algorithms = false;
     var saw_signature_algorithms_cert = false;
+    var saw_certificate_authorities = false;
     var saw_certificate_compression = false;
     var ext_pos: usize = 0;
     while (ext_pos < extensions.len) {
@@ -711,15 +832,29 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
             certificate_signature_algorithms =
                 try parseSignatureAlgorithmList(payload);
         } else if (typ == ext_certificate_authorities) {
+            if (saw_certificate_authorities) {
+                return error.InvalidCertificateRequest;
+            }
+            saw_certificate_authorities = true;
             var ca_pos: usize = 0;
             const names_len = try readInt(u16, payload, &ca_pos);
             if (names_len != payload.len - ca_pos) {
                 return error.InvalidCertificateRequest;
             }
-            while (ca_pos < payload.len) {
-                const name_len = try readInt(u16, payload, &ca_pos);
+            certificate_authorities = payload[ca_pos..];
+            var name_pos: usize = 0;
+            while (name_pos < certificate_authorities.len) {
+                const name_len = try readInt(
+                    u16,
+                    certificate_authorities,
+                    &name_pos,
+                );
                 if (name_len == 0) return error.InvalidCertificateRequest;
-                _ = try readSlice(payload, &ca_pos, name_len);
+                _ = try readSlice(
+                    certificate_authorities,
+                    &name_pos,
+                    name_len,
+                );
             }
         } else if (typ == ext_compress_certificate) {
             if (saw_certificate_compression) {
@@ -739,6 +874,7 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
         .request_context = request_context,
         .signature_algorithms = signature_algorithms,
         .certificate_signature_algorithms = certificate_signature_algorithms,
+        .certificate_authorities = certificate_authorities,
         .supports_ed25519 = supports_ed25519,
         .supports_ecdsa_p256_sha256 = supports_ecdsa_p256,
         .supports_ecdsa_p384_sha384 = supports_ecdsa_p384,

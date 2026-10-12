@@ -25,7 +25,6 @@ const tls12_ticket = @import("tls12_ticket.zig");
 const handshake = @import("tls12_handshake.zig");
 const transcript = @import("transcript.zig");
 const traffic_secrets = @import("traffic_secrets.zig");
-const distinguished_name = @import("../x509/distinguished_name.zig");
 
 pub const Error = std.mem.Allocator.Error || stream.Error ||
     stream.HandshakeError || client_hello.Error || handshake.Error ||
@@ -103,19 +102,10 @@ fn certificateRequestAcceptsIdentity(
         request.certificate_types,
         certificate_type,
     ) == null or !request.supportsSigner(identity.signer)) return false;
-    if (request.certificate_authorities.len == 0) return true;
-
-    for (identity.certificate_chain) |certificate_der| {
-        const certificate = std.crypto.Certificate.parse(.{
-            .buffer = certificate_der,
-            .index = 0,
-        }) catch continue;
-        if (certificateAuthoritiesContainIssuer(
-            request.certificate_authorities,
-            certificate.issuer(),
-        )) return true;
-    }
-    return false;
+    return client_auth.certificateChainMatchesAuthorities(
+        identity.certificate_chain,
+        request.certificate_authorities,
+    );
 }
 
 fn tls12ClientCertificateType(signature_scheme: u16) ?u8 {
@@ -138,65 +128,6 @@ fn tls12ClientCertificateType(signature_scheme: u16) ?u8 {
         => tls12_ecdsa_sign_certificate_type,
         else => null,
     };
-}
-
-fn certificateAuthoritiesContainIssuer(
-    encoded_authorities: []const u8,
-    issuer: []const u8,
-) bool {
-    var offset: usize = 0;
-    while (offset < encoded_authorities.len) {
-        if (encoded_authorities.len - offset < 2) return false;
-        const name_len = std.mem.readInt(
-            u16,
-            encoded_authorities[offset..][0..2],
-            .big,
-        );
-        offset += 2;
-        if (name_len == 0 or name_len > encoded_authorities.len - offset) {
-            return false;
-        }
-        const encoded_name = encoded_authorities[offset..][0..name_len];
-        offset += name_len;
-        const name = derSequenceContents(encoded_name) orelse continue;
-        if (distinguished_name.eql(name, issuer) catch false) return true;
-    }
-    return false;
-}
-
-fn derSequenceContents(encoded: []const u8) ?[]const u8 {
-    if (encoded.len < 2 or encoded[0] != 0x30) return null;
-    var offset: usize = 2;
-    var payload_len: usize = encoded[1];
-    if ((payload_len & 0x80) != 0) {
-        const length_bytes = payload_len & 0x7f;
-        if (length_bytes == 0 or
-            length_bytes > @sizeOf(usize) or
-            length_bytes > encoded.len - offset or
-            encoded[offset] == 0)
-        {
-            return null;
-        }
-        payload_len = 0;
-        for (encoded[offset..][0..length_bytes]) |byte| {
-            payload_len = std.math.shlExact(
-                usize,
-                payload_len,
-                8,
-            ) catch return null;
-            payload_len = std.math.add(
-                usize,
-                payload_len,
-                @as(usize, byte),
-            ) catch
-                return null;
-        }
-        if (payload_len < 128) return null;
-        offset += length_bytes;
-    }
-    const end = std.math.add(usize, offset, payload_len) catch return null;
-    if (end != encoded.len) return null;
-    return encoded[offset..end];
 }
 
 pub const Event = union(enum) {

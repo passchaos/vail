@@ -412,16 +412,13 @@ pub fn verifyServerAndWriteClientFlight(
     var selected_client_certificate_compression: ?certificate_compression.Algorithm = null;
     if (flight.certificate_request) |request_bytes| {
         const request = try client_auth.parseRequest(request_bytes);
-        const identity = options.client_identity;
+        const identity: ?client_auth.ClientIdentity =
+            if (options.client_identity) |value|
+                if (try request.acceptsIdentity(value)) value else null
+            else
+                null;
         const certificate_start = out.items.len;
         if (identity) |value| {
-            if (value.certificate_type == .x509 and
-                !try request.supportsCertificateChain(
-                    value.certificate_chain,
-                ))
-            {
-                return error.UnsupportedSignatureScheme;
-            }
             var ordinary_certificate: std.ArrayList(u8) = .empty;
             defer ordinary_certificate.deinit(allocator);
             try auth.writeClientCertificateWithContext(
@@ -455,9 +452,6 @@ pub fn verifyServerAndWriteClientFlight(
         state.update(out.items[certificate_start..]);
         if (identity) |value| {
             try value.validate();
-            if (!requestSupportsSigner(request, value.signer)) {
-                return error.UnsupportedSignatureScheme;
-            }
             const certificate_verify_start = out.items.len;
             const client_certificate_hash = state.digest();
             try auth.writeCertificateVerifyForRole(
@@ -596,29 +590,6 @@ pub fn splitServerFlightForMode(
         .certificate_verify = certificate_verify,
         .before_finished = bytes[0..offset],
         .finished = bytes[offset..],
-    };
-}
-
-fn requestSupportsSigner(
-    request: client_auth.ParsedRequest,
-    signer: auth.Signer,
-) bool {
-    return switch (signer.scheme()) {
-        auth.signature_scheme_ed25519 => request.supports_ed25519,
-        auth.signature_scheme_ecdsa_secp256r1_sha256 => request.supports_ecdsa_p256_sha256,
-        auth.signature_scheme_ecdsa_secp384r1_sha384 => request.supports_ecdsa_p384_sha384,
-        auth.signature_scheme_ecdsa_secp521r1_sha512 => request.supports_ecdsa_p521_sha512,
-        auth.signature_scheme_sm2sig_sm3 => request.supports_sm2sig_sm3,
-        auth.signature_scheme_ml_dsa_44 => request.supports_ml_dsa_44,
-        auth.signature_scheme_ml_dsa_65 => request.supports_ml_dsa_65,
-        auth.signature_scheme_ml_dsa_87 => request.supports_ml_dsa_87,
-        auth.signature_scheme_rsa_pss_rsae_sha256 => request.supports_rsa_pss_rsae_sha256,
-        auth.signature_scheme_rsa_pss_rsae_sha384 => request.supports_rsa_pss_rsae_sha384,
-        auth.signature_scheme_rsa_pss_rsae_sha512 => request.supports_rsa_pss_rsae_sha512,
-        auth.signature_scheme_rsa_pss_pss_sha256 => request.supports_rsa_pss_pss_sha256,
-        auth.signature_scheme_rsa_pss_pss_sha384 => request.supports_rsa_pss_pss_sha384,
-        auth.signature_scheme_rsa_pss_pss_sha512 => request.supports_rsa_pss_pss_sha512,
-        else => false,
     };
 }
 
