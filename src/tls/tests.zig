@@ -487,6 +487,22 @@ test "CertificateRequest advertises built-in signature schemes" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+
+    const duplicate_certificate_authorities = [_]u8{
+        0x0d, 0x00, 0x00, 0x1d,
+        0x00, 0x00, 0x1a, 0x00,
+        0x0d, 0x00, 0x04, 0x00,
+        0x02, 0x08, 0x07, 0x00,
+        0x2f, 0x00, 0x05, 0x00,
+        0x03, 0x00, 0x01, 'a',
+        0x00, 0x2f, 0x00, 0x05,
+        0x00, 0x03, 0x00, 0x01,
+        'b',
+    };
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.parseRequest(&duplicate_certificate_authorities),
+    );
 }
 
 test "optional client Certificate supports an empty chain" {
