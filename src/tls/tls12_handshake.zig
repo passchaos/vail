@@ -29,6 +29,22 @@ const ext_session_ticket: u16 = 0x0023;
 const ext_renegotiation_info: u16 = 0xff01;
 const named_curve_type: u8 = 3;
 
+const client_certificate_signature_schemes = [_]u16{
+    auth.signature_scheme_ecdsa_secp256r1_sha256,
+    auth.signature_scheme_ecdsa_secp384r1_sha384,
+    auth.signature_scheme_ecdsa_secp521r1_sha512,
+    auth.signature_scheme_ed25519,
+    auth.signature_scheme_rsa_pss_rsae_sha256,
+    auth.signature_scheme_rsa_pss_rsae_sha384,
+    auth.signature_scheme_rsa_pss_rsae_sha512,
+    auth.signature_scheme_rsa_pss_pss_sha256,
+    auth.signature_scheme_rsa_pss_pss_sha384,
+    auth.signature_scheme_rsa_pss_pss_sha512,
+    auth.signature_scheme_rsa_pkcs1_sha256,
+    auth.signature_scheme_rsa_pkcs1_sha384,
+    auth.signature_scheme_rsa_pkcs1_sha512,
+};
+
 pub const Error = std.mem.Allocator.Error || auth.Error ||
     client_hello.Error || key_exchange.Error || error{
     InvalidClientHello,
@@ -1081,22 +1097,7 @@ pub fn writeCertificateRequest(
     if (authorities.items.len > std.math.maxInt(u16)) {
         return error.InvalidCertificateRequest;
     }
-    const schemes = [_]u16{
-        auth.signature_scheme_ecdsa_secp256r1_sha256,
-        auth.signature_scheme_ecdsa_secp384r1_sha384,
-        auth.signature_scheme_ecdsa_secp521r1_sha512,
-        auth.signature_scheme_ed25519,
-        auth.signature_scheme_rsa_pss_rsae_sha256,
-        auth.signature_scheme_rsa_pss_rsae_sha384,
-        auth.signature_scheme_rsa_pss_rsae_sha512,
-        auth.signature_scheme_rsa_pss_pss_sha256,
-        auth.signature_scheme_rsa_pss_pss_sha384,
-        auth.signature_scheme_rsa_pss_pss_sha512,
-        auth.signature_scheme_rsa_pkcs1_sha256,
-        auth.signature_scheme_rsa_pkcs1_sha384,
-        auth.signature_scheme_rsa_pkcs1_sha512,
-    };
-    const body_len = 1 + 2 + 2 + schemes.len * 2 + 2 +
+    const body_len = 1 + 2 + 2 + client_certificate_signature_schemes.len * 2 + 2 +
         authorities.items.len;
     try appendHandshakeHeader(
         out,
@@ -1106,8 +1107,15 @@ pub fn writeCertificateRequest(
     );
     // rsa_sign and ecdsa_sign (RFC 4492).
     try out.appendSlice(allocator, &.{ 2, 1, 64 });
-    try appendInt(out, allocator, u16, schemes.len * 2);
-    for (schemes) |scheme| try appendInt(out, allocator, u16, scheme);
+    try appendInt(
+        out,
+        allocator,
+        u16,
+        client_certificate_signature_schemes.len * 2,
+    );
+    for (client_certificate_signature_schemes) |scheme| {
+        try appendInt(out, allocator, u16, scheme);
+    }
     try appendInt(out, allocator, u16, authorities.items.len);
     try out.appendSlice(allocator, authorities.items);
 }
@@ -1176,9 +1184,15 @@ pub fn verifyCertificateVerify(
     if (message.len == 0 or message[0] != handshake_type_certificate_verify) {
         return error.InvalidCertificateRequest;
     }
+    const parsed = try auth.parseCertificateVerify(message);
+    if (std.mem.indexOfScalar(
+        u16,
+        &client_certificate_signature_schemes,
+        parsed.scheme,
+    ) == null) return error.UnsupportedSignatureScheme;
     try auth.verifyTls12SignedContent(
         certificate,
-        try auth.parseCertificateVerify(message),
+        parsed,
         handshake_messages,
     );
 }
@@ -1741,6 +1755,40 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
     try std.testing.expectError(
         error.InvalidClientHello,
         select(tls13_only, signer, .{}),
+    );
+}
+
+test "TLS 1.2 CertificateVerify rejects an unadvertised signature scheme" {
+    try std.testing.expect(std.mem.indexOfScalar(
+        u16,
+        &client_certificate_signature_schemes,
+        auth.signature_scheme_ecdsa_secp521r1_sha512,
+    ) != null);
+    try std.testing.expect(std.mem.indexOfScalar(
+        u16,
+        &client_certificate_signature_schemes,
+        auth.signature_scheme_sm2sig_sm3,
+    ) == null);
+
+    var message: std.ArrayList(u8) = .empty;
+    defer message.deinit(std.testing.allocator);
+    try appendHandshakeHeader(
+        &message,
+        std.testing.allocator,
+        auth.handshake_type_certificate_verify,
+        5,
+    );
+    try appendInt(
+        &message,
+        std.testing.allocator,
+        u16,
+        auth.signature_scheme_sm2sig_sm3,
+    );
+    try appendInt(&message, std.testing.allocator, u16, 1);
+    try message.append(std.testing.allocator, 0);
+    try std.testing.expectError(
+        error.UnsupportedSignatureScheme,
+        verifyCertificateVerify(&.{}, message.items, "transcript"),
     );
 }
 
