@@ -530,6 +530,14 @@ test "CertificateRequest advertises built-in signature schemes" {
     );
 }
 
+test "TLS 1.3 initial CertificateRequest requires an empty context" {
+    try client_auth.validateInitialRequestContext(&.{});
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.validateInitialRequestContext("post-handshake"),
+    );
+}
+
 test "optional client Certificate supports an empty chain" {
     const allocator = std.testing.allocator;
     var encoded: std.ArrayList(u8) = .empty;

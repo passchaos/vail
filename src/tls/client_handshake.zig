@@ -412,6 +412,7 @@ pub fn verifyServerAndWriteClientFlight(
     var selected_client_certificate_compression: ?certificate_compression.Algorithm = null;
     if (flight.certificate_request) |request_bytes| {
         const request = try client_auth.parseRequest(request_bytes);
+        try client_auth.validateInitialRequestContext(request.request_context);
         const identity: ?client_auth.ClientIdentity =
             if (options.client_identity) |value|
                 if (try request.acceptsIdentity(value)) value else null

@@ -54,6 +54,14 @@ pub const ServerPolicy = struct {
     certificate_type: auth.CertificateType = .x509,
 };
 
+/// RFC 8446 requires the CertificateRequest context to be empty in the main
+/// handshake. Non-empty values are reserved for post-handshake authentication.
+pub fn validateInitialRequestContext(
+    request_context: []const u8,
+) error{InvalidCertificateRequest}!void {
+    if (request_context.len != 0) return error.InvalidCertificateRequest;
+}
+
 pub const ParsedRequest = struct {
     request_context: []const u8,
     signature_algorithms: []const u8,

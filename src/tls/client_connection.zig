@@ -2020,7 +2020,7 @@ test "client and server states establish over one-byte transport reads" {
         &client_certificate_message,
         allocator,
         &client_certificate_chain,
-        "mtls",
+        &.{},
     );
     var prepared_client_certificate =
         try certificate_compression.Prepared.initZstd(
@@ -2117,7 +2117,7 @@ test "client and server states establish over one-byte transport reads" {
         .max_requested_tickets = 2,
         .key_log = server_key_log.logger(),
         .client_auth = .{
-            .request_context = "mtls",
+            .request_context = &.{},
             .certificate_compression_algorithms = &.{.zstd},
         },
         .client_auth_policy = .{
@@ -3858,7 +3858,7 @@ test "client and server states complete PSK-DHE resumption" {
             .now_ms = 10_000 + actual_age,
         } },
         .max_requested_tickets = 2,
-        .client_auth = .{ .request_context = "optional-client" },
+        .client_auth = .{ .request_context = &.{} },
         .client_auth_policy = .{
             .verifier = .{},
             .requirement = .optional,

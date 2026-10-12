@@ -196,6 +196,11 @@ fn writeServerHandshakeFlightSelected(
     options: Options,
     selection: server_flight.Selection,
 ) Error!Result {
+    if (options.client_auth) |client_auth_options| {
+        try client_auth.validateInitialRequestContext(
+            client_auth_options.request_context,
+        );
+    }
     if ((options.psk == null) !=
         (options.selected_psk_identity == null))
     {
@@ -594,25 +599,40 @@ test "server handshake flight inserts encrypted CertificateRequest" {
             std.crypto.sign.Ed25519.KeyPair.seed_length,
     );
     const cert = key_pair.public_key.toBytes();
+    const options = Options{
+        .client_hello_bytes = &hello,
+        .parsed_client_hello = parsed,
+        .policy = .{},
+        .server_random = [_]u8{0x66} ** 32,
+        .server_key_share = &.{ 9, 8, 7, 6 },
+        .shared_secret = &([_]u8{0x67} ** 32),
+        .certificate_chain = &.{&cert},
+        .signer = .{ .ed25519 = .{ .key_pair = key_pair } },
+        .client_auth = .{
+            .request_context = &.{},
+            .certificate_authorities = &.{"test-ca"},
+        },
+    };
+    var invalid_options = options;
+    invalid_options.client_auth.?.request_context = "post-handshake";
+    var invalid_flight: std.ArrayList(u8) = .empty;
+    defer invalid_flight.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        writeServerHandshakeFlight(
+            &invalid_flight,
+            std.testing.allocator,
+            invalid_options,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), invalid_flight.items.len);
+
     var flight: std.ArrayList(u8) = .empty;
     defer flight.deinit(std.testing.allocator);
     var result = try writeServerHandshakeFlight(
         &flight,
         std.testing.allocator,
-        .{
-            .client_hello_bytes = &hello,
-            .parsed_client_hello = parsed,
-            .policy = .{},
-            .server_random = [_]u8{0x66} ** 32,
-            .server_key_share = &.{ 9, 8, 7, 6 },
-            .shared_secret = &([_]u8{0x67} ** 32),
-            .certificate_chain = &.{&cert},
-            .signer = .{ .ed25519 = .{ .key_pair = key_pair } },
-            .client_auth = .{
-                .request_context = "client-auth",
-                .certificate_authorities = &.{"test-ca"},
-            },
-        },
+        options,
     );
     defer result.handshake_secret.deinit();
     defer result.client_handshake_traffic_secret.deinit();
@@ -643,10 +663,7 @@ test "server handshake flight inserts encrypted CertificateRequest" {
     );
     const request = try handshakeMessageAt(encrypted_flight, 1);
     const parsed_request = try client_auth.parseRequest(request);
-    try std.testing.expectEqualStrings(
-        "client-auth",
-        parsed_request.request_context,
-    );
+    try std.testing.expectEqual(@as(usize, 0), parsed_request.request_context.len);
 }
 
 fn handshakeMessageAt(
