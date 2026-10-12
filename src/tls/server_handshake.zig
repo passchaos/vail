@@ -86,6 +86,7 @@ pub const ClientAuthOptions = struct {
     request_context: []const u8 = &.{},
     certificate_authorities: []const []const u8 = &.{},
     oid_filters: []const client_auth.OidFilter = &.{},
+    request_ocsp: bool = false,
     /// Optional constraints for signatures on the client's X.509 chain.
     certificate_signature_schemes: ?[]const u16 = null,
     certificate_compression_algorithms: []const certificate_compression.Algorithm = &.{
@@ -202,6 +203,7 @@ fn writeServerHandshakeFlightSelected(
             .request_context = client_auth_options.request_context,
             .certificate_authorities = client_auth_options.certificate_authorities,
             .oid_filters = client_auth_options.oid_filters,
+            .request_ocsp = client_auth_options.request_ocsp,
             .compression_algorithms = client_auth_options.certificate_compression_algorithms,
             .certificate_signature_schemes = client_auth_options.certificate_signature_schemes,
         } else null;
@@ -620,6 +622,7 @@ test "server handshake flight inserts encrypted CertificateRequest" {
                 .oid = &.{ 0x55, 0x1d, 0x0f },
                 .values = &.{ 0x03, 0x02, 0x07, 0x80 },
             }},
+            .request_ocsp = true,
         },
     };
     var invalid_options = options;
@@ -689,6 +692,7 @@ test "server handshake flight inserts encrypted CertificateRequest" {
     const parsed_request = try client_auth.parseRequest(request);
     try std.testing.expectEqual(@as(usize, 0), parsed_request.request_context.len);
     try std.testing.expect(parsed_request.oid_filters.len != 0);
+    try std.testing.expect(parsed_request.requests_ocsp);
 }
 
 fn handshakeMessageAt(

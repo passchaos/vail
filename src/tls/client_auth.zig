@@ -3,6 +3,7 @@
 const std = @import("std");
 const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
+const client_hello = @import("client_hello.zig");
 const extension_set = @import("extension_set.zig");
 const key_schedule = @import("key_schedule.zig");
 const secret = @import("secret.zig");
@@ -13,7 +14,7 @@ const x509_trust = @import("../x509/trust.zig");
 pub const handshake_type_certificate_request: u8 = 0x0d;
 const ext_signature_algorithms: u16 = 0x000d;
 const ext_certificate_authorities: u16 = 0x002f;
-const ext_oid_filters: u16 = 0x0030;
+const ext_oid_filters: u16 = client_hello.ext_oid_filters;
 const ext_signature_algorithms_cert: u16 = 0x0032;
 const ext_compress_certificate: u16 =
     certificate_compression.extension_type_compress_certificate;
@@ -96,6 +97,7 @@ pub const ParsedRequest = struct {
     certificate_authorities: []const u8,
     /// Encoded OIDFilter entries, without their outer u16 vector length.
     oid_filters: []const u8,
+    requests_ocsp: bool,
     supports_ed25519: bool,
     supports_ecdsa_p256_sha256: bool,
     supports_ecdsa_p384_sha384: bool,
@@ -522,6 +524,7 @@ pub const RequestOptions = struct {
     request_context: []const u8,
     certificate_authorities: []const []const u8 = &.{},
     oid_filters: []const OidFilter = &.{},
+    request_ocsp: bool = false,
     compression_algorithms: []const certificate_compression.Algorithm = &.{},
     certificate_signature_schemes: ?[]const u16 = null,
 };
@@ -552,6 +555,9 @@ pub fn validateRequestOptions(options: RequestOptions) Error!void {
             }
         }
         try addExtensionLength(&extensions_len, 2 + schemes.len * 2);
+    }
+    if (options.request_ocsp) {
+        try addExtensionLength(&extensions_len, 0);
     }
 
     const oid_filters_len = try validateOidFilters(options.oid_filters);
@@ -611,6 +617,15 @@ pub fn writeRequestWithOptions(
     );
     for (request_signature_schemes) |scheme| {
         try appendInt(&extensions, allocator, u16, scheme);
+    }
+    if (options.request_ocsp) {
+        try appendInt(
+            &extensions,
+            allocator,
+            u16,
+            client_hello.ext_status_request,
+        );
+        try appendInt(&extensions, allocator, u16, 0);
     }
     if (options.certificate_signature_schemes) |schemes| {
         try appendInt(
@@ -781,6 +796,7 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
     var certificate_signature_algorithms: ?[]const u8 = null;
     var certificate_authorities: []const u8 = &.{};
     var oid_filters: []const u8 = &.{};
+    var requests_ocsp = false;
     var certificate_compression_algorithms: []const u8 = &.{};
     var saw_signature_algorithms = false;
     var seen_extensions: extension_set.Set = undefined;
@@ -893,6 +909,11 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
         } else if (typ == ext_compress_certificate) {
             certificate_compression_algorithms =
                 try parseCompressionAlgorithms(payload);
+        } else if (typ == client_hello.ext_status_request) {
+            if (payload.len != 0) return error.InvalidCertificateRequest;
+            requests_ocsp = true;
+        } else if (client_hello.isRecognizedExtension(typ)) {
+            return error.InvalidCertificateRequest;
         } else {
             // TLS extensions are forward-compatible. CertificateRequest
             // recipients ignore extension types they do not understand while
@@ -909,6 +930,7 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
         .certificate_signature_algorithms = certificate_signature_algorithms,
         .certificate_authorities = certificate_authorities,
         .oid_filters = oid_filters,
+        .requests_ocsp = requests_ocsp,
         .supports_ed25519 = supports_ed25519,
         .supports_ecdsa_p256_sha256 = supports_ecdsa_p256,
         .supports_ecdsa_p384_sha384 = supports_ecdsa_p384,

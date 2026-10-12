@@ -408,6 +408,7 @@ test "CertificateRequest advertises built-in signature schemes" {
             .request_context = "request",
             .certificate_authorities = &.{"ca-subject"},
             .compression_algorithms = &.{.zlib},
+            .request_ocsp = true,
             .certificate_signature_schemes = &.{
                 auth.signature_scheme_ed25519,
             },
@@ -444,6 +445,7 @@ test "CertificateRequest advertises built-in signature schemes" {
     }));
     try std.testing.expect(parsed.supportsCertificateCompression(.zlib));
     try std.testing.expect(!parsed.supportsCertificateCompression(.brotli));
+    try std.testing.expect(parsed.requests_ocsp);
 
     const empty_certificate_algorithms = [_]u8{
         0x0d, 0x00, 0x00, 0x11,
@@ -515,6 +517,32 @@ test "CertificateRequest advertises built-in signature schemes" {
     const parsed_unknown = try client_auth.parseRequest(&unknown_extension);
     try std.testing.expect(parsed_unknown.supports_ed25519);
     try std.testing.expectEqual(@as(usize, 0), parsed_unknown.certificate_authorities.len);
+
+    const non_empty_status_request = [_]u8{
+        0x0d, 0x00, 0x00, 0x11,
+        0x00, 0x00, 0x0e, 0x00,
+        0x0d, 0x00, 0x04, 0x00,
+        0x02, 0x08, 0x07, 0x00,
+        0x05, 0x00, 0x02, 0x12,
+        0x34,
+    };
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.parseRequest(&non_empty_status_request),
+    );
+
+    const misplaced_alpn = [_]u8{
+        0x0d, 0x00, 0x00, 0x11,
+        0x00, 0x00, 0x0e, 0x00,
+        0x0d, 0x00, 0x04, 0x00,
+        0x02, 0x08, 0x07, 0x00,
+        0x10, 0x00, 0x02, 0x12,
+        0x34,
+    };
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.parseRequest(&misplaced_alpn),
+    );
 
     const duplicate_unknown_extensions = [_]u8{
         0x0d, 0x00, 0x00, 0x13,

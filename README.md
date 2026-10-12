@@ -77,7 +77,10 @@ The current foundation provides:
   clients reject repeated recognized filters, and recognized Key Usage and
   Extended Key Usage values constrain the end-entity certificate, including
   subset matching and the prohibition on requesting anyExtendedKeyUsage, while
-  unknown OIDs are ignored. Servers preflight all nested request-vector lengths
+  unknown OIDs are ignored. CertificateRequest accepts the standard empty
+  status-request signal, rejects non-empty forms and every recognized extension
+  prohibited in that message, and still ignores genuinely unknown extensions.
+  Servers preflight all nested request-vector lengths
   and filter semantics before emitting ServerHello, so invalid configuration
   cannot leave a partial flight. Initial-handshake
   CertificateRequest context is required to be empty; the generic codec still

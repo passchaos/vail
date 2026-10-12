@@ -27,6 +27,7 @@ pub const ext_compress_certificate: u16 =
     certificate_compression.extension_type_compress_certificate;
 pub const ext_early_data: u16 = 0x002a;
 pub const ext_certificate_authorities: u16 = 0x002f;
+pub const ext_oid_filters: u16 = 0x0030;
 pub const ext_signature_algorithms_cert: u16 = 0x0032;
 pub const ext_record_size_limit: u16 = record_size_limit.extension_type;
 pub const ext_quic_transport_parameters: u16 = 0x0039;
@@ -43,6 +44,42 @@ pub const ext_application_settings_legacy: u16 =
 pub const ext_application_settings: u16 =
     application_settings.current_extension_type;
 pub const tls13: u16 = 0x0304;
+
+/// Return whether Vail implements semantics for this extension type in at
+/// least one TLS handshake message.
+pub fn isRecognizedExtension(extension_type: u16) bool {
+    return switch (extension_type) {
+        ext_server_name,
+        ext_status_request,
+        ext_status_request_v2,
+        ext_supported_groups,
+        ext_signature_algorithms,
+        ext_application_layer_protocol_negotiation,
+        ext_client_certificate_type,
+        ext_server_certificate_type,
+        ext_extended_master_secret,
+        ext_session_ticket,
+        ext_compress_certificate,
+        ext_early_data,
+        ext_certificate_authorities,
+        ext_oid_filters,
+        ext_signature_algorithms_cert,
+        ext_record_size_limit,
+        ext_quic_transport_parameters,
+        ext_ticket_request,
+        ext_renegotiation_info,
+        ext_supported_versions,
+        ext_cookie,
+        ext_psk_key_exchange_modes,
+        ext_key_share,
+        ext_pre_shared_key,
+        ext_encrypted_client_hello,
+        ext_application_settings_legacy,
+        ext_application_settings,
+        => true,
+        else => false,
+    };
+}
 
 pub const default_signature_schemes = [_]u16{
     auth.signature_scheme_ecdsa_secp256r1_sha256,
