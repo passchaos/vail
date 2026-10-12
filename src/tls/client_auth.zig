@@ -3,6 +3,7 @@
 const std = @import("std");
 const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
+const extension_set = @import("extension_set.zig");
 const key_schedule = @import("key_schedule.zig");
 const secret = @import("secret.zig");
 const transcript = @import("transcript.zig");
@@ -750,21 +751,16 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
     var certificate_authorities: []const u8 = &.{};
     var certificate_compression_algorithms: []const u8 = &.{};
     var saw_signature_algorithms = false;
-    var seen_extensions: [64]u16 = undefined;
-    var seen_extension_count: usize = 0;
+    var seen_extensions: extension_set.Set = undefined;
+    seen_extensions.reset();
     var ext_pos: usize = 0;
     while (ext_pos < extensions.len) {
         const typ = try readInt(u16, extensions, &ext_pos);
         const len = try readInt(u16, extensions, &ext_pos);
         const payload = try readSlice(extensions, &ext_pos, len);
-        for (seen_extensions[0..seen_extension_count]) |seen| {
-            if (seen == typ) return error.InvalidCertificateRequest;
-        }
-        if (seen_extension_count == seen_extensions.len) {
+        if (seen_extensions.containsOrInsert(typ)) {
             return error.InvalidCertificateRequest;
         }
-        seen_extensions[seen_extension_count] = typ;
-        seen_extension_count += 1;
         if (typ == ext_signature_algorithms) {
             saw_signature_algorithms = true;
             signature_algorithms = try parseSignatureAlgorithmList(payload);

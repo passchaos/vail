@@ -530,6 +530,66 @@ test "CertificateRequest advertises built-in signature schemes" {
     );
 }
 
+test "CertificateRequest accepts more than 64 unique extensions" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    // Handshake header, empty request context, and extension-vector length.
+    try encoded.appendSlice(allocator, &.{
+        0x0d, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+    });
+    try encoded.appendSlice(allocator, &.{
+        0x00, 0x0d, 0x00, 0x04,
+        0x00, 0x02, 0x08, 0x07,
+    });
+    for (0..65) |index| {
+        var extension = [_]u8{ 0, 0, 0, 0 };
+        std.mem.writeInt(
+            u16,
+            extension[0..2],
+            @intCast(0x8000 + index),
+            .big,
+        );
+        try encoded.appendSlice(allocator, &extension);
+    }
+
+    var extensions_len = encoded.items.len - 7;
+    std.mem.writeInt(
+        u16,
+        encoded.items[5..7],
+        @intCast(extensions_len),
+        .big,
+    );
+    var body_len = encoded.items.len - 4;
+    encoded.items[1] = @truncate(body_len >> 16);
+    encoded.items[2] = @truncate(body_len >> 8);
+    encoded.items[3] = @truncate(body_len);
+
+    const parsed = try client_auth.parseRequest(encoded.items);
+    try std.testing.expect(parsed.supports_ed25519);
+
+    // The complete extension type namespace is tracked, so a duplicate after
+    // the former 64-entry boundary remains fatal.
+    try encoded.appendSlice(allocator, &.{ 0x80, 0x00, 0x00, 0x00 });
+    extensions_len = encoded.items.len - 7;
+    std.mem.writeInt(
+        u16,
+        encoded.items[5..7],
+        @intCast(extensions_len),
+        .big,
+    );
+    body_len = encoded.items.len - 4;
+    encoded.items[1] = @truncate(body_len >> 16);
+    encoded.items[2] = @truncate(body_len >> 8);
+    encoded.items[3] = @truncate(body_len);
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.parseRequest(encoded.items),
+    );
+}
+
 test "TLS 1.3 initial CertificateRequest requires an empty context" {
     try client_auth.validateInitialRequestContext(&.{});
     try std.testing.expectError(
