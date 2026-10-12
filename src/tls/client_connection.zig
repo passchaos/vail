@@ -554,7 +554,8 @@ pub fn ClientConnection(
                     value.identity,
                     value.obfuscated_ticket_age,
                     value.secret,
-                    value.max_early_data_size != null and settings_match,
+                    (value.max_early_data_size orelse 0) != 0 and
+                        settings_match,
                     null,
                 );
             } else if (config.request_resumption or config.ticket_request != null)
@@ -646,7 +647,7 @@ pub fn ClientConnection(
             try output.appendSlice(config.allocator, wire_hello);
             var early_write: ?traffic.State = null;
             if (resumption) |value| {
-                if (value.max_early_data_size != null and
+                if ((value.max_early_data_size orelse 0) != 0 and
                     applicationSettingsMatchForEarlyData(
                         config.application_settings,
                         config.application_settings_codepoint,
@@ -1904,6 +1905,36 @@ test "client requests future TLS 1.3 resumption without offering a PSK" {
     ));
 }
 
+test "zero early data ticket resumes without an early data offer" {
+    const allocator = std.testing.allocator;
+    const Client = ClientConnection(4096, 256);
+    var key_material = key_exchange.ClientKeyMaterial{
+        .x25519 = [_]u8{0x1a} ** key_exchange.secret_len,
+    };
+    var offered = ClientPsk{
+        .identity = "zero-early-data-ticket",
+        .secret = secret.Secret.fromSha256([_]u8{0x1b} ** 32),
+        .obfuscated_ticket_age = 11,
+        .max_early_data_size = 0,
+    };
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var client = try Client.init(.{
+        .allocator = allocator,
+        .random = [_]u8{0x1c} ** 32,
+        .key_material = &key_material,
+        .server_verifier = .{},
+        .resumption = offered,
+    }, &output);
+    offered.secret.deinit();
+    defer client.deinit();
+
+    const hello = try client_hello.parse(output.items[record.header_len..]);
+    try std.testing.expect(hello.pre_shared_key != null);
+    try std.testing.expect(!hello.early_data);
+    try std.testing.expect(client.early_write == null);
+}
+
 test "ALPS offer disables zero RTT without matching cached settings" {
     const allocator = std.testing.allocator;
     const Client = ClientConnection(4096, 256);
@@ -2362,7 +2393,7 @@ test "client and server states establish over one-byte transport reads" {
             .age_add = 19,
             .issued_at_ms = 10_000,
             .lifetime_seconds = 60,
-            .allow_early_data = true,
+            .max_early_data_size = 4096,
         },
         &ticket_record,
     );
@@ -2381,6 +2412,10 @@ test "client and server states establish over one-byte transport reads" {
     defer cached.deinit();
     const cached_offer = try ClientPsk.fromCached(&cached, 11_000);
     try std.testing.expectEqual(@as(u32, 1_019), cached_offer.obfuscated_ticket_age);
+    try std.testing.expectEqual(
+        @as(?u32, 4096),
+        cached_offer.max_early_data_size,
+    );
     try std.testing.expectEqualStrings("h2", cached_offer.alpn);
     try std.testing.expectEqualStrings(
         "client-h2-settings",
@@ -2399,6 +2434,10 @@ test "client and server states establish over one-byte transport reads" {
     );
     defer opened_ticket.deinit();
     try std.testing.expect(cached.psk.eql(&opened_ticket.secret));
+    try std.testing.expectEqual(
+        @as(?u32, 4096),
+        opened_ticket.max_early_data_size,
+    );
     try std.testing.expectEqualStrings(
         "server-h2-settings",
         opened_ticket.local_application_settings.?,

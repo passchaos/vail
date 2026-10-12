@@ -162,6 +162,11 @@ pub const Options = struct {
     age_add: u32,
     nonce: []const u8,
     ticket: []const u8,
+    /// Exact RFC 8446 limit for stream TLS. Zero is legal but does not permit
+    /// application data. QUIC callers must use `quic_early_data_size`.
+    max_early_data_size: ?u32 = null,
+    /// Compatibility shorthand for QUIC's mandatory 0xffffffff sentinel.
+    /// This cannot be combined with `max_early_data_size`.
     allow_early_data: bool = false,
 };
 
@@ -179,6 +184,10 @@ pub fn write(
     options: Options,
 ) Error!void {
     try validateOptions(options);
+    const max_early_data_size = try resolveEarlyDataSize(
+        options.max_early_data_size,
+        options.allow_early_data,
+    );
     const original_len = list.items.len;
     errdefer list.items.len = original_len;
 
@@ -190,11 +199,11 @@ pub fn write(
     try body.appendSlice(allocator, options.nonce);
     try appendInt(&body, allocator, u16, @intCast(options.ticket.len));
     try body.appendSlice(allocator, options.ticket);
-    if (options.allow_early_data) {
+    if (max_early_data_size) |limit| {
         try appendInt(&body, allocator, u16, 8);
         try appendInt(&body, allocator, u16, ext_early_data);
         try appendInt(&body, allocator, u16, @sizeOf(u32));
-        try appendInt(&body, allocator, u32, quic_early_data_size);
+        try appendInt(&body, allocator, u32, limit);
     } else {
         try appendInt(&body, allocator, u16, 0);
     }
@@ -252,11 +261,7 @@ pub fn parse(bytes: []const u8) Error!Parsed {
             if (payload.len != @sizeOf(u32)) {
                 return error.InvalidEarlyDataSize;
             }
-            const size = std.mem.readInt(u32, payload[0..4], .big);
-            if (size != quic_early_data_size) {
-                return error.InvalidEarlyDataSize;
-            }
-            early_data_size = size;
+            early_data_size = std.mem.readInt(u32, payload[0..4], .big);
         } else if (client_hello.isRecognizedExtension(typ)) {
             return error.InvalidNewSessionTicket;
         }
@@ -268,6 +273,14 @@ pub fn parse(bytes: []const u8) Error!Parsed {
         .ticket = ticket,
         .max_early_data_size = early_data_size,
     };
+}
+
+pub fn validateQuicEarlyDataSize(
+    max_early_data_size: ?u32,
+) Error!void {
+    if (max_early_data_size) |size| {
+        if (size != quic_early_data_size) return error.InvalidEarlyDataSize;
+    }
 }
 
 pub fn deriveResumptionMasterSecret(
@@ -322,6 +335,20 @@ fn validateOptions(options: Options) Error!void {
     {
         return error.InvalidNewSessionTicket;
     }
+}
+
+/// Resolve an explicit stream-TLS limit or the legacy QUIC sentinel shortcut.
+pub fn resolveEarlyDataSize(
+    max_early_data_size: ?u32,
+    allow_early_data: bool,
+) Error!?u32 {
+    if (allow_early_data and max_early_data_size != null) {
+        return error.InvalidEarlyDataSize;
+    }
+    return max_early_data_size orelse if (allow_early_data)
+        quic_early_data_size
+    else
+        null;
 }
 
 fn appendInt(
@@ -518,4 +545,43 @@ test "authenticated NewSessionTicket becomes an owned client cache entry" {
         error.ExpiredTicket,
         cached.obfuscatedTicketAge(70_001),
     );
+}
+
+test "stream TLS NewSessionTicket preserves a finite early data limit" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try write(&encoded, allocator, .{
+        .lifetime_seconds = 60,
+        .age_add = 19,
+        .nonce = &.{2},
+        .ticket = "stream-ticket",
+        .max_early_data_size = 16 * 1024,
+    });
+    const parsed = try parse(encoded.items);
+    try std.testing.expectEqual(
+        @as(?u32, 16 * 1024),
+        parsed.max_early_data_size,
+    );
+    try std.testing.expectError(
+        error.InvalidEarlyDataSize,
+        validateQuicEarlyDataSize(parsed.max_early_data_size),
+    );
+    try validateQuicEarlyDataSize(null);
+    try validateQuicEarlyDataSize(quic_early_data_size);
+
+    encoded.clearRetainingCapacity();
+    try encoded.appendSlice(allocator, "prefix");
+    try std.testing.expectError(
+        error.InvalidEarlyDataSize,
+        write(&encoded, allocator, .{
+            .lifetime_seconds = 60,
+            .age_add = 19,
+            .nonce = &.{2},
+            .ticket = "stream-ticket",
+            .max_early_data_size = 16 * 1024,
+            .allow_early_data = true,
+        }),
+    );
+    try std.testing.expectEqualStrings("prefix", encoded.items);
 }

@@ -145,6 +145,12 @@ pub const ResumptionPsk = struct {
     application_settings: ?application_settings.Session = null,
 };
 
+fn validateQuicResumption(resumption: ResumptionPsk) Error!void {
+    ticket.validateQuicEarlyDataSize(
+        resumption.max_early_data_size,
+    ) catch return error.InvalidEarlyDataConfiguration;
+}
+
 /// Validate both ClientHellos and the intervening HelloRetryRequest, then
 /// return the transcript state consumed by the final client/server flight.
 pub fn prepareRetryState(
@@ -360,6 +366,7 @@ pub fn clientEarlyPacketKeys(
     resumption: ResumptionPsk,
     labels: traffic.Labels,
 ) Error!traffic.Keys {
+    try validateQuicResumption(resumption);
     const parsed = try client_hello.parse(client_hello_bytes);
     if (!parsed.offersTls13() or
         parsed.pre_shared_key == null or
@@ -408,6 +415,9 @@ pub fn writeClientCryptoFlight(
 ) Error!ClientResult {
     const output_start = handshake_crypto.items.len;
     errdefer handshake_crypto.shrinkRetainingCapacity(output_start);
+    if (options.resumption) |resumption| {
+        try validateQuicResumption(resumption);
+    }
 
     const parsed_client = try client_hello.parse(options.client_hello_bytes);
     if (!parsed_client.offersTls13()) return error.InvalidClientHello;
@@ -757,6 +767,9 @@ pub fn writeServerCryptoFlight(
     errdefer initial_crypto.shrinkRetainingCapacity(initial_start);
     const handshake_start = handshake_crypto.items.len;
     errdefer handshake_crypto.shrinkRetainingCapacity(handshake_start);
+    if (options.resumption) |resumption| {
+        try validateQuicResumption(resumption);
+    }
 
     if (options.parsed_client_hello.quic_transport_parameters == null or
         options.policy.quic_transport_parameters == null)
@@ -2520,7 +2533,7 @@ test "QUIC TLS client and server preserve the HelloRetryRequest transcript" {
         .identity = "quic-hrr-ticket",
         .secret = resumption_secret,
         .suite = .aes_128_gcm_sha256,
-        .max_early_data_size = 4096,
+        .max_early_data_size = ticket.quic_early_data_size,
     };
     var first_psk = try first_hello.clone(allocator);
     defer first_psk.deinit(allocator);
@@ -2685,7 +2698,7 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
         .identity = "quic-ticket",
         .secret = resumption_secret,
         .suite = .aes_128_gcm_sha256,
-        .max_early_data_size = 4096,
+        .max_early_data_size = ticket.quic_early_data_size,
         .application_settings = .{
             .codepoint = .legacy,
             .local = "quic-client-settings",
@@ -2746,6 +2759,12 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
         null,
     );
     const parsed = try client_hello.parse(hello.items);
+    var invalid_early_data_resumption = client_resumption;
+    invalid_early_data_resumption.max_early_data_size = 4096;
+    try std.testing.expectError(
+        error.InvalidEarlyDataConfiguration,
+        validateQuicResumption(invalid_early_data_resumption),
+    );
 
     var initial_crypto: std.ArrayList(u8) = .empty;
     defer initial_crypto.deinit(allocator);
@@ -2780,7 +2799,10 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
     );
     defer server_result.deinit();
     try std.testing.expect(server_result.resumed);
-    try std.testing.expectEqual(@as(?u32, 4096), server_result.early_data_limit);
+    try std.testing.expectEqual(
+        @as(?u32, ticket.quic_early_data_size),
+        server_result.early_data_limit,
+    );
     var client_early_keys = try clientEarlyPacketKeys(
         hello.items,
         client_resumption,
@@ -3200,7 +3222,7 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
                 .identity = "different-ticket",
                 .secret = client_resumption.secret,
                 .suite = .aes_128_gcm_sha256,
-                .max_early_data_size = 4096,
+                .max_early_data_size = ticket.quic_early_data_size,
             },
         },
     );

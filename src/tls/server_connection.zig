@@ -278,6 +278,9 @@ pub fn ServerConnection(
                 age_add: u32,
                 issued_at_ms: u64,
                 lifetime_seconds: u32,
+                /// Exact stream-TLS early-data limit advertised in the ticket.
+                max_early_data_size: ?u32 = null,
+                /// Compatibility shorthand for the QUIC 0xffffffff sentinel.
                 allow_early_data: bool = false,
             };
 
@@ -326,6 +329,10 @@ pub fn ServerConnection(
                 options: TicketOptions,
                 output: []u8,
             ) (Error || ticket.Error || ticket_keyring.Error)!usize {
+                const max_early_data_size = try ticket.resolveEarlyDataSize(
+                    options.max_early_data_size,
+                    options.allow_early_data,
+                );
                 var resumption_master =
                     try key_schedule.deriveResumptionMasterSecretFor(
                         self.master_secret,
@@ -343,15 +350,12 @@ pub fn ServerConnection(
                     .issued_at_ms = options.issued_at_ms,
                     .lifetime_seconds = options.lifetime_seconds,
                     .cipher_suite_wire = self.application.suite.wireValue(),
-                    .max_early_data_size = if (options.allow_early_data)
-                        ticket.quic_early_data_size
-                    else
-                        null,
+                    .max_early_data_size = max_early_data_size,
                 };
                 var fixed_identity: [ticket_keyring.sealed_len]u8 = undefined;
                 var allocated_identity: ?[]u8 = null;
                 defer if (allocated_identity) |identity| allocator.free(identity);
-                const identity: []const u8 = if (options.allow_early_data and
+                const identity: []const u8 = if ((max_early_data_size orelse 0) != 0 and
                     self.application_settings_codepoint != null)
                 blk: {
                     allocated_identity = try options.keyring
@@ -384,6 +388,7 @@ pub fn ServerConnection(
                     .age_add = options.age_add,
                     .nonce = options.ticket_nonce,
                     .ticket = identity,
+                    .max_early_data_size = options.max_early_data_size,
                     .allow_early_data = options.allow_early_data,
                 });
                 return self.application.sealPostHandshake(
