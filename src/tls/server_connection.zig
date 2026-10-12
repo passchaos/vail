@@ -1654,6 +1654,7 @@ pub fn ServerConnection(
                     .accepted_compression_algorithms = request.certificate_compression_algorithms,
                     .max_decompressed_certificate_len = request.max_decompressed_certificate_len,
                     .certificate_signature_schemes = request.certificate_signature_schemes,
+                    .requested_ocsp = request.request_ocsp,
                 },
             );
             defer verification.deinit(self.config.allocator);

@@ -121,6 +121,41 @@ const NegotiatedApplicationSettings = struct {
     send_client_extensions: bool,
 };
 
+fn writeClientCertificateForRequest(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    identity: client_auth.ClientIdentity,
+    request: client_auth.ParsedRequest,
+) Error!void {
+    try identity.validate();
+    if (request.requests_ocsp) {
+        if (identity.ocsp_responses) |responses| {
+            return auth.writeClientCertificateWithContextAndOcspResponses(
+                out,
+                allocator,
+                identity.certificate_chain,
+                request.request_context,
+                responses,
+            );
+        }
+        if (identity.ocsp_response) |response| {
+            return auth.writeClientCertificateWithContextAndOcsp(
+                out,
+                allocator,
+                identity.certificate_chain,
+                request.request_context,
+                response,
+            );
+        }
+    }
+    return auth.writeClientCertificateWithContext(
+        out,
+        allocator,
+        identity.certificate_chain,
+        request.request_context,
+    );
+}
+
 /// Verify the authenticated server flight and append the exact client flight.
 pub fn verifyServerAndWriteClientFlight(
     out: *std.ArrayList(u8),
@@ -422,11 +457,11 @@ pub fn verifyServerAndWriteClientFlight(
         if (identity) |value| {
             var ordinary_certificate: std.ArrayList(u8) = .empty;
             defer ordinary_certificate.deinit(allocator);
-            try auth.writeClientCertificateWithContext(
+            try writeClientCertificateForRequest(
                 &ordinary_certificate,
                 allocator,
-                value.certificate_chain,
-                request.request_context,
+                value,
+                request,
             );
             for (value.compressed_certificates) |prepared| {
                 if (request.supportsCertificateCompression(
@@ -452,7 +487,6 @@ pub fn verifyServerAndWriteClientFlight(
         }
         state.update(out.items[certificate_start..]);
         if (identity) |value| {
-            try value.validate();
             const certificate_verify_start = out.items.len;
             const client_certificate_hash = state.digest();
             try auth.writeCertificateVerifyForRole(
@@ -714,11 +748,10 @@ test "authenticated client handshake verifies server and writes identity" {
     );
     var request: std.ArrayList(u8) = .empty;
     defer request.deinit(allocator);
-    try client_auth.writeRequest(
+    try client_auth.writeRequestWithOptions(
         &request,
         allocator,
-        &.{},
-        &.{},
+        .{ .request_context = &.{}, .request_ocsp = true },
     );
     var server_certificate: std.ArrayList(u8) = .empty;
     defer server_certificate.deinit(allocator);
@@ -792,6 +825,7 @@ test "authenticated client handshake verifies server and writes identity" {
             .client_identity = .{
                 .certificate_chain = &.{&client_public},
                 .signer = .{ .ed25519 = .{ .key_pair = client_key } },
+                .ocsp_response = "client-ocsp-response",
             },
             .application_settings = &.{.{
                 .protocol = "h2",
@@ -848,4 +882,73 @@ test "authenticated client handshake verifies server and writes identity" {
         &client_public,
         parsed_client_certificate.entries[0],
     );
+    try std.testing.expectEqualStrings(
+        "client-ocsp-response",
+        parsed_client_certificate.ocsp_response.?,
+    );
+}
+
+test "client certificate sends OCSP only when requested" {
+    const allocator = std.testing.allocator;
+    const key_pair = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0x73} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const public_key = key_pair.public_key.toBytes();
+    const identity = client_auth.ClientIdentity{
+        .certificate_chain = &.{&public_key},
+        .signer = .{ .ed25519 = .{ .key_pair = key_pair } },
+        .ocsp_response = "client-ocsp-response",
+    };
+
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(allocator);
+    try client_auth.writeRequestWithOptions(
+        &request_bytes,
+        allocator,
+        .{ .request_context = &.{}, .request_ocsp = true },
+    );
+    const requested = try client_auth.parseRequest(request_bytes.items);
+    var certificate_bytes: std.ArrayList(u8) = .empty;
+    defer certificate_bytes.deinit(allocator);
+    try writeClientCertificateForRequest(
+        &certificate_bytes,
+        allocator,
+        identity,
+        requested,
+    );
+    var certificate = try auth.parseClientCertificateWithContext(
+        allocator,
+        certificate_bytes.items,
+        &.{},
+    );
+    defer certificate.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "client-ocsp-response",
+        certificate.ocsp_response.?,
+    );
+
+    request_bytes.clearRetainingCapacity();
+    try client_auth.writeRequest(
+        &request_bytes,
+        allocator,
+        &.{},
+        &.{},
+    );
+    const not_requested = try client_auth.parseRequest(request_bytes.items);
+    certificate_bytes.clearRetainingCapacity();
+    try writeClientCertificateForRequest(
+        &certificate_bytes,
+        allocator,
+        identity,
+        not_requested,
+    );
+    var certificate_without_staple =
+        try auth.parseClientCertificateWithContext(
+            allocator,
+            certificate_bytes.items,
+            &.{},
+        );
+    defer certificate_without_staple.deinit(allocator);
+    try std.testing.expect(certificate_without_staple.ocsp_response == null);
 }

@@ -447,6 +447,7 @@ pub fn ClientConnection(
             config: Config,
             output: *std.ArrayList(u8),
         ) Error!void {
+            if (config.client_identity) |identity| try identity.validate();
             if (config.ech != null and
                 (config.tls12_session_ticket != null or
                     config.additional_cipher_suites.len != 0 or
@@ -2014,13 +2015,15 @@ test "client and server states establish over one-byte transport reads" {
         &client_certificate,
         &client_certificate_padding,
     };
+    const client_ocsp_response = "client-identity-ocsp";
     var client_certificate_message: std.ArrayList(u8) = .empty;
     defer client_certificate_message.deinit(allocator);
-    try auth.writeClientCertificateWithContext(
+    try auth.writeClientCertificateWithContextAndOcsp(
         &client_certificate_message,
         allocator,
         &client_certificate_chain,
         &.{},
+        client_ocsp_response,
     );
     var prepared_client_certificate =
         try certificate_compression.Prepared.initZstd(
@@ -2082,6 +2085,7 @@ test "client and server states establish over one-byte transport reads" {
             .signer = .{
                 .ed25519 = .{ .key_pair = client_signing_key },
             },
+            .ocsp_response = client_ocsp_response,
             .compressed_certificates = &compressed_client_certificates,
         },
     }, &client_wire);
@@ -2118,6 +2122,7 @@ test "client and server states establish over one-byte transport reads" {
         .key_log = server_key_log.logger(),
         .client_auth = .{
             .request_context = &.{},
+            .request_ocsp = true,
             .certificate_compression_algorithms = &.{.zstd},
         },
         .client_auth_policy = .{

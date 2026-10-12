@@ -1553,6 +1553,51 @@ pub fn writeClientCertificateWithContext(
     );
 }
 
+/// Encode a TLS 1.3 client Certificate response with a leaf OCSP staple.
+pub fn writeClientCertificateWithContextAndOcsp(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    chain: []const []const u8,
+    request_context: []const u8,
+    ocsp_response: []const u8,
+) Error!void {
+    if (chain.len == 0 or ocsp_response.len == 0 or
+        ocsp_response.len > std.math.maxInt(u16) - 8)
+    {
+        return error.InvalidCertificate;
+    }
+    return writeCertificateEntriesWithContext(
+        list,
+        allocator,
+        chain,
+        request_context,
+        ocsp_response,
+        null,
+    );
+}
+
+/// Encode TLS 1.3 client CertificateEntry OCSP staples while preserving the
+/// CertificateRequest context. Responses are aligned with `chain`.
+pub fn writeClientCertificateWithContextAndOcspResponses(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    chain: []const []const u8,
+    request_context: []const u8,
+    ocsp_responses: []const ?[]const u8,
+) Error!void {
+    if (chain.len == 0 or ocsp_responses.len != chain.len) {
+        return error.InvalidCertificate;
+    }
+    return writeCertificateEntriesWithContext(
+        list,
+        allocator,
+        chain,
+        request_context,
+        null,
+        ocsp_responses,
+    );
+}
+
 fn writeCertificateEntriesWithContext(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -3576,6 +3621,48 @@ test "Certificate codec round-trips a leaf OCSP staple" {
     try std.testing.expectEqualStrings(
         "issuer-response",
         parsed_multi.ocsp_responses.?[1].?,
+    );
+
+    encoded.clearRetainingCapacity();
+    try writeClientCertificateWithContextAndOcsp(
+        &encoded,
+        allocator,
+        &.{ "client-leaf", "client-issuer" },
+        "request-context",
+        "client-ocsp-response",
+    );
+    var parsed_client = try parseClientCertificateWithContext(
+        allocator,
+        encoded.items,
+        "request-context",
+    );
+    defer parsed_client.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "client-ocsp-response",
+        parsed_client.ocsp_response.?,
+    );
+
+    encoded.clearRetainingCapacity();
+    try writeClientCertificateWithContextAndOcspResponses(
+        &encoded,
+        allocator,
+        &.{ "client-leaf", "client-issuer" },
+        "request-context",
+        &.{ "client-leaf-response", "client-issuer-response" },
+    );
+    var parsed_client_multi = try parseClientCertificateWithContext(
+        allocator,
+        encoded.items,
+        "request-context",
+    );
+    defer parsed_client_multi.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "client-leaf-response",
+        parsed_client_multi.ocsp_responses.?[0].?,
+    );
+    try std.testing.expectEqualStrings(
+        "client-issuer-response",
+        parsed_client_multi.ocsp_responses.?[1].?,
     );
 
     try std.testing.expectError(

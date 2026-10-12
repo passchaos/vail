@@ -80,6 +80,9 @@ The current foundation provides:
   unknown OIDs are ignored. CertificateRequest accepts the standard empty
   status-request signal, rejects non-empty forms and every recognized extension
   prohibited in that message, and still ignores genuinely unknown extensions.
+  Client identities may carry a leaf or per-chain-entry OCSP staple; clients
+  send it only when requested, servers reject unsolicited staples, and requested
+  responses reach the trust verifier with their certificate-entry association.
   Servers preflight all nested request-vector lengths
   and filter semantics before emitting ServerHello, so invalid configuration
   cannot leave a partial flight. Initial-handshake

@@ -824,6 +824,30 @@ test "optional client Certificate supports an empty chain" {
     );
 }
 
+test "client identity validates OCSP configuration" {
+    const key_pair = try Ed25519.KeyPair.generateDeterministic(
+        [_]u8{0x63} ** Ed25519.KeyPair.seed_length,
+    );
+    const public_key = key_pair.public_key.toBytes();
+    const base = client_auth.ClientIdentity{
+        .certificate_chain = &.{&public_key},
+        .signer = .{ .ed25519 = .{ .key_pair = key_pair } },
+    };
+
+    var invalid = base;
+    invalid.ocsp_response = "leaf";
+    invalid.ocsp_responses = &.{"entry"};
+    try std.testing.expectError(error.InvalidCertificate, invalid.validate());
+
+    invalid = base;
+    invalid.ocsp_responses = &.{ null, null };
+    try std.testing.expectError(error.InvalidCertificate, invalid.validate());
+
+    invalid = base;
+    invalid.ocsp_response = &.{};
+    try std.testing.expectError(error.InvalidCertificate, invalid.validate());
+}
+
 test "client CertificateVerify uses the distinct TLS context" {
     const allocator = std.testing.allocator;
     const key_pair = try Ed25519.KeyPair.generateDeterministic(
@@ -865,6 +889,7 @@ test "client-auth flight verifies required and optional identities" {
     );
     const public_key = key_pair.public_key.toBytes();
     const request_context = "mtls";
+    const client_ocsp_response = "client-ocsp-response";
     const handshake_secret =
         secret.Secret.fromSha256([_]u8{0x69} ** 32);
     var base = transcript.State.init(.sha256);
@@ -872,11 +897,12 @@ test "client-auth flight verifies required and optional identities" {
 
     var certificate: std.ArrayList(u8) = .empty;
     defer certificate.deinit(allocator);
-    try auth.writeClientCertificateWithContext(
+    try auth.writeClientCertificateWithContextAndOcsp(
         &certificate,
         allocator,
         &.{&public_key},
         request_context,
+        client_ocsp_response,
     );
     var with_certificate = base;
     with_certificate.update(certificate.items);
@@ -905,12 +931,27 @@ test "client-auth flight verifies required and optional identities" {
         finished_data.bytes(),
     );
 
-    var verified = try client_auth.verifyClientFlight(
+    var verified = try client_auth.verifyClientFlightWithOptions(
         allocator,
         .{
-            .verifier = .{
-                .pinned_ed25519_public_key = public_key,
-            },
+            .verifier = .{ .verify_trust = struct {
+                fn verify(
+                    context: ?*anyopaque,
+                    trust_context: auth.TrustContext,
+                ) anyerror!void {
+                    _ = context;
+                    if (trust_context.chain.len != 1 or
+                        trust_context.ocsp_response == null or
+                        !std.mem.eql(
+                            u8,
+                            trust_context.ocsp_response.?,
+                            "client-ocsp-response",
+                        ))
+                    {
+                        return error.UnexpectedClientIdentity;
+                    }
+                }
+            }.verify },
         },
         request_context,
         base,
@@ -918,9 +959,27 @@ test "client-auth flight verifies required and optional identities" {
         certificate.items,
         certificate_verify.items,
         finished.items,
+        .{ .requested_ocsp = true },
     );
     defer verified.deinit(allocator);
     try std.testing.expect(verified.authenticated());
+    try std.testing.expectEqualStrings(
+        client_ocsp_response,
+        verified.certificate.ocsp_response.?,
+    );
+    try std.testing.expectError(
+        error.InvalidClientFlight,
+        client_auth.verifyClientFlight(
+            allocator,
+            .{ .verifier = .{ .pinned_ed25519_public_key = public_key } },
+            request_context,
+            base,
+            handshake_secret,
+            certificate.items,
+            certificate_verify.items,
+            finished.items,
+        ),
+    );
 
     var empty_certificate: std.ArrayList(u8) = .empty;
     defer empty_certificate.deinit(allocator);

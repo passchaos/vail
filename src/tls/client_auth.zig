@@ -48,9 +48,42 @@ pub const ClientIdentity = struct {
     certificate_chain: []const []const u8,
     signer: auth.Signer,
     certificate_type: auth.CertificateType = .x509,
+    /// Optional leaf OCSP response sent only when CertificateRequest asks.
+    ocsp_response: ?[]const u8 = null,
+    /// Optional per-entry OCSP responses aligned with `certificate_chain`.
+    ocsp_responses: ?[]const ?[]const u8 = null,
     compressed_certificates: []const certificate_compression.PreparedView = &.{},
 
     pub fn validate(self: ClientIdentity) auth.Error!void {
+        if (self.certificate_type == .raw_public_key and
+            (self.ocsp_response != null or self.ocsp_responses != null))
+        {
+            return error.InvalidCertificate;
+        }
+        if (self.ocsp_response != null and self.ocsp_responses != null) {
+            return error.InvalidCertificate;
+        }
+        if (self.ocsp_response) |response| {
+            if (response.len == 0 or
+                response.len > std.math.maxInt(u16) - 8)
+            {
+                return error.InvalidCertificate;
+            }
+        }
+        if (self.ocsp_responses) |responses| {
+            if (responses.len != self.certificate_chain.len) {
+                return error.InvalidCertificate;
+            }
+            for (responses) |response| {
+                if (response) |staple| {
+                    if (staple.len == 0 or
+                        staple.len > std.math.maxInt(u16) - 8)
+                    {
+                        return error.InvalidCertificate;
+                    }
+                }
+            }
+        }
         try (auth.ServerIdentity{
             .certificate_chain = self.certificate_chain,
             .signer = self.signer,
@@ -364,6 +397,7 @@ pub const VerifyOptions = struct {
     accepted_compression_algorithms: []const certificate_compression.Algorithm = &.{},
     max_decompressed_certificate_len: usize = 64 * 1024,
     certificate_signature_schemes: ?[]const u16 = null,
+    requested_ocsp: bool = false,
 };
 
 pub fn verifyClientFlightWithOptions(
@@ -407,6 +441,10 @@ pub fn verifyClientFlightWithOptions(
         request_context,
     );
     errdefer certificate.deinit(allocator);
+    const has_ocsp_response = certificateHasOcspResponse(certificate);
+    if (has_ocsp_response and !options.requested_ocsp) {
+        return error.InvalidClientFlight;
+    }
 
     var state = transcript_after_server_finished;
     state.update(certificate_bytes);
@@ -419,7 +457,7 @@ pub fn verifyClientFlightWithOptions(
         }
     } else {
         if (policy.certificate_type == .raw_public_key) {
-            if (certificate.ocsp_response != null) {
+            if (has_ocsp_response) {
                 return error.InvalidClientFlight;
             }
             try policy.verifier.verifyRawPublicKey(null, certificate.entries);
@@ -432,7 +470,15 @@ pub fn verifyClientFlightWithOptions(
                     return error.UnsupportedSignatureScheme;
                 }
             }
-            try policy.verifier.verifyTrust(null, certificate.entries);
+            if (has_ocsp_response) {
+                try policy.verifier.verifyTrustWithOcspResponses(
+                    null,
+                    certificate.entries,
+                    certificate.ocsp_responses.?,
+                );
+            } else {
+                try policy.verifier.verifyTrust(null, certificate.entries);
+            }
         }
         const verify_bytes = certificate_verify_bytes orelse
             return error.InvalidClientFlight;
@@ -472,6 +518,14 @@ pub fn verifyClientFlightWithOptions(
         .certificate_compression = selected_certificate_compression,
         .transcript_after_client_finished = state.digest(),
     };
+}
+
+fn certificateHasOcspResponse(certificate: auth.ParsedCertificate) bool {
+    const responses = certificate.ocsp_responses orelse return false;
+    for (responses) |response| {
+        if (response != null) return true;
+    }
+    return false;
 }
 
 fn parseFinished(
