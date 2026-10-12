@@ -293,7 +293,11 @@ The current foundation provides:
   ServerHello identity selection, ticket-age validation, and stateless tickets
   bound to their issuing suite, server identity, and ALPN. Authenticated
   NewSessionTicket messages can be converted directly into owned client cache
-  entries. RFC 9149 ticket requests distinguish new and resumed handshakes,
+  entries; their extension parser covers the complete 16-bit type namespace,
+  rejects duplicates, the RFC-forbidden 65,535-byte vector, and recognized
+  extensions misplaced outside their permitted messages, while retaining
+  forward compatibility for genuinely unknown extensions. RFC 9149 ticket
+  requests distinguish new and resumed handshakes,
   advertise the server's bounded expected count, and expose a decrementing
   issuance budget. Stream 0-RTT installs separate early traffic keys, enforces the
   authenticated ticket byte limit, fails closed without an anti-replay guard,

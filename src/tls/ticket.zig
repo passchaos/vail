@@ -6,8 +6,10 @@
 const std = @import("std");
 
 const application_settings = @import("application_settings.zig");
-const key_schedule = @import("key_schedule.zig");
 const cipher_suite = @import("cipher_suite.zig");
+const client_hello = @import("client_hello.zig");
+const extension_set = @import("extension_set.zig");
+const key_schedule = @import("key_schedule.zig");
 const secret = @import("secret.zig");
 const transcript = @import("transcript.zig");
 
@@ -228,23 +230,23 @@ pub fn parse(bytes: []const u8) Error!Parsed {
     if (ticket_len == 0) return error.InvalidNewSessionTicket;
     const ticket = try readSlice(bytes, &pos, ticket_len);
     const extensions_len = try readInt(u16, bytes, &pos);
+    if (extensions_len > std.math.maxInt(u16) - 1) {
+        return error.InvalidNewSessionTicket;
+    }
     const extensions = try readSlice(bytes, &pos, extensions_len);
     if (pos != bytes.len) return error.InvalidNewSessionTicket;
 
     var early_data_size: ?u32 = null;
     var ext_pos: usize = 0;
-    var seen: [64]u16 = undefined;
-    var seen_len: usize = 0;
+    var seen: extension_set.Set = undefined;
+    seen.reset();
     while (ext_pos < extensions.len) {
         const typ = try readInt(u16, extensions, &ext_pos);
         const len = try readInt(u16, extensions, &ext_pos);
         const payload = try readSlice(extensions, &ext_pos, len);
-        for (seen[0..seen_len]) |existing| {
-            if (existing == typ) return error.InvalidNewSessionTicket;
+        if (seen.containsOrInsert(typ)) {
+            return error.InvalidNewSessionTicket;
         }
-        if (seen_len == seen.len) return error.InvalidNewSessionTicket;
-        seen[seen_len] = typ;
-        seen_len += 1;
 
         if (typ == ext_early_data) {
             if (payload.len != @sizeOf(u32)) {
@@ -255,6 +257,8 @@ pub fn parse(bytes: []const u8) Error!Parsed {
                 return error.InvalidEarlyDataSize;
             }
             early_data_size = size;
+        } else if (client_hello.isRecognizedExtension(typ)) {
+            return error.InvalidNewSessionTicket;
         }
     }
     return .{
@@ -363,6 +367,101 @@ fn writeU24(bytes: *[3]u8, value: u24) void {
     bytes[0] = @truncate(value >> 16);
     bytes[1] = @truncate(value >> 8);
     bytes[2] = @truncate(value);
+}
+
+fn updateTestTicketLengths(
+    encoded: *std.ArrayList(u8),
+    extensions_len_offset: usize,
+) void {
+    const extensions_len = encoded.items.len - extensions_len_offset - 2;
+    std.mem.writeInt(
+        u16,
+        encoded.items[extensions_len_offset..][0..2],
+        @intCast(extensions_len),
+        .big,
+    );
+    writeU24(
+        encoded.items[1..4],
+        @intCast(encoded.items.len - 4),
+    );
+}
+
+test "NewSessionTicket accepts large unknown extension sets" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try write(&encoded, allocator, .{
+        .lifetime_seconds = 60,
+        .age_add = 17,
+        .nonce = &.{1},
+        .ticket = "ticket",
+    });
+    const extensions_len_offset = encoded.items.len - 2;
+    for (0..65) |index| {
+        try appendInt(
+            &encoded,
+            allocator,
+            u16,
+            @intCast(0x8000 + index),
+        );
+        try appendInt(&encoded, allocator, u16, 0);
+    }
+    updateTestTicketLengths(&encoded, extensions_len_offset);
+    _ = try parse(encoded.items);
+
+    try appendInt(&encoded, allocator, u16, 0x8000);
+    try appendInt(&encoded, allocator, u16, 0);
+    updateTestTicketLengths(&encoded, extensions_len_offset);
+    try std.testing.expectError(
+        error.InvalidNewSessionTicket,
+        parse(encoded.items),
+    );
+}
+
+test "NewSessionTicket rejects recognized misplaced extensions" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try write(&encoded, allocator, .{
+        .lifetime_seconds = 60,
+        .age_add = 17,
+        .nonce = &.{1},
+        .ticket = "ticket",
+    });
+    const extensions_len_offset = encoded.items.len - 2;
+    try appendInt(
+        &encoded,
+        allocator,
+        u16,
+        client_hello.ext_application_layer_protocol_negotiation,
+    );
+    try appendInt(&encoded, allocator, u16, 0);
+    updateTestTicketLengths(&encoded, extensions_len_offset);
+    try std.testing.expectError(
+        error.InvalidNewSessionTicket,
+        parse(encoded.items),
+    );
+}
+
+test "NewSessionTicket rejects a 65535-byte extensions vector" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try write(&encoded, allocator, .{
+        .lifetime_seconds = 60,
+        .age_add = 17,
+        .nonce = &.{1},
+        .ticket = "ticket",
+    });
+    const extensions_len_offset = encoded.items.len - 2;
+    try appendInt(&encoded, allocator, u16, 0xfafa);
+    try appendInt(&encoded, allocator, u16, std.math.maxInt(u16) - 4);
+    try encoded.appendNTimes(allocator, 0, std.math.maxInt(u16) - 4);
+    updateTestTicketLengths(&encoded, extensions_len_offset);
+    try std.testing.expectError(
+        error.InvalidNewSessionTicket,
+        parse(encoded.items),
+    );
 }
 
 test "authenticated NewSessionTicket becomes an owned client cache entry" {
