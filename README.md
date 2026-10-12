@@ -315,7 +315,11 @@ The current foundation provides:
   authentication supports required or optional certificates, authenticates
   the client chain through the configured trust policy, verifies
   CertificateVerify possession, and transfers an owned peer chain into the
-  established server state. Stateful TLS 1.2 session-ID resumption uses the
+  established server state. Clients select an identity only when its signing
+  key, TLS certificate type, and X.509 issuer match CertificateRequest; when
+  none is suitable they send the RFC-required empty Certificate message.
+  Server requests advertise P-521 alongside the other supported signing
+  schemes. Stateful TLS 1.2 session-ID resumption uses the
   abbreviated ServerHello/CCS/Finished exchange and binds cached master
   secrets to their suite, server identity, ALPN, and expiration time. RFC 5077
   stateless session tickets are supported in both client and server roles,

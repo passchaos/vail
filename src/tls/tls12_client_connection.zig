@@ -16,6 +16,7 @@ const client_auth = @import("client_auth.zig");
 const client_hello = @import("client_hello.zig");
 const key_exchange = @import("key_exchange.zig");
 const key_log = @import("key_log.zig");
+const p521 = @import("../crypto/p521.zig");
 const record13 = @import("record.zig");
 const record_size_limit = @import("record_size_limit.zig");
 const stream = @import("stream.zig");
@@ -24,6 +25,7 @@ const tls12_ticket = @import("tls12_ticket.zig");
 const handshake = @import("tls12_handshake.zig");
 const transcript = @import("transcript.zig");
 const traffic_secrets = @import("traffic_secrets.zig");
+const distinguished_name = @import("../x509/distinguished_name.zig");
 
 pub const Error = std.mem.Allocator.Error || stream.Error ||
     stream.HandshakeError || client_hello.Error || handshake.Error ||
@@ -85,6 +87,117 @@ pub const Config = struct {
     /// Opt-in NSS-compatible master-secret logging for diagnostics.
     key_log: ?key_log.Logger = null,
 };
+
+const tls12_rsa_sign_certificate_type: u8 = 1;
+const tls12_ecdsa_sign_certificate_type: u8 = 64;
+
+fn certificateRequestAcceptsIdentity(
+    request: handshake.ParsedCertificateRequest,
+    identity: client_auth.ClientIdentity,
+) bool {
+    const certificate_type = tls12ClientCertificateType(
+        identity.signer.scheme(),
+    ) orelse return false;
+    if (std.mem.indexOfScalar(
+        u8,
+        request.certificate_types,
+        certificate_type,
+    ) == null or !request.supportsSigner(identity.signer)) return false;
+    if (request.certificate_authorities.len == 0) return true;
+
+    for (identity.certificate_chain) |certificate_der| {
+        const certificate = std.crypto.Certificate.parse(.{
+            .buffer = certificate_der,
+            .index = 0,
+        }) catch continue;
+        if (certificateAuthoritiesContainIssuer(
+            request.certificate_authorities,
+            certificate.issuer(),
+        )) return true;
+    }
+    return false;
+}
+
+fn tls12ClientCertificateType(signature_scheme: u16) ?u8 {
+    return switch (signature_scheme) {
+        auth.signature_scheme_rsa_pss_rsae_sha256,
+        auth.signature_scheme_rsa_pss_rsae_sha384,
+        auth.signature_scheme_rsa_pss_rsae_sha512,
+        auth.signature_scheme_rsa_pss_pss_sha256,
+        auth.signature_scheme_rsa_pss_pss_sha384,
+        auth.signature_scheme_rsa_pss_pss_sha512,
+        auth.signature_scheme_rsa_pkcs1_sha256,
+        auth.signature_scheme_rsa_pkcs1_sha384,
+        auth.signature_scheme_rsa_pkcs1_sha512,
+        => tls12_rsa_sign_certificate_type,
+        auth.signature_scheme_ecdsa_secp256r1_sha256,
+        auth.signature_scheme_ecdsa_secp384r1_sha384,
+        auth.signature_scheme_ecdsa_secp521r1_sha512,
+        auth.signature_scheme_ed25519,
+        auth.signature_scheme_sm2sig_sm3,
+        => tls12_ecdsa_sign_certificate_type,
+        else => null,
+    };
+}
+
+fn certificateAuthoritiesContainIssuer(
+    encoded_authorities: []const u8,
+    issuer: []const u8,
+) bool {
+    var offset: usize = 0;
+    while (offset < encoded_authorities.len) {
+        if (encoded_authorities.len - offset < 2) return false;
+        const name_len = std.mem.readInt(
+            u16,
+            encoded_authorities[offset..][0..2],
+            .big,
+        );
+        offset += 2;
+        if (name_len == 0 or name_len > encoded_authorities.len - offset) {
+            return false;
+        }
+        const encoded_name = encoded_authorities[offset..][0..name_len];
+        offset += name_len;
+        const name = derSequenceContents(encoded_name) orelse continue;
+        if (distinguished_name.eql(name, issuer) catch false) return true;
+    }
+    return false;
+}
+
+fn derSequenceContents(encoded: []const u8) ?[]const u8 {
+    if (encoded.len < 2 or encoded[0] != 0x30) return null;
+    var offset: usize = 2;
+    var payload_len: usize = encoded[1];
+    if ((payload_len & 0x80) != 0) {
+        const length_bytes = payload_len & 0x7f;
+        if (length_bytes == 0 or
+            length_bytes > @sizeOf(usize) or
+            length_bytes > encoded.len - offset or
+            encoded[offset] == 0)
+        {
+            return null;
+        }
+        payload_len = 0;
+        for (encoded[offset..][0..length_bytes]) |byte| {
+            payload_len = std.math.shlExact(
+                usize,
+                payload_len,
+                8,
+            ) catch return null;
+            payload_len = std.math.add(
+                usize,
+                payload_len,
+                @as(usize, byte),
+            ) catch
+                return null;
+        }
+        if (payload_len < 128) return null;
+        offset += length_bytes;
+    }
+    const end = std.math.add(usize, offset, payload_len) catch return null;
+    if (end != encoded.len) return null;
+    return encoded[offset..end];
+}
 
 pub const Event = union(enum) {
     client_flight: void,
@@ -1062,13 +1175,21 @@ pub fn ClientConnection(
                 try handshake.parseCertificateRequest(request_bytes)
             else
                 null;
+            const selected_client_identity: ?client_auth.ClientIdentity =
+                if (request) |parsed_request|
+                    if (self.client_identity) |identity|
+                        if (certificateRequestAcceptsIdentity(
+                            parsed_request,
+                            identity,
+                        )) identity else null
+                    else
+                        null
+                else
+                    null;
             if (request != null) {
                 const certificate_start = client_messages.items.len;
-                if (self.client_identity) |identity| {
+                if (selected_client_identity) |identity| {
                     try identity.validate();
-                    if (!request.?.supportsSigner(identity.signer)) {
-                        return error.UnsupportedSignatureScheme;
-                    }
                     try handshake.writeClientCertificate(
                         &client_messages,
                         self.allocator,
@@ -1111,7 +1232,7 @@ pub fn ClientConnection(
             );
             const extended_master_session_hash = state.digest();
 
-            if (request != null and self.client_identity != null) {
+            if (selected_client_identity) |identity| {
                 var signed_transcript: std.ArrayList(u8) = .empty;
                 defer signed_transcript.deinit(self.allocator);
                 try signed_transcript.appendSlice(
@@ -1130,7 +1251,7 @@ pub fn ClientConnection(
                 try handshake.writeCertificateVerify(
                     &client_messages,
                     self.allocator,
-                    self.client_identity.?.signer,
+                    identity.signer,
                     signed_transcript.items,
                 );
                 state.update(client_messages.items[verify_start..]);
@@ -2548,6 +2669,8 @@ test "TLS 1.2 client and server complete every AEAD suite on P-256" {
             verifier,
             null,
             null,
+            null,
+            false,
         );
     }
     try completeSuiteHandshake(
@@ -2562,6 +2685,8 @@ test "TLS 1.2 client and server complete every AEAD suite on P-256" {
         .{ .verify_trust = acceptTestCertificate },
         null,
         null,
+        null,
+        false,
     );
 }
 
@@ -2594,6 +2719,150 @@ test "TLS 1.2 client authentication proves possession and transfers identity" {
             },
             .requirement = .required,
         },
+        &.{},
+        true,
+    );
+}
+
+test "TLS 1.2 client authentication supports P-521 CertificateVerify" {
+    const Ecdsa = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+    const server_key = try Ecdsa.KeyPair.generateDeterministic(
+        [_]u8{0xc6} ** Ecdsa.KeyPair.seed_length,
+    );
+    const server_public = server_key.public_key.toUncompressedSec1();
+    var client_secret = try p521.SecretKey.fromBytes(decodeHex(
+        "00123456789abcdef00112233445566778899aabbccddeeff1021324354657687" ++
+            "98a9bacbdcedfe0f112233445566778899aabbccddeeff00123456789abcdef1234",
+    ));
+    defer client_secret.deinit();
+    var client_key = try p521.KeyPair.fromSecretKey(client_secret);
+    defer client_key.deinit();
+    const client_public = client_key.public_key.toUncompressedSec1();
+
+    try completeSuiteHandshake(
+        std.testing.allocator,
+        .ecdhe_ecdsa_aes_128_gcm_sha256,
+        key_exchange.named_group_secp256r1,
+        &server_public,
+        .{ .ecdsa_p256_sha256 = .{ .key_pair = server_key } },
+        .{ .pinned_ecdsa_p256_public_key = server_public },
+        .{
+            .certificate_chain = &.{&client_public},
+            .signer = .{ .ecdsa_p521_sha512 = .{
+                .key_pair = &client_key,
+                .io = std.testing.io,
+            } },
+        },
+        .{
+            .verifier = .{
+                .pinned_ecdsa_p521_public_key = client_public,
+            },
+            .requirement = .required,
+        },
+        &.{},
+        true,
+    );
+}
+
+test "TLS 1.2 client identity selection requires type and signature scheme" {
+    const Ecdsa = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+    const key_pair = try Ecdsa.KeyPair.generateDeterministic(
+        [_]u8{0xc8} ** Ecdsa.KeyPair.seed_length,
+    );
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const identity = client_auth.ClientIdentity{
+        .certificate_chain = &.{&public_key},
+        .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+    };
+    const ecdsa_scheme = [_]u8{ 0x04, 0x03 };
+    const rsa_scheme = [_]u8{ 0x08, 0x04 };
+    try std.testing.expect(certificateRequestAcceptsIdentity(.{
+        .certificate_types = &.{tls12_ecdsa_sign_certificate_type},
+        .signature_algorithms = &ecdsa_scheme,
+        .certificate_authorities = &.{},
+    }, identity));
+    try std.testing.expect(!certificateRequestAcceptsIdentity(.{
+        .certificate_types = &.{tls12_ecdsa_sign_certificate_type},
+        .signature_algorithms = &rsa_scheme,
+        .certificate_authorities = &.{},
+    }, identity));
+    try std.testing.expect(!certificateRequestAcceptsIdentity(.{
+        .certificate_types = &.{tls12_rsa_sign_certificate_type},
+        .signature_algorithms = &ecdsa_scheme,
+        .certificate_authorities = &.{},
+    }, identity));
+}
+
+test "TLS 1.2 client authentication honors requested CA names" {
+    const Ecdsa = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+    const server_key = try Ecdsa.KeyPair.generateDeterministic(
+        [_]u8{0xc7} ** Ecdsa.KeyPair.seed_length,
+    );
+    const server_public = server_key.public_key.toUncompressedSec1();
+    const rsa = @import("../crypto/rsa.zig");
+    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    const client_certificate = decodeHex(vectors.certificate_hex);
+    const client_private_key_der = decodeHex(vectors.private_key_pkcs8_hex);
+    const client_private_key = try rsa.PrivateKey.fromDer(
+        &client_private_key_der,
+    );
+    var prepared_client_key = try client_private_key.prepare();
+    defer prepared_client_key.deinit();
+    const parsed_client_certificate = try std.crypto.Certificate.parse(.{
+        .buffer = &client_certificate,
+        .index = 0,
+    });
+    var matching_ca_storage: [512]u8 = undefined;
+    const matching_ca_name = try wrapDerSequenceForTest(
+        parsed_client_certificate.issuer(),
+        &matching_ca_storage,
+    );
+    const unrelated_ca_name = [_]u8{
+        0x30, 0x17, 0x31, 0x15, 0x30, 0x13, 0x06, 0x03,
+        0x55, 0x04, 0x03, 0x0c, 0x0c,
+    } ++ "Unrelated CA".*;
+
+    try completeSuiteHandshake(
+        std.testing.allocator,
+        .ecdhe_ecdsa_aes_128_gcm_sha256,
+        key_exchange.named_group_secp256r1,
+        &server_public,
+        .{ .ecdsa_p256_sha256 = .{ .key_pair = server_key } },
+        .{ .pinned_ecdsa_p256_public_key = server_public },
+        .{
+            .certificate_chain = &.{&client_certificate},
+            .signer = .{ .rsa_pss = .{
+                .prepared_key = &prepared_client_key,
+                .io = std.testing.io,
+            } },
+        },
+        .{
+            .verifier = .{ .verify_trust = acceptTestCertificate },
+            .requirement = .required,
+        },
+        &.{matching_ca_name},
+        true,
+    );
+    try completeSuiteHandshake(
+        std.testing.allocator,
+        .ecdhe_ecdsa_aes_128_gcm_sha256,
+        key_exchange.named_group_secp256r1,
+        &server_public,
+        .{ .ecdsa_p256_sha256 = .{ .key_pair = server_key } },
+        .{ .pinned_ecdsa_p256_public_key = server_public },
+        .{
+            .certificate_chain = &.{&client_certificate},
+            .signer = .{ .rsa_pss = .{
+                .prepared_key = &prepared_client_key,
+                .io = std.testing.io,
+            } },
+        },
+        .{
+            .verifier = .{ .verify_trust = acceptTestCertificate },
+            .requirement = .optional,
+        },
+        &.{&unrelated_ca_name},
+        false,
     );
 }
 
@@ -2664,6 +2933,8 @@ fn completeSuiteHandshake(
     verifier: auth.ClientVerifier,
     client_identity: ?client_auth.ClientIdentity,
     server_client_auth_policy: ?client_auth.ServerPolicy,
+    client_certificate_authorities: ?[]const []const u8,
+    expect_client_certificate: bool,
 ) !void {
     const server_module = @import("tls12_server_connection.zig");
     const Client = ClientConnection(64 * 1024, 64 * 1024);
@@ -2674,10 +2945,7 @@ fn completeSuiteHandshake(
         .cipher_suites = &suites,
         .groups = &groups,
         .alpn_protocols = &.{"h2"},
-        .client_certificate_authorities = if (server_client_auth_policy != null)
-            &.{}
-        else
-            null,
+        .client_certificate_authorities = client_certificate_authorities,
     };
     var client_private = [_]u8{0} ** key_exchange.p256.secret_len;
     client_private[client_private.len - 1] = 7;
@@ -2750,7 +3018,7 @@ fn completeSuiteHandshake(
         };
     }
     defer established_server.?.deinit();
-    if (client_identity != null) {
+    if (expect_client_certificate) {
         try std.testing.expectEqual(
             @as(usize, 1),
             established_server.?.peer_certificate_chain.?.len,
@@ -2782,6 +3050,27 @@ fn acceptTestCertificate(
 ) anyerror!void {
     _ = context;
     if (trust.chain.len == 0) return error.EmptyCertificateChain;
+}
+
+fn wrapDerSequenceForTest(
+    contents: []const u8,
+    storage: []u8,
+) ![]const u8 {
+    const header_len: usize = if (contents.len < 128) 2 else 3;
+    if (contents.len > std.math.maxInt(u8) or
+        storage.len < header_len + contents.len)
+    {
+        return error.BufferTooShort;
+    }
+    storage[0] = 0x30;
+    if (header_len == 2) {
+        storage[1] = @intCast(contents.len);
+    } else {
+        storage[1] = 0x81;
+        storage[2] = @intCast(contents.len);
+    }
+    @memcpy(storage[header_len..][0..contents.len], contents);
+    return storage[0 .. header_len + contents.len];
 }
 
 test "TLS 1.2 OCSP negotiation rejects missing and unsolicited status" {

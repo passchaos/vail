@@ -1084,6 +1084,7 @@ pub fn writeCertificateRequest(
     const schemes = [_]u16{
         auth.signature_scheme_ecdsa_secp256r1_sha256,
         auth.signature_scheme_ecdsa_secp384r1_sha384,
+        auth.signature_scheme_ecdsa_secp521r1_sha512,
         auth.signature_scheme_ed25519,
         auth.signature_scheme_rsa_pss_rsae_sha256,
         auth.signature_scheme_rsa_pss_rsae_sha384,
