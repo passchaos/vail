@@ -69,10 +69,12 @@ The current foundation provides:
   extensions are ignored for forward compatibility, while duplicate extension
   types remain fatal across the complete 16-bit namespace without imposing an
   arbitrary extension-count ceiling; malformed known extensions also remain
-  fatal. Initial-handshake CertificateRequest context is required to be empty;
-  the generic codec still preserves non-empty contexts for post-handshake
-  authentication. Per-identity OCSP and precompressed Certificate variants
-  remain attached to the selected identity;
+  fatal. Repeated values inside TLS 1.2/1.3 ClientHello and TLS 1.3
+  CertificateRequest signature-algorithm vectors remain acceptable as RFC 5246
+  and RFC 8446 permit. Initial-handshake CertificateRequest context is required
+  to be empty; the generic codec still preserves non-empty contexts for
+  post-handshake authentication. Per-identity OCSP and precompressed Certificate
+  variants remain attached to the selected identity;
 - TLS 1.3 RFC 7250 Raw Public Key authentication in both directions, including
   strict ClientHello/EncryptedExtensions certificate-type negotiation, exact
   DER SubjectPublicKeyInfo pins, single-key Certificate messages, RPK mTLS,

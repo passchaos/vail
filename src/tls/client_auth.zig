@@ -900,24 +900,9 @@ fn parseSignatureAlgorithmList(payload: []const u8) Error![]const u8 {
     {
         return error.InvalidCertificateRequest;
     }
-    const schemes = payload[pos..];
-    var current: usize = 0;
-    while (current < schemes.len) : (current += 2) {
-        const scheme = std.mem.readInt(
-            u16,
-            schemes[current..][0..2],
-            .big,
-        );
-        var previous: usize = 0;
-        while (previous < current) : (previous += 2) {
-            if (scheme == std.mem.readInt(
-                u16,
-                schemes[previous..][0..2],
-                .big,
-            )) return error.InvalidCertificateRequest;
-        }
-    }
-    return schemes;
+    // RFC 8446 defines a non-empty vector but does not require its values to
+    // be unique. Preserve repeated schemes for interoperable peer parsing.
+    return payload[pos..];
 }
 
 fn parseCompressionAlgorithms(payload: []const u8) Error![]const u8 {

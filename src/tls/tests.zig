@@ -590,6 +590,37 @@ test "CertificateRequest accepts more than 64 unique extensions" {
     );
 }
 
+test "CertificateRequest preserves repeated signature scheme values" {
+    const encoded = [_]u8{
+        0x0d, 0x00, 0x00, 0x20,
+        0x00, 0x00, 0x1d, 0x00,
+        0x0d, 0x00, 0x06, 0x00,
+        0x04, 0x08, 0x07, 0x08,
+        0x07, 0x00, 0x32, 0x00,
+        0x06, 0x00, 0x04, 0x08,
+        0x07, 0x08, 0x07, 0x00,
+        0x1b, 0x00, 0x05, 0x04,
+        0x00, 0x01, 0x00, 0x02,
+    };
+    const parsed = try client_auth.parseRequest(&encoded);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x08, 0x07, 0x08, 0x07 },
+        parsed.signature_algorithms,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x08, 0x07, 0x08, 0x07 },
+        parsed.certificate_signature_algorithms.?,
+    );
+    try std.testing.expect(parsed.supports_ed25519);
+    try std.testing.expect(parsed.supportsCertificateSignatureScheme(
+        auth.signature_scheme_ed25519,
+    ));
+    try std.testing.expect(parsed.supportsCertificateCompression(.zlib));
+    try std.testing.expect(parsed.supportsCertificateCompression(.brotli));
+}
+
 test "TLS 1.3 initial CertificateRequest requires an empty context" {
     try client_auth.validateInitialRequestContext(&.{});
     try std.testing.expectError(

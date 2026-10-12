@@ -1228,22 +1228,7 @@ fn parseSignatureAlgorithms(encoded: []const u8) Error![]const u8 {
     {
         return error.InvalidClientHello;
     }
-    var current: usize = 0;
-    while (current < algorithms.len) : (current += 2) {
-        const algorithm = std.mem.readInt(
-            u16,
-            algorithms[current..][0..2],
-            .big,
-        );
-        var previous: usize = 0;
-        while (previous < current) : (previous += 2) {
-            if (algorithm == std.mem.readInt(
-                u16,
-                algorithms[previous..][0..2],
-                .big,
-            )) return error.InvalidClientHello;
-        }
-    }
+    // RFC 5246 and RFC 8446 constrain framing, not value uniqueness.
     return algorithms;
 }
 
@@ -1514,7 +1499,7 @@ test "certificate authorities reject empty and truncated names" {
     );
 }
 
-test "certificate signature algorithm lists reject malformed encodings" {
+test "certificate signature algorithm lists validate framing and preserve duplicates" {
     try std.testing.expectError(
         error.InvalidClientHello,
         parseSignatureAlgorithms(&.{ 0, 0 }),
@@ -1527,9 +1512,12 @@ test "certificate signature algorithm lists reject malformed encodings" {
         error.InvalidClientHello,
         parseSignatureAlgorithms(&.{ 0, 2, 0x08 }),
     );
-    try std.testing.expectError(
-        error.InvalidClientHello,
-        parseSignatureAlgorithms(&.{ 0, 4, 0x08, 0x07, 0x08, 0x07 }),
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x08, 0x07, 0x08, 0x07 },
+        try parseSignatureAlgorithms(
+            &.{ 0, 4, 0x08, 0x07, 0x08, 0x07 },
+        ),
     );
     try std.testing.expectEqualSlices(
         u8,
