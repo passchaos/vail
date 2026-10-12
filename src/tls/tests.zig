@@ -503,6 +503,18 @@ test "CertificateRequest advertises built-in signature schemes" {
         error.InvalidCertificateRequest,
         client_auth.parseRequest(&duplicate_certificate_authorities),
     );
+
+    const unknown_extension = [_]u8{
+        0x0d, 0x00, 0x00, 0x11,
+        0x00, 0x00, 0x0e, 0x00,
+        0x0d, 0x00, 0x04, 0x00,
+        0x02, 0x08, 0x07, 0xfa,
+        0xfa, 0x00, 0x02, 0x12,
+        0x34,
+    };
+    const parsed_unknown = try client_auth.parseRequest(&unknown_extension);
+    try std.testing.expect(parsed_unknown.supports_ed25519);
+    try std.testing.expectEqual(@as(usize, 0), parsed_unknown.certificate_authorities.len);
 }
 
 test "optional client Certificate supports an empty chain" {

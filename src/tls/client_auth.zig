@@ -864,7 +864,10 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
             certificate_compression_algorithms =
                 try parseCompressionAlgorithms(payload);
         } else {
-            return error.InvalidCertificateRequest;
+            // TLS extensions are forward-compatible. CertificateRequest
+            // recipients ignore extension types they do not understand while
+            // retaining strict syntax and duplicate checks for known types.
+            continue;
         }
     }
     if (!saw_signature_algorithms) {

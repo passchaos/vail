@@ -65,7 +65,9 @@ The current foundation provides:
   from CertificateVerify when selecting or authenticating X.509 chains. A
   client sends its identity only when the signing algorithm, certificate chain,
   and acceptable CA names all match the request; otherwise it emits the
-  RFC-required empty Certificate message. Per-identity OCSP and precompressed
+  RFC-required empty Certificate message. Unknown CertificateRequest
+  extensions are ignored for forward compatibility, while duplicate or
+  malformed known extensions remain fatal. Per-identity OCSP and precompressed
   Certificate variants remain attached to the selected identity;
 - TLS 1.3 RFC 7250 Raw Public Key authentication in both directions, including
   strict ClientHello/EncryptedExtensions certificate-type negotiation, exact
