@@ -838,7 +838,7 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
         } else if (typ == ext_certificate_authorities) {
             var ca_pos: usize = 0;
             const names_len = try readInt(u16, payload, &ca_pos);
-            if (names_len != payload.len - ca_pos) {
+            if (names_len < 3 or names_len != payload.len - ca_pos) {
                 return error.InvalidCertificateRequest;
             }
             certificate_authorities = payload[ca_pos..];

@@ -621,6 +621,21 @@ test "CertificateRequest preserves repeated signature scheme values" {
     try std.testing.expect(parsed.supportsCertificateCompression(.brotli));
 }
 
+test "CertificateRequest rejects an empty certificate authorities vector" {
+    const encoded = [_]u8{
+        0x0d, 0x00, 0x00, 0x11,
+        0x00, 0x00, 0x0e, 0x00,
+        0x0d, 0x00, 0x04, 0x00,
+        0x02, 0x08, 0x07, 0x00,
+        0x2f, 0x00, 0x02, 0x00,
+        0x00,
+    };
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.parseRequest(&encoded),
+    );
+}
+
 test "TLS 1.3 initial CertificateRequest requires an empty context" {
     try client_auth.validateInitialRequestContext(&.{});
     try std.testing.expectError(
