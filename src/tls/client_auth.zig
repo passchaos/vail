@@ -742,18 +742,22 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
     var certificate_authorities: []const u8 = &.{};
     var certificate_compression_algorithms: []const u8 = &.{};
     var saw_signature_algorithms = false;
-    var saw_signature_algorithms_cert = false;
-    var saw_certificate_authorities = false;
-    var saw_certificate_compression = false;
+    var seen_extensions: [64]u16 = undefined;
+    var seen_extension_count: usize = 0;
     var ext_pos: usize = 0;
     while (ext_pos < extensions.len) {
         const typ = try readInt(u16, extensions, &ext_pos);
         const len = try readInt(u16, extensions, &ext_pos);
         const payload = try readSlice(extensions, &ext_pos, len);
+        for (seen_extensions[0..seen_extension_count]) |seen| {
+            if (seen == typ) return error.InvalidCertificateRequest;
+        }
+        if (seen_extension_count == seen_extensions.len) {
+            return error.InvalidCertificateRequest;
+        }
+        seen_extensions[seen_extension_count] = typ;
+        seen_extension_count += 1;
         if (typ == ext_signature_algorithms) {
-            if (saw_signature_algorithms) {
-                return error.InvalidCertificateRequest;
-            }
             saw_signature_algorithms = true;
             signature_algorithms = try parseSignatureAlgorithmList(payload);
             var scheme_pos: usize = 0;
@@ -825,17 +829,9 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
                 }
             }
         } else if (typ == ext_signature_algorithms_cert) {
-            if (saw_signature_algorithms_cert) {
-                return error.InvalidCertificateRequest;
-            }
-            saw_signature_algorithms_cert = true;
             certificate_signature_algorithms =
                 try parseSignatureAlgorithmList(payload);
         } else if (typ == ext_certificate_authorities) {
-            if (saw_certificate_authorities) {
-                return error.InvalidCertificateRequest;
-            }
-            saw_certificate_authorities = true;
             var ca_pos: usize = 0;
             const names_len = try readInt(u16, payload, &ca_pos);
             if (names_len != payload.len - ca_pos) {
@@ -857,10 +853,6 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
                 );
             }
         } else if (typ == ext_compress_certificate) {
-            if (saw_certificate_compression) {
-                return error.InvalidCertificateRequest;
-            }
-            saw_certificate_compression = true;
             certificate_compression_algorithms =
                 try parseCompressionAlgorithms(payload);
         } else {
