@@ -17,6 +17,22 @@ const ext_oid_filters: u16 = 0x0030;
 const ext_signature_algorithms_cert: u16 = 0x0032;
 const ext_compress_certificate: u16 =
     certificate_compression.extension_type_compress_certificate;
+const request_signature_schemes = [_]u16{
+    auth.signature_scheme_sm2sig_sm3,
+    auth.signature_scheme_ecdsa_secp256r1_sha256,
+    auth.signature_scheme_ecdsa_secp384r1_sha384,
+    auth.signature_scheme_ecdsa_secp521r1_sha512,
+    auth.signature_scheme_rsa_pss_rsae_sha256,
+    auth.signature_scheme_rsa_pss_rsae_sha384,
+    auth.signature_scheme_rsa_pss_rsae_sha512,
+    auth.signature_scheme_rsa_pss_pss_sha256,
+    auth.signature_scheme_rsa_pss_pss_sha384,
+    auth.signature_scheme_rsa_pss_pss_sha512,
+    auth.signature_scheme_ed25519,
+    auth.signature_scheme_ml_dsa_44,
+    auth.signature_scheme_ml_dsa_65,
+    auth.signature_scheme_ml_dsa_87,
+};
 
 pub const Error = std.mem.Allocator.Error || auth.Error ||
     certificate_compression.Error || key_schedule.Error || secret.Error || error{
@@ -510,113 +526,93 @@ pub const RequestOptions = struct {
     certificate_signature_schemes: ?[]const u16 = null,
 };
 
+/// Validate every caller-controlled CertificateRequest field and its nested
+/// wire lengths without allocating or mutating an output buffer.
+pub fn validateRequestOptions(options: RequestOptions) Error!void {
+    if (options.request_context.len > std.math.maxInt(u8)) {
+        return error.InvalidCertificateRequest;
+    }
+
+    var extensions_len: usize = 0;
+    try addExtensionLength(
+        &extensions_len,
+        2 + request_signature_schemes.len * 2,
+    );
+    if (options.certificate_signature_schemes) |schemes| {
+        if (schemes.len == 0 or
+            schemes.len > (std.math.maxInt(u16) - 2) / 2)
+        {
+            return error.InvalidCertificateRequest;
+        }
+        for (schemes, 0..) |scheme, index| {
+            for (schemes[0..index]) |previous| {
+                if (scheme == previous) {
+                    return error.InvalidCertificateRequest;
+                }
+            }
+        }
+        try addExtensionLength(&extensions_len, 2 + schemes.len * 2);
+    }
+
+    const oid_filters_len = try validateOidFilters(options.oid_filters);
+    if (oid_filters_len != 0) {
+        try addExtensionLength(&extensions_len, 2 + oid_filters_len);
+    }
+
+    if (options.compression_algorithms.len != 0) {
+        certificate_compression.validateAlgorithms(
+            options.compression_algorithms,
+        ) catch return error.InvalidCertificateRequest;
+        try addExtensionLength(
+            &extensions_len,
+            1 + options.compression_algorithms.len * 2,
+        );
+    }
+
+    const authorities_len = try validateCertificateAuthorities(
+        options.certificate_authorities,
+    );
+    if (authorities_len != 0) {
+        try addExtensionLength(&extensions_len, 2 + authorities_len);
+    }
+
+    const body_len = 1 + options.request_context.len + 2 + extensions_len;
+    if (body_len > std.math.maxInt(u24)) {
+        return error.InvalidCertificateRequest;
+    }
+}
+
 pub fn writeRequestWithOptions(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     options: RequestOptions,
 ) Error!void {
+    try validateRequestOptions(options);
     const request_context = options.request_context;
     const certificate_authorities = options.certificate_authorities;
     const compression_algorithms = options.compression_algorithms;
-    if (request_context.len > std.math.maxInt(u8)) {
-        return error.InvalidCertificateRequest;
-    }
     const original_len = list.items.len;
     errdefer list.items.len = original_len;
 
     var extensions: std.ArrayList(u8) = .empty;
     defer extensions.deinit(allocator);
     try appendInt(&extensions, allocator, u16, ext_signature_algorithms);
-    try appendInt(&extensions, allocator, u16, 30);
-    try appendInt(&extensions, allocator, u16, 28);
     try appendInt(
         &extensions,
         allocator,
         u16,
-        auth.signature_scheme_sm2sig_sm3,
+        2 + request_signature_schemes.len * 2,
     );
     try appendInt(
         &extensions,
         allocator,
         u16,
-        auth.signature_scheme_ecdsa_secp256r1_sha256,
+        request_signature_schemes.len * 2,
     );
-    try appendInt(
-        &extensions,
-        allocator,
-        u16,
-        auth.signature_scheme_ecdsa_secp384r1_sha384,
-    );
-    try appendInt(
-        &extensions,
-        allocator,
-        u16,
-        auth.signature_scheme_ecdsa_secp521r1_sha512,
-    );
-    try appendInt(
-        &extensions,
-        allocator,
-        u16,
-        auth.signature_scheme_rsa_pss_rsae_sha256,
-    );
-    try appendInt(
-        &extensions,
-        allocator,
-        u16,
-        auth.signature_scheme_rsa_pss_rsae_sha384,
-    );
-    try appendInt(
-        &extensions,
-        allocator,
-        u16,
-        auth.signature_scheme_rsa_pss_rsae_sha512,
-    );
-    try appendInt(
-        &extensions,
-        allocator,
-        u16,
-        auth.signature_scheme_rsa_pss_pss_sha256,
-    );
-    try appendInt(
-        &extensions,
-        allocator,
-        u16,
-        auth.signature_scheme_rsa_pss_pss_sha384,
-    );
-    try appendInt(
-        &extensions,
-        allocator,
-        u16,
-        auth.signature_scheme_rsa_pss_pss_sha512,
-    );
-    try appendInt(
-        &extensions,
-        allocator,
-        u16,
-        auth.signature_scheme_ed25519,
-    );
-    try appendInt(
-        &extensions,
-        allocator,
-        u16,
-        auth.signature_scheme_ml_dsa_44,
-    );
-    try appendInt(
-        &extensions,
-        allocator,
-        u16,
-        auth.signature_scheme_ml_dsa_65,
-    );
-    try appendInt(
-        &extensions,
-        allocator,
-        u16,
-        auth.signature_scheme_ml_dsa_87,
-    );
+    for (request_signature_schemes) |scheme| {
+        try appendInt(&extensions, allocator, u16, scheme);
+    }
     if (options.certificate_signature_schemes) |schemes| {
-        if (schemes.len == 0 or schemes.len > std.math.maxInt(u16) / 2) {
-            return error.InvalidCertificateRequest;
-        }
         try appendInt(
             &extensions,
             allocator,
@@ -635,12 +631,7 @@ pub fn writeRequestWithOptions(
             u16,
             schemes.len * 2,
         );
-        for (schemes, 0..) |scheme, index| {
-            for (schemes[0..index]) |previous| {
-                if (scheme == previous) {
-                    return error.InvalidCertificateRequest;
-                }
-            }
+        for (schemes) |scheme| {
             try appendInt(&extensions, allocator, u16, scheme);
         }
     }
@@ -650,9 +641,6 @@ pub fn writeRequestWithOptions(
         options.oid_filters,
     );
     if (compression_algorithms.len != 0) {
-        certificate_compression.validateAlgorithms(
-            compression_algorithms,
-        ) catch return error.InvalidCertificateRequest;
         try appendInt(
             &extensions,
             allocator,
@@ -682,9 +670,6 @@ pub fn writeRequestWithOptions(
         var authorities: std.ArrayList(u8) = .empty;
         defer authorities.deinit(allocator);
         for (certificate_authorities) |subject| {
-            if (subject.len == 0 or subject.len > std.math.maxInt(u16)) {
-                return error.InvalidCertificateRequest;
-            }
             try appendInt(
                 &authorities,
                 allocator,
@@ -692,9 +677,6 @@ pub fn writeRequestWithOptions(
                 subject.len,
             );
             try authorities.appendSlice(allocator, subject);
-        }
-        if (authorities.items.len > std.math.maxInt(u16)) {
-            return error.InvalidCertificateRequest;
         }
         try appendInt(
             &extensions,
@@ -737,6 +719,33 @@ pub fn writeRequestWithOptions(
         extensions.items.len,
     );
     try list.appendSlice(allocator, extensions.items);
+}
+
+fn addExtensionLength(total: *usize, payload_len: usize) Error!void {
+    const encoded_len = 4 + payload_len;
+    if (encoded_len > std.math.maxInt(u16) or
+        total.* > std.math.maxInt(u16) - encoded_len)
+    {
+        return error.InvalidCertificateRequest;
+    }
+    total.* += encoded_len;
+}
+
+fn validateCertificateAuthorities(
+    certificate_authorities: []const []const u8,
+) Error!usize {
+    var encoded_len: usize = 0;
+    for (certificate_authorities) |subject| {
+        if (subject.len == 0 or subject.len > std.math.maxInt(u16)) {
+            return error.InvalidCertificateRequest;
+        }
+        const entry_len = 2 + subject.len;
+        if (entry_len > std.math.maxInt(u16) - encoded_len) {
+            return error.InvalidCertificateRequest;
+        }
+        encoded_len += entry_len;
+    }
+    return encoded_len;
 }
 
 pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
@@ -918,14 +927,10 @@ pub fn parseRequest(bytes: []const u8) Error!ParsedRequest {
     };
 }
 
-fn appendOidFiltersExtension(
-    extensions: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
+fn validateOidFilters(
     configured: []const OidFilter,
-) Error!void {
-    if (configured.len == 0) return;
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
+) Error!usize {
+    var encoded_len: usize = 0;
     for (configured, 0..) |filter, index| {
         if (filter.oid.len == 0 or filter.oid.len > std.math.maxInt(u8) or
             filter.values.len > std.math.maxInt(u16))
@@ -942,9 +947,23 @@ fn appendOidFiltersExtension(
             }
         }
         const entry_len = 1 + filter.oid.len + 2 + filter.values.len;
-        if (entry_len > std.math.maxInt(u16) - encoded.items.len - 2) {
+        if (entry_len > std.math.maxInt(u16) - encoded_len) {
             return error.InvalidCertificateRequest;
         }
+        encoded_len += entry_len;
+    }
+    return encoded_len;
+}
+
+fn appendOidFiltersExtension(
+    extensions: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    configured: []const OidFilter,
+) Error!void {
+    if (configured.len == 0) return;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    for (configured) |filter| {
         try encoded.append(allocator, @intCast(filter.oid.len));
         try encoded.appendSlice(allocator, filter.oid);
         try appendInt(&encoded, allocator, u16, filter.values.len);

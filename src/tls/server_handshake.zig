@@ -197,10 +197,19 @@ fn writeServerHandshakeFlightSelected(
     options: Options,
     selection: server_flight.Selection,
 ) Error!Result {
-    if (options.client_auth) |client_auth_options| {
+    const certificate_request_options: ?client_auth.RequestOptions =
+        if (options.client_auth) |client_auth_options| .{
+            .request_context = client_auth_options.request_context,
+            .certificate_authorities = client_auth_options.certificate_authorities,
+            .oid_filters = client_auth_options.oid_filters,
+            .compression_algorithms = client_auth_options.certificate_compression_algorithms,
+            .certificate_signature_schemes = client_auth_options.certificate_signature_schemes,
+        } else null;
+    if (certificate_request_options) |request_options| {
         try client_auth.validateInitialRequestContext(
-            client_auth_options.request_context,
+            request_options.request_context,
         );
+        try client_auth.validateRequestOptions(request_options);
     }
     if ((options.psk == null) !=
         (options.selected_psk_identity == null))
@@ -341,18 +350,12 @@ fn writeServerHandshakeFlightSelected(
         encrypted_flight.items[encrypted_extensions_start..],
     );
 
-    if (options.client_auth) |client_auth_options| {
+    if (certificate_request_options) |request_options| {
         const certificate_request_start = encrypted_flight.items.len;
         try client_auth.writeRequestWithOptions(
             &encrypted_flight,
             allocator,
-            .{
-                .request_context = client_auth_options.request_context,
-                .certificate_authorities = client_auth_options.certificate_authorities,
-                .oid_filters = client_auth_options.oid_filters,
-                .compression_algorithms = client_auth_options.certificate_compression_algorithms,
-                .certificate_signature_schemes = client_auth_options.certificate_signature_schemes,
-            },
+            request_options,
         );
         transcript_state.update(
             encrypted_flight.items[certificate_request_start..],
@@ -623,6 +626,21 @@ test "server handshake flight inserts encrypted CertificateRequest" {
     invalid_options.client_auth.?.request_context = "post-handshake";
     var invalid_flight: std.ArrayList(u8) = .empty;
     defer invalid_flight.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        writeServerHandshakeFlight(
+            &invalid_flight,
+            std.testing.allocator,
+            invalid_options,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), invalid_flight.items.len);
+
+    invalid_options = options;
+    invalid_options.client_auth.?.oid_filters = &.{.{
+        .oid = &.{0x80},
+        .values = &.{},
+    }};
     try std.testing.expectError(
         error.InvalidCertificateRequest,
         writeServerHandshakeFlight(

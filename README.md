@@ -77,7 +77,9 @@ The current foundation provides:
   clients reject repeated recognized filters, and recognized Key Usage and
   Extended Key Usage values constrain the end-entity certificate, including
   subset matching and the prohibition on requesting anyExtendedKeyUsage, while
-  unknown OIDs are ignored. Initial-handshake
+  unknown OIDs are ignored. Servers preflight all nested request-vector lengths
+  and filter semantics before emitting ServerHello, so invalid configuration
+  cannot leave a partial flight. Initial-handshake
   CertificateRequest context is required to be empty; the generic codec still
   preserves non-empty contexts for post-handshake authentication. Per-identity
   OCSP and precompressed Certificate variants remain attached to the selected identity;

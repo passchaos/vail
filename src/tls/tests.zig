@@ -727,6 +727,25 @@ test "CertificateRequest OID filters reject invalid and duplicate entries" {
     );
 }
 
+test "CertificateRequest writer preflights nested vector lengths" {
+    const allocator = std.testing.allocator;
+    const authority = try allocator.alloc(u8, std.math.maxInt(u16) - 3);
+    defer allocator.free(authority);
+    @memset(authority, 0x2a);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encoded.appendSlice(allocator, "prefix");
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        client_auth.writeRequestWithOptions(&encoded, allocator, .{
+            .request_context = &.{},
+            .certificate_authorities = &.{authority},
+        }),
+    );
+    try std.testing.expectEqualStrings("prefix", encoded.items);
+}
+
 test "CertificateRequest rejects an empty certificate authorities vector" {
     const encoded = [_]u8{
         0x0d, 0x00, 0x00, 0x11,
