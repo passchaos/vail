@@ -22,6 +22,7 @@ pub const Error = std.mem.Allocator.Error || error{
     InvalidNewSessionTicket,
     InvalidTicketLifetime,
     InvalidEarlyDataSize,
+    TicketDiscarded,
     TicketNotYetValid,
     ExpiredTicket,
 };
@@ -111,6 +112,7 @@ pub fn cacheWithApplicationSettings(
         return error.InvalidNewSessionTicket;
     }
     const parsed = try parse(message);
+    if (parsed.lifetime_seconds == 0) return error.TicketDiscarded;
     var resumption_master = try key_schedule.deriveResumptionMasterSecretFor(
         master_secret,
         transcript_after_client_finished,
@@ -227,9 +229,7 @@ pub fn parse(bytes: []const u8) Error!Parsed {
     var pos: usize = 4;
 
     const lifetime_seconds = try readInt(u32, bytes, &pos);
-    if (lifetime_seconds == 0 or
-        lifetime_seconds > max_lifetime_seconds)
-    {
+    if (lifetime_seconds > max_lifetime_seconds) {
         return error.InvalidTicketLifetime;
     }
     const age_add = try readInt(u32, bytes, &pos);
@@ -324,9 +324,7 @@ pub fn derivePskSha384(
 }
 
 fn validateOptions(options: Options) Error!void {
-    if (options.lifetime_seconds == 0 or
-        options.lifetime_seconds > max_lifetime_seconds)
-    {
+    if (options.lifetime_seconds > max_lifetime_seconds) {
         return error.InvalidTicketLifetime;
     }
     if (options.nonce.len > std.math.maxInt(u8) or
@@ -584,4 +582,35 @@ test "stream TLS NewSessionTicket preserves a finite early data limit" {
         }),
     );
     try std.testing.expectEqualStrings("prefix", encoded.items);
+}
+
+test "zero lifetime NewSessionTicket parses but is not cached" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try write(&encoded, allocator, .{
+        .lifetime_seconds = 0,
+        .age_add = 23,
+        .nonce = &.{3},
+        .ticket = "discard-ticket",
+    });
+    const parsed = try parse(encoded.items);
+    try std.testing.expectEqual(@as(u32, 0), parsed.lifetime_seconds);
+
+    const master = secret.Secret.fromSha256([_]u8{0x45} ** 32);
+    var state = transcript.State.init(.sha256);
+    state.update("complete-handshake");
+    try std.testing.expectError(
+        error.TicketDiscarded,
+        cache(
+            allocator,
+            encoded.items,
+            .aes_128_gcm_sha256,
+            master,
+            state.digest(),
+            "example.com",
+            "h2",
+            10_000,
+        ),
+    );
 }

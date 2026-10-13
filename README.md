@@ -299,7 +299,8 @@ The current foundation provides:
   forward compatibility for genuinely unknown extensions. The shared TLS
   codec preserves any RFC 8446 `max_early_data_size`, including finite and zero
   limits, while QUIC entry points separately enforce RFC 9001's `0xffffffff`
-  sentinel. RFC 9149 ticket
+  sentinel. A zero-lifetime ticket remains valid on the wire but returns a
+  distinct discard result before any cache allocation. RFC 9149 ticket
   requests distinguish new and resumed handshakes,
   advertise the server's bounded expected count, and expose a decrementing
   issuance budget. Stream 0-RTT installs separate early traffic keys, enforces the
