@@ -217,7 +217,15 @@ pub const ServerPsk = struct {
     secret: secret.Secret,
     age_policy: ?psk.TicketAgePolicy = null,
     max_early_data_size: ?u32 = null,
+    /// Required for 0-RTT and matched against the newly negotiated parameters.
+    /// PSK-only 1-RTT resumption needs only a compatible transcript hash.
+    early_data_context: ?EarlyDataContext = null,
     application_settings: ?application_settings.Session = null,
+};
+
+pub const EarlyDataContext = struct {
+    cipher_suite: cipher_suite.Suite,
+    alpn: []const u8,
 };
 
 pub const EarlyDataPolicy = struct {
@@ -525,6 +533,7 @@ pub fn ServerConnection(
             issued_at_ms: ?u64,
             lifetime_seconds: ?u32,
             age_within_tolerance: bool,
+            early_data_context_matches: bool,
             application_settings: ?application_settings.Session = null,
             settings_allocator: ?std.mem.Allocator = null,
 
@@ -1228,6 +1237,16 @@ pub fn ServerConnection(
                         else
                             null,
                         .age_within_tolerance = age_within_tolerance,
+                        .early_data_context_matches = if (fixed.early_data_context) |context|
+                            context.cipher_suite == selection.suite and
+                                selection.alpn_protocol != null and
+                                std.mem.eql(
+                                    u8,
+                                    context.alpn,
+                                    selection.alpn_protocol.?,
+                                )
+                        else
+                            false,
                         .application_settings = fixed.application_settings,
                     };
                 },
@@ -1250,8 +1269,10 @@ pub fn ServerConnection(
                             continue;
                         };
                         defer opened.deinit();
-                        if (opened.cipher_suite_wire !=
-                            selection.suite.wireValue() or
+                        const ticket_suite = cipher_suite.Suite.fromWire(
+                            opened.cipher_suite_wire,
+                        ) orelse continue;
+                        if (ticket_suite.hash() != selection.suite.hash() or
                             opened.secret.hash != selection.suite.hash())
                         {
                             continue;
@@ -1298,6 +1319,7 @@ pub fn ServerConnection(
                             .age_within_tolerance = offered.selected_identity ==
                                 psk.selected_identity_first and
                                 reported_age_fresh,
+                            .early_data_context_matches = ticket_suite == selection.suite,
                             .application_settings = owned_application_settings,
                             .settings_allocator = if (owned_application_settings != null)
                                 self.config.allocator
@@ -1319,6 +1341,7 @@ pub fn ServerConnection(
         ) Error!?usize {
             if (after_retry or
                 !selected.age_within_tolerance or
+                !selected.early_data_context_matches or
                 !(try client_hello.parse(client_hello_bytes)).early_data)
             {
                 return null;

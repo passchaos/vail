@@ -305,7 +305,9 @@ The current foundation provides:
   validation, and both stateless ticket formats agree that a ticket expires at
   the exact advertised lifetime boundary and reject clocks before issuance;
   an otherwise live ticket whose reported age exceeds the configured skew
-  tolerance still resumes at 1-RTT while 0-RTT is rejected.
+  tolerance still resumes at 1-RTT while 0-RTT is rejected. Resumption may
+  likewise negotiate another cipher suite using the ticket's transcript hash,
+  while 0-RTT additionally requires the original suite and ALPN context.
   RFC 9149 ticket
   requests distinguish new and resumed handshakes,
   advertise the server's bounded expected count, and expose a decrementing

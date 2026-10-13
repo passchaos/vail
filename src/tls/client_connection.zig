@@ -3496,6 +3496,10 @@ test "ECH PSK resumption survives P-256 HelloRetryRequest" {
             .tolerance_ms = 0,
         },
         .max_early_data_size = 1024,
+        .early_data_context = .{
+            .cipher_suite = .aes_128_gcm_sha256,
+            .alpn = "h2",
+        },
     };
     var retry_replay_cache = @import("early_data.zig").ReplayCache(2){};
     var resolver_context = ResolverContext{
@@ -3825,6 +3829,17 @@ test "client connection rejects a second HelloRetryRequest" {
 }
 
 test "client and server resume PSK but reject stale 0-RTT" {
+    try testRejectedEarlyDataResumption(.aes_128_gcm_sha256, 30_000);
+}
+
+test "client and server resume PSK across same-hash suite but reject 0-RTT" {
+    try testRejectedEarlyDataResumption(.chacha20_poly1305_sha256, 11_000);
+}
+
+fn testRejectedEarlyDataResumption(
+    negotiated_suite: cipher_suite.Suite,
+    server_now_ms: u64,
+) !void {
     const allocator = std.testing.allocator;
     const Client = ClientConnection(64 * 1024, 256);
     const server_module = @import("server_connection.zig");
@@ -3870,7 +3885,7 @@ test "client and server resume PSK but reject stale 0-RTT" {
         .allocator = allocator,
         .random = [_]u8{0xa9} ** 32,
         .key_material = &client_material,
-        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .cipher_suites = &.{negotiated_suite},
         .alpn_protocols = &.{"h2"},
         .server_verifier = .{},
         .resumption = client_psk,
@@ -3893,7 +3908,7 @@ test "client and server resume PSK but reject stale 0-RTT" {
     var server = Server.init(.{
         .allocator = allocator,
         .policy = .{
-            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .cipher_suites = &.{negotiated_suite},
             .groups = &.{key_exchange.named_group_x25519},
             .alpn_protocols = &.{"h2"},
         },
@@ -3904,7 +3919,7 @@ test "client and server resume PSK but reject stale 0-RTT" {
         .resumption = .{ .tickets = .{
             .keyring = &keyring,
             .server_id = "example.com",
-            .now_ms = 30_000,
+            .now_ms = server_now_ms,
         } },
         .early_data = .{
             .replay_guard = replay_cache.guard(),
@@ -3980,6 +3995,10 @@ test "client and server resume PSK but reject stale 0-RTT" {
     defer established_client.deinit();
     try std.testing.expect(established_client.resumed);
     try std.testing.expect(!established_client.early_data_accepted);
+    try std.testing.expectEqual(
+        negotiated_suite,
+        established_client.application.suite,
+    );
     try std.testing.expectEqual(
         @as(usize, 0),
         established_client.peer_certificate_chain.len,
