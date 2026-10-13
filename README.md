@@ -290,8 +290,9 @@ The current foundation provides:
   layouts, 64/80-byte hybrid HKDF inputs, and shared generic secret handling.
 - TLS 1.3 PSK-DHE resumption integrated into client/server states, including
   constant-time SHA-256/SHA-384/SM3 binders, HRR binder transcripts,
-  ServerHello identity selection, ticket-age validation, and stateless tickets
-  bound to their issuing suite, server identity, and ALPN. Authenticated
+  allocation-free multi-identity parsing, index-aligned binder validation,
+  later-identity ServerHello selection, ticket-age validation, and stateless
+  tickets bound to their issuing suite, server identity, and ALPN. Authenticated
   NewSessionTicket messages can be converted directly into owned client cache
   entries; their extension parser covers the complete 16-bit type namespace,
   rejects duplicates, the RFC-forbidden 65,535-byte vector, and recognized
@@ -302,7 +303,9 @@ The current foundation provides:
   sentinel. A zero-lifetime ticket remains valid on the wire but returns a
   distinct discard result before any cache allocation. Client caches, PSK age
   validation, and both stateless ticket formats agree that a ticket expires at
-  the exact advertised lifetime boundary and reject clocks before issuance.
+  the exact advertised lifetime boundary and reject clocks before issuance;
+  an otherwise live ticket whose reported age exceeds the configured skew
+  tolerance still resumes at 1-RTT while 0-RTT is rejected.
   RFC 9149 ticket
   requests distinguish new and resumed handshakes,
   advertise the server's bounded expected count, and expose a decrementing
@@ -374,8 +377,9 @@ The current foundation provides:
   emits plaintext CRYPTO-stream flights by encryption level; the client
   authenticates the server flight, returns owned ALPN/transport parameters,
   emits its plaintext Finished flight, and derives matching Handshake/1-RTT
-  packet keys. Resumption authenticates the one-identity PSK binder and can
-  fall back to a full certificate handshake. QUIC 0-RTT derives matching
+  packet keys. Resumption authenticates the selected PSK binder from a complete
+  multi-identity offer and can fall back to a full certificate handshake.
+  QUIC 0-RTT derives matching
   client early packet keys, requires explicit server acceptance, and returns
   the ticket byte limit for transport enforcement without emitting TLS's
   stream-only EndOfEarlyData message. Validated HelloRetryRequest state

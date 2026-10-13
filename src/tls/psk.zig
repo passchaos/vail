@@ -34,11 +34,104 @@ pub const Error = std.mem.Allocator.Error || error{
 };
 
 pub const Offer = struct {
+    selected_identity: u16 = selected_identity_first,
     identity: []const u8,
     obfuscated_ticket_age: u32,
     binder_hash: secret.Hash,
     binder: []const u8,
     binder_truncated_len: usize,
+};
+
+pub const OfferedIdentity = struct {
+    selected_identity: u16,
+    identity: []const u8,
+    obfuscated_ticket_age: u32,
+    binder: []const u8,
+    binder_truncated_len: usize,
+
+    pub fn forHash(
+        self: OfferedIdentity,
+        expected_hash: secret.Hash,
+    ) Error!Offer {
+        if (self.binder.len != expected_hash.len()) {
+            return error.InvalidPskBinder;
+        }
+        return .{
+            .selected_identity = self.selected_identity,
+            .identity = self.identity,
+            .obfuscated_ticket_age = self.obfuscated_ticket_age,
+            .binder_hash = expected_hash,
+            .binder = self.binder,
+            .binder_truncated_len = self.binder_truncated_len,
+        };
+    }
+
+    fn inferHash(self: OfferedIdentity) Error!Offer {
+        const binder_hash: secret.Hash = switch (self.binder.len) {
+            // 32 bytes can be SHA-256 or SM3. The legacy parser keeps its
+            // historical SHA-256 interpretation; RFC 8998 callers should use
+            // parseClientOfferForHash(..., .sm3).
+            Sha256.digest_length => .sha256,
+            Sha384.digest_length => .sha384,
+            else => return error.InvalidPskBinder,
+        };
+        return self.forHash(binder_hash);
+    }
+};
+
+pub const ClientOffers = struct {
+    identities: []const u8,
+    binders: []const u8,
+    binder_truncated_len: usize,
+
+    pub fn iterator(self: ClientOffers) Iterator {
+        return .{
+            .identities = self.identities,
+            .binders = self.binders,
+            .binder_truncated_len = self.binder_truncated_len,
+        };
+    }
+
+    pub const Iterator = struct {
+        identities: []const u8,
+        binders: []const u8,
+        binder_truncated_len: usize,
+        identity_pos: usize = 0,
+        binder_pos: usize = 0,
+        selected_identity: u16 = selected_identity_first,
+
+        pub fn next(self: *Iterator) ?OfferedIdentity {
+            if (self.identity_pos == self.identities.len) return null;
+            const identity_len = std.mem.readInt(
+                u16,
+                self.identities[self.identity_pos..][0..2],
+                .big,
+            );
+            const identity_start = self.identity_pos + 2;
+            const identity_end = identity_start + identity_len;
+            const age_start = identity_end;
+            self.identity_pos = age_start + @sizeOf(u32);
+
+            const binder_len = self.binders[self.binder_pos];
+            const binder_start = self.binder_pos + 1;
+            const binder_end = binder_start + binder_len;
+            self.binder_pos = binder_end;
+
+            const index = self.selected_identity;
+            self.selected_identity += 1;
+            return .{
+                .selected_identity = index,
+                .identity = self.identities[identity_start..identity_end],
+                .obfuscated_ticket_age = std.mem.readInt(
+                    u32,
+                    self.identities[age_start..][0..4],
+                    .big,
+                ),
+                .binder = self.binders[binder_start..binder_end],
+                .binder_truncated_len = self.binder_truncated_len,
+            };
+        }
+    };
 };
 
 pub const TicketAgePolicy = struct {
@@ -47,6 +140,12 @@ pub const TicketAgePolicy = struct {
     lifetime_seconds: u32,
     now_ms: u64,
     tolerance_ms: u32 = 10_000,
+};
+
+pub const ClientOfferInput = struct {
+    identity: []const u8,
+    obfuscated_ticket_age: u32,
+    psk_secret: secret.Secret,
 };
 
 /// Advertise support for PSK-DHE so a server may issue a NewSessionTicket even
@@ -120,13 +219,14 @@ pub fn appendClientOfferWithEarlyData(
     psk: [Sha256.digest_length]u8,
     offer_early_data: bool,
 ) Error!void {
-    return appendClientOfferForSchedule(
-        key_schedule.Sha256,
+    var psk_secret = secret.Secret.fromSha256(psk);
+    defer psk_secret.deinit();
+    return appendClientOfferForSecret(
         client_hello,
         allocator,
         identity,
         obfuscated_ticket_age,
-        psk,
+        psk_secret,
         offer_early_data,
         null,
     );
@@ -157,13 +257,14 @@ pub fn appendClientOfferWithEarlyDataSha384(
     psk: [Sha384.digest_length]u8,
     offer_early_data: bool,
 ) Error!void {
-    return appendClientOfferForSchedule(
-        key_schedule.Sha384,
+    var psk_secret = secret.Secret.fromSha384(psk);
+    defer psk_secret.deinit();
+    return appendClientOfferForSecret(
         client_hello,
         allocator,
         identity,
         obfuscated_ticket_age,
-        psk,
+        psk_secret,
         offer_early_data,
         null,
     );
@@ -194,13 +295,14 @@ pub fn appendClientOfferWithEarlyDataSm3(
     psk: [Sm3.digest_length]u8,
     offer_early_data: bool,
 ) Error!void {
-    return appendClientOfferForSchedule(
-        key_schedule.Sm3,
+    var psk_secret = secret.Secret.fromSm3(psk);
+    defer psk_secret.deinit();
+    return appendClientOfferForSecret(
         client_hello,
         allocator,
         identity,
         obfuscated_ticket_age,
-        psk,
+        psk_secret,
         offer_early_data,
         null,
     );
@@ -218,53 +320,61 @@ pub fn appendClientOfferForSecret(
     offer_early_data: bool,
     transcript_prefix: ?tls_transcript.State,
 ) Error!void {
-    return switch (psk_secret.hash) {
-        .sha256 => appendClientOfferForSchedule(
-            key_schedule.Sha256,
-            client_hello,
-            allocator,
-            identity,
-            obfuscated_ticket_age,
-            psk_secret.sha256() catch return error.InvalidPskBinder,
-            offer_early_data,
-            transcript_prefix,
-        ),
-        .sha384 => appendClientOfferForSchedule(
-            key_schedule.Sha384,
-            client_hello,
-            allocator,
-            identity,
-            obfuscated_ticket_age,
-            psk_secret.sha384() catch return error.InvalidPskBinder,
-            offer_early_data,
-            transcript_prefix,
-        ),
-        .sm3 => appendClientOfferForSchedule(
-            key_schedule.Sm3,
-            client_hello,
-            allocator,
-            identity,
-            obfuscated_ticket_age,
-            psk_secret.sm3() catch return error.InvalidPskBinder,
-            offer_early_data,
-            transcript_prefix,
-        ),
-    };
+    return appendClientOffersForSecrets(
+        client_hello,
+        allocator,
+        &.{.{
+            .identity = identity,
+            .obfuscated_ticket_age = obfuscated_ticket_age,
+            .psk_secret = psk_secret,
+        }},
+        offer_early_data,
+        transcript_prefix,
+    );
 }
 
-fn appendClientOfferForSchedule(
-    comptime Schedule: type,
+/// Append one or more RFC 8446 PSK identities and their index-aligned binders.
+/// When early data is offered it is associated only with `offers[0]`, as
+/// required by RFC 8446 section 4.2.10.
+pub fn appendClientOffersForSecrets(
     client_hello: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
-    identity: []const u8,
-    obfuscated_ticket_age: u32,
-    psk: [Schedule.secret_len]u8,
+    offers: []const ClientOfferInput,
     offer_early_data: bool,
     transcript_prefix: ?tls_transcript.State,
 ) Error!void {
-    if (identity.len == 0 or identity.len > std.math.maxInt(u16)) {
-        return error.InvalidPskIdentity;
+    if (offers.len == 0) return error.InvalidPskIdentity;
+    var identities_len: usize = 0;
+    var binders_len: usize = 0;
+    for (offers) |offer| {
+        if (offer.identity.len == 0 or
+            offer.identity.len > std.math.maxInt(u16))
+        {
+            return error.InvalidPskIdentity;
+        }
+        identities_len = std.math.add(
+            usize,
+            identities_len,
+            2 + offer.identity.len + @sizeOf(u32),
+        ) catch return error.InvalidPskIdentity;
+        binders_len = std.math.add(
+            usize,
+            binders_len,
+            1 + offer.psk_secret.hash.len(),
+        ) catch return error.InvalidPskBinder;
     }
+    const psk_payload_len = std.math.add(
+        usize,
+        2 + identities_len,
+        2 + binders_len,
+    ) catch return error.InvalidClientHello;
+    if (identities_len > std.math.maxInt(u16) or
+        binders_len > std.math.maxInt(u16) or
+        psk_payload_len > std.math.maxInt(u16))
+    {
+        return error.InvalidClientHello;
+    }
+
     const original_len = client_hello.items.len;
     errdefer client_hello.items.len = original_len;
     const offsets = try clientHelloOffsets(client_hello.items);
@@ -287,29 +397,33 @@ fn appendClientOfferForSchedule(
         try client_hello.appendSlice(allocator, &early_data_extension);
     }
 
-    const identity_entry_len = 2 + identity.len + 4;
-    const identities_len = identity_entry_len;
-    const binders_len = 1 + Schedule.secret_len;
-    const psk_payload_len = 2 + identities_len + 2 + binders_len;
-    if (psk_payload_len > std.math.maxInt(u16)) {
-        return error.InvalidPskIdentity;
+    var extension_header: [6]u8 = undefined;
+    std.mem.writeInt(u16, extension_header[0..2], ext_pre_shared_key, .big);
+    std.mem.writeInt(u16, extension_header[2..4], @intCast(psk_payload_len), .big);
+    std.mem.writeInt(u16, extension_header[4..6], @intCast(identities_len), .big);
+    try client_hello.appendSlice(allocator, &extension_header);
+    for (offers) |offer| {
+        var identity_len: [2]u8 = undefined;
+        std.mem.writeInt(u16, &identity_len, @intCast(offer.identity.len), .big);
+        try client_hello.appendSlice(allocator, &identity_len);
+        try client_hello.appendSlice(allocator, offer.identity);
+        var age: [4]u8 = undefined;
+        std.mem.writeInt(u32, &age, offer.obfuscated_ticket_age, .big);
+        try client_hello.appendSlice(allocator, &age);
     }
-    var header: [8]u8 = undefined;
-    std.mem.writeInt(u16, header[0..2], ext_pre_shared_key, .big);
-    std.mem.writeInt(u16, header[2..4], @intCast(psk_payload_len), .big);
-    std.mem.writeInt(u16, header[4..6], @intCast(identities_len), .big);
-    std.mem.writeInt(u16, header[6..8], @intCast(identity.len), .big);
-    try client_hello.appendSlice(allocator, &header);
-    try client_hello.appendSlice(allocator, identity);
-    var age: [4]u8 = undefined;
-    std.mem.writeInt(u32, &age, obfuscated_ticket_age, .big);
-    try client_hello.appendSlice(allocator, &age);
-    var binder_header: [3]u8 = undefined;
-    std.mem.writeInt(u16, binder_header[0..2], @intCast(binders_len), .big);
-    binder_header[2] = Schedule.secret_len;
-    try client_hello.appendSlice(allocator, &binder_header);
-    const binder_offset = client_hello.items.len;
-    try client_hello.appendNTimes(allocator, 0, Schedule.secret_len);
+
+    const binder_truncated_len = client_hello.items.len;
+    var binders_header: [2]u8 = undefined;
+    std.mem.writeInt(u16, &binders_header, @intCast(binders_len), .big);
+    try client_hello.appendSlice(allocator, &binders_header);
+    for (offers) |offer| {
+        try client_hello.append(allocator, @intCast(offer.psk_secret.hash.len()));
+        try client_hello.appendNTimes(
+            allocator,
+            0,
+            offer.psk_secret.hash.len(),
+        );
+    }
 
     const added = client_hello.items.len - offsets.message_len;
     const new_extensions_len = std.math.add(
@@ -335,22 +449,64 @@ fn appendClientOfferForSchedule(
     );
     writeU24(client_hello.items[1..4], @intCast(new_body_len));
 
-    // RFC 8446 §4.2.11.2: transcript ends immediately before the binders
-    // vector's uint16 length field.
-    const binder_truncated_len = binder_offset - 3;
-    const binder_hash = try binderTranscriptHash(
-        Schedule,
-        client_hello.items[0..binder_truncated_len],
-        transcript_prefix,
-    );
-    const binder = Schedule.computeBinder(
-        psk,
-        binder_hash,
-    );
-    @memcpy(
-        client_hello.items[binder_offset..][0..Schedule.secret_len],
-        &binder,
-    );
+    var binder_pos = binder_truncated_len + 2;
+    for (offers) |offer| {
+        binder_pos += 1;
+        const binder_end = binder_pos + offer.psk_secret.hash.len();
+        try writeBinderForSecret(
+            client_hello.items[binder_pos..binder_end],
+            client_hello.items[0..binder_truncated_len],
+            offer.psk_secret,
+            transcript_prefix,
+        );
+        binder_pos = binder_end;
+    }
+}
+
+fn writeBinderForSecret(
+    output: []u8,
+    truncated_client_hello: []const u8,
+    psk_secret: secret.Secret,
+    transcript_prefix: ?tls_transcript.State,
+) Error!void {
+    switch (psk_secret.hash) {
+        .sha256 => {
+            const binder_hash = try binderTranscriptHash(
+                key_schedule.Sha256,
+                truncated_client_hello,
+                transcript_prefix,
+            );
+            const binder = key_schedule.Sha256.computeBinder(
+                psk_secret.sha256() catch return error.InvalidPskBinder,
+                binder_hash,
+            );
+            @memcpy(output, &binder);
+        },
+        .sha384 => {
+            const binder_hash = try binderTranscriptHash(
+                key_schedule.Sha384,
+                truncated_client_hello,
+                transcript_prefix,
+            );
+            const binder = key_schedule.Sha384.computeBinder(
+                psk_secret.sha384() catch return error.InvalidPskBinder,
+                binder_hash,
+            );
+            @memcpy(output, &binder);
+        },
+        .sm3 => {
+            const binder_hash = try binderTranscriptHash(
+                key_schedule.Sm3,
+                truncated_client_hello,
+                transcript_prefix,
+            );
+            const binder = key_schedule.Sm3.computeBinder(
+                psk_secret.sm3() catch return error.InvalidPskBinder,
+                binder_hash,
+            );
+            @memcpy(output, &binder);
+        },
+    }
 }
 
 fn rejectExistingPskExtensions(
@@ -389,6 +545,84 @@ pub fn parseClientOffer(client_hello: []const u8) Error!Offer {
     return parseClientOfferForExpectedHash(client_hello, null);
 }
 
+/// Parse and validate the complete RFC 8446 offered_psks vectors without
+/// allocating. Identities and binders remain paired by their wire index.
+pub fn parseClientOffers(client_hello: []const u8) Error!ClientOffers {
+    const offsets = try clientHelloOffsets(client_hello);
+    var pos = offsets.extensions_offset;
+    const extensions_end = offsets.extensions_offset + offsets.extensions_len;
+    var saw_mode_extension = false;
+    var supports_psk_dhe = false;
+    while (pos < extensions_end) {
+        if (extensions_end - pos < 4) return error.InvalidClientHello;
+        const typ = std.mem.readInt(u16, client_hello[pos..][0..2], .big);
+        const len = std.mem.readInt(u16, client_hello[pos + 2 ..][0..2], .big);
+        const payload_start = pos + 4;
+        const payload_end = std.math.add(
+            usize,
+            payload_start,
+            len,
+        ) catch return error.InvalidClientHello;
+        if (payload_end > extensions_end) return error.InvalidClientHello;
+        if (typ == ext_psk_key_exchange_modes) {
+            if (saw_mode_extension) return error.InvalidClientHello;
+            saw_mode_extension = true;
+            if (len < 2) return error.UnsupportedPskKeyExchangeMode;
+            const modes_len = client_hello[payload_start];
+            if (modes_len == 0 or @as(usize, modes_len) + 1 != len) {
+                return error.UnsupportedPskKeyExchangeMode;
+            }
+            supports_psk_dhe = std.mem.indexOfScalar(
+                u8,
+                client_hello[payload_start + 1 .. payload_end],
+                psk_dhe_ke,
+            ) != null;
+        } else if (typ == ext_pre_shared_key) {
+            if (payload_end != extensions_end) {
+                return error.PskExtensionNotLast;
+            }
+            if (!saw_mode_extension or !supports_psk_dhe) {
+                return error.UnsupportedPskKeyExchangeMode;
+            }
+            return parseOffersPayload(
+                client_hello,
+                payload_start,
+                payload_end,
+            );
+        }
+        pos = payload_end;
+    }
+    return error.MissingPskOffer;
+}
+
+pub fn findClientOfferForIdentityForHash(
+    client_hello: []const u8,
+    expected_identity: []const u8,
+    expected_hash: secret.Hash,
+) Error!?Offer {
+    var iterator = (try parseClientOffers(client_hello)).iterator();
+    while (iterator.next()) |offered| {
+        if (std.mem.eql(u8, offered.identity, expected_identity)) {
+            return try offered.forHash(expected_hash);
+        }
+    }
+    return null;
+}
+
+pub fn parseClientOfferAtForHash(
+    client_hello: []const u8,
+    selected_identity: u16,
+    expected_hash: secret.Hash,
+) Error!Offer {
+    var iterator = (try parseClientOffers(client_hello)).iterator();
+    while (iterator.next()) |offered| {
+        if (offered.selected_identity == selected_identity) {
+            return offered.forHash(expected_hash);
+        }
+    }
+    return error.InvalidPskIdentity;
+}
+
 /// Parse a ClientHello PSK extension when the selected suite's binder hash is
 /// already known. This is required for RFC 8998 SM3 because its 32-byte binder
 /// length is intentionally indistinguishable from SHA-256 on the wire.
@@ -403,44 +637,12 @@ fn parseClientOfferForExpectedHash(
     client_hello: []const u8,
     expected_hash: ?secret.Hash,
 ) Error!Offer {
-    const offsets = try clientHelloOffsets(client_hello);
-    var pos = offsets.extensions_offset;
-    const extensions_end = offsets.extensions_offset + offsets.extensions_len;
-    var saw_mode = false;
-    while (pos < extensions_end) {
-        if (extensions_end - pos < 4) return error.InvalidClientHello;
-        const typ = std.mem.readInt(u16, client_hello[pos..][0..2], .big);
-        const len = std.mem.readInt(u16, client_hello[pos + 2 ..][0..2], .big);
-        const payload_start = pos + 4;
-        const payload_end = std.math.add(
-            usize,
-            payload_start,
-            len,
-        ) catch return error.InvalidClientHello;
-        if (payload_end > extensions_end) return error.InvalidClientHello;
-        if (typ == ext_psk_key_exchange_modes) {
-            if (saw_mode) return error.InvalidClientHello;
-            if (len != 2 or client_hello[payload_start] != 1 or
-                client_hello[payload_start + 1] != psk_dhe_ke)
-            {
-                return error.UnsupportedPskKeyExchangeMode;
-            }
-            saw_mode = true;
-        } else if (typ == ext_pre_shared_key) {
-            if (payload_end != extensions_end) {
-                return error.PskExtensionNotLast;
-            }
-            if (!saw_mode) return error.UnsupportedPskKeyExchangeMode;
-            return parseOfferPayload(
-                client_hello,
-                payload_start,
-                payload_end,
-                expected_hash,
-            );
-        }
-        pos = payload_end;
-    }
-    return error.MissingPskOffer;
+    var iterator = (try parseClientOffers(client_hello)).iterator();
+    const offered = iterator.next() orelse return error.InvalidPskIdentity;
+    return if (expected_hash) |hash|
+        offered.forHash(hash)
+    else
+        offered.inferHash();
 }
 
 pub fn verifyClientOffer(
@@ -614,18 +816,28 @@ pub fn appendServerSelection(
     extensions: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
 ) Error!void {
+    return appendServerSelectionForIdentity(
+        extensions,
+        allocator,
+        selected_identity_first,
+    );
+}
+
+pub fn appendServerSelectionForIdentity(
+    extensions: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    selected_identity: u16,
+) Error!void {
     var extension: [6]u8 = undefined;
     std.mem.writeInt(u16, extension[0..2], ext_pre_shared_key, .big);
     std.mem.writeInt(u16, extension[2..4], 2, .big);
-    std.mem.writeInt(u16, extension[4..6], selected_identity_first, .big);
+    std.mem.writeInt(u16, extension[4..6], selected_identity, .big);
     try extensions.appendSlice(allocator, &extension);
 }
 
 pub fn parseServerSelection(payload: []const u8) Error!u16 {
     if (payload.len != 2) return error.InvalidServerHello;
-    const selected = std.mem.readInt(u16, payload[0..2], .big);
-    if (selected != selected_identity_first) return error.InvalidServerHello;
-    return selected;
+    return std.mem.readInt(u16, payload[0..2], .big);
 }
 
 pub fn clientOfferedEarlyData(client_hello: []const u8) Error!bool {
@@ -708,76 +920,77 @@ pub fn deriveClientEarlyTrafficSecret(
     );
 }
 
-fn parseOfferPayload(
+fn parseOffersPayload(
     client_hello: []const u8,
     payload_start: usize,
     payload_end: usize,
-    expected_hash: ?secret.Hash,
-) Error!Offer {
+) Error!ClientOffers {
     var pos = payload_start;
     if (payload_end - pos < 2) return error.InvalidClientHello;
     const identities_len =
         std.mem.readInt(u16, client_hello[pos..][0..2], .big);
     pos += 2;
+    const identities_start = pos;
     const identities_end = std.math.add(
         usize,
         pos,
         identities_len,
     ) catch return error.InvalidPskIdentity;
-    if (identities_end > payload_end or identities_end - pos < 6) {
+    if (identities_end > payload_end or identities_len < 7) {
         return error.InvalidPskIdentity;
     }
-    const identity_len =
-        std.mem.readInt(u16, client_hello[pos..][0..2], .big);
-    pos += 2;
-    const identity_end = std.math.add(
-        usize,
-        pos,
-        identity_len,
-    ) catch return error.InvalidPskIdentity;
-    const age_end = std.math.add(
-        usize,
-        identity_end,
-        @sizeOf(u32),
-    ) catch return error.InvalidPskIdentity;
-    if (identity_len == 0 or age_end > identities_end) {
-        return error.InvalidPskIdentity;
+    var identity_count: usize = 0;
+    while (pos < identities_end) : (identity_count += 1) {
+        if (identities_end - pos < 2) return error.InvalidPskIdentity;
+        const identity_len =
+            std.mem.readInt(u16, client_hello[pos..][0..2], .big);
+        pos += 2;
+        const identity_end = std.math.add(
+            usize,
+            pos,
+            identity_len,
+        ) catch return error.InvalidPskIdentity;
+        const age_end = std.math.add(
+            usize,
+            identity_end,
+            @sizeOf(u32),
+        ) catch return error.InvalidPskIdentity;
+        if (identity_len == 0 or age_end > identities_end) {
+            return error.InvalidPskIdentity;
+        }
+        pos = age_end;
     }
-    const identity = client_hello[pos..identity_end];
-    pos = identity_end;
-    const age = std.mem.readInt(u32, client_hello[pos..][0..4], .big);
-    pos += 4;
-    // This compact implementation offers exactly one identity.
     if (pos != identities_end) return error.InvalidPskIdentity;
-    if (payload_end - pos < 3) return error.InvalidPskBinder;
+    if (payload_end - pos < 2) return error.InvalidPskBinder;
+
+    const binder_truncated_len = pos;
     const binders_len =
         std.mem.readInt(u16, client_hello[pos..][0..2], .big);
-    const binder_truncated_len = pos;
     pos += 2;
-    const binder_len = client_hello[pos];
-    const binder_hash: secret.Hash = if (expected_hash) |hash| blk: {
-        if (binder_len != hash.len()) return error.InvalidPskBinder;
-        break :blk hash;
-    } else switch (binder_len) {
-        // 32 bytes can be SHA-256 or SM3. The legacy parser keeps its
-        // historical SHA-256 interpretation; RFC 8998 callers should use
-        // parseClientOfferForHash(..., .sm3).
-        Sha256.digest_length => .sha256,
-        Sha384.digest_length => .sha384,
-        else => return error.InvalidPskBinder,
-    };
-    if (binders_len != 1 + binder_len or
-        payload_end - pos != binders_len)
-    {
+    const binders_start = pos;
+    const binders_end = std.math.add(
+        usize,
+        binders_start,
+        binders_len,
+    ) catch return error.InvalidPskBinder;
+    if (binders_len < 33 or binders_end != payload_end) {
         return error.InvalidPskBinder;
     }
-    pos += 1;
-    const binder = client_hello[pos..][0..binder_len];
+    var binder_count: usize = 0;
+    while (pos < binders_end) : (binder_count += 1) {
+        const binder_len = client_hello[pos];
+        pos += 1;
+        if (binder_len < 32 or binder_len > binders_end - pos) {
+            return error.InvalidPskBinder;
+        }
+        pos += binder_len;
+    }
+    if (pos != binders_end or binder_count != identity_count) {
+        return error.InvalidPskBinder;
+    }
     return .{
-        .identity = identity,
-        .obfuscated_ticket_age = age,
-        .binder_hash = binder_hash,
-        .binder = binder,
+        .identities = client_hello[identities_start..identities_end],
+        .binders = client_hello[binders_start..binders_end],
         .binder_truncated_len = binder_truncated_len,
     };
 }
@@ -939,6 +1152,88 @@ test "TLS PSK appends and verifies a mandatory-last binder" {
     );
 }
 
+test "TLS PSK preserves multiple identity and binder indexes" {
+    const allocator = std.testing.allocator;
+    var hello = try baseClientHello(allocator);
+    defer hello.deinit(allocator);
+    var first_secret = secret.Secret.fromSha384([_]u8{0x31} ** 48);
+    defer first_secret.deinit();
+    var second_secret = secret.Secret.fromSha256([_]u8{0x32} ** 32);
+    defer second_secret.deinit();
+    try appendClientOffersForSecrets(
+        &hello,
+        allocator,
+        &.{
+            .{
+                .identity = "first-ticket",
+                .obfuscated_ticket_age = 11,
+                .psk_secret = first_secret,
+            },
+            .{
+                .identity = "second-ticket",
+                .obfuscated_ticket_age = 22,
+                .psk_secret = second_secret,
+            },
+        },
+        true,
+        null,
+    );
+
+    var iterator = (try parseClientOffers(hello.items)).iterator();
+    const first_offered = iterator.next().?;
+    try std.testing.expectEqual(@as(u16, 0), first_offered.selected_identity);
+    try std.testing.expectEqualStrings("first-ticket", first_offered.identity);
+    try std.testing.expectEqual(@as(u32, 11), first_offered.obfuscated_ticket_age);
+    const first = try first_offered.forHash(.sha384);
+    try verifyClientOfferForSecret(
+        hello.items,
+        first,
+        first.identity,
+        first_secret,
+        null,
+    );
+
+    const second_offered = iterator.next().?;
+    try std.testing.expectEqual(@as(u16, 1), second_offered.selected_identity);
+    try std.testing.expectEqualStrings("second-ticket", second_offered.identity);
+    try std.testing.expectEqual(@as(u32, 22), second_offered.obfuscated_ticket_age);
+    const second = try second_offered.forHash(.sha256);
+    try verifyClientOfferForSecret(
+        hello.items,
+        second,
+        second.identity,
+        second_secret,
+        null,
+    );
+    try std.testing.expect(iterator.next() == null);
+
+    const selected = (try findClientOfferForIdentityForHash(
+        hello.items,
+        "second-ticket",
+        .sha256,
+    )).?;
+    try std.testing.expectEqual(@as(u16, 1), selected.selected_identity);
+
+    var malformed = try hello.clone(allocator);
+    defer malformed.deinit(allocator);
+    const second_binder_len_offset =
+        @intFromPtr(second_offered.binder.ptr) -
+        @intFromPtr(hello.items.ptr) - 1;
+    malformed.items[second_binder_len_offset] -= 1;
+    try std.testing.expectError(
+        error.InvalidPskBinder,
+        parseClientOffers(malformed.items),
+    );
+
+    var server_extensions: std.ArrayList(u8) = .empty;
+    defer server_extensions.deinit(allocator);
+    try appendServerSelectionForIdentity(&server_extensions, allocator, 1);
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        try parseServerSelection(server_extensions.items[4..]),
+    );
+}
+
 test "TLS PSK binder includes the HelloRetryRequest transcript prefix" {
     const allocator = std.testing.allocator;
     var second_hello = try baseClientHello(allocator);
@@ -1050,6 +1345,7 @@ test "TLS PSK SM3 binder requires hash-aware parsing" {
 
 test "TLS PSK rejects malformed modes and non-last selection" {
     const allocator = std.testing.allocator;
+    const offered_psk = [_]u8{0x33} ** Sha256.digest_length;
     var hello = try baseClientHello(allocator);
     defer hello.deinit(allocator);
     try appendClientOffer(
@@ -1057,7 +1353,7 @@ test "TLS PSK rejects malformed modes and non-last selection" {
         allocator,
         "ticket",
         0,
-        [_]u8{0x33} ** Sha256.digest_length,
+        offered_psk,
     );
     const offsets = try clientHelloOffsets(hello.items);
     // Locate psk_key_exchange_modes and replace psk_dhe_ke with psk_ke.
@@ -1076,6 +1372,48 @@ test "TLS PSK rejects malformed modes and non-last selection" {
         parseClientOffer(hello.items),
     );
 
+    var multi_mode_hello = try baseClientHello(allocator);
+    defer multi_mode_hello.deinit(allocator);
+    try appendClientOffer(
+        &multi_mode_hello,
+        allocator,
+        "ticket",
+        0,
+        offered_psk,
+    );
+    const multi_offsets = try clientHelloOffsets(multi_mode_hello.items);
+    pos = multi_offsets.extensions_offset;
+    while (pos < multi_mode_hello.items.len) {
+        const typ = std.mem.readInt(
+            u16,
+            multi_mode_hello.items[pos..][0..2],
+            .big,
+        );
+        const len = std.mem.readInt(
+            u16,
+            multi_mode_hello.items[pos + 2 ..][0..2],
+            .big,
+        );
+        if (typ == ext_psk_key_exchange_modes) break;
+        pos += 4 + len;
+    }
+    var both_modes: std.ArrayList(u8) = .empty;
+    defer both_modes.deinit(allocator);
+    try both_modes.appendSlice(allocator, multi_mode_hello.items[0 .. pos + 2]);
+    try both_modes.appendSlice(allocator, &.{ 0, 3, 2, 0, psk_dhe_ke });
+    try both_modes.appendSlice(allocator, multi_mode_hello.items[pos + 6 ..]);
+    std.mem.writeInt(
+        u16,
+        both_modes.items[multi_offsets.extensions_len_offset..][0..2],
+        @intCast(multi_offsets.extensions_len + 1),
+        .big,
+    );
+    writeU24(both_modes.items[1..4], @intCast(multi_offsets.body_len + 1));
+    try std.testing.expectEqualStrings(
+        "ticket",
+        (try parseClientOffer(both_modes.items)).identity,
+    );
+
     var server_extensions: std.ArrayList(u8) = .empty;
     defer server_extensions.deinit(allocator);
     try appendServerSelection(&server_extensions, allocator);
@@ -1083,9 +1421,13 @@ test "TLS PSK rejects malformed modes and non-last selection" {
         selected_identity_first,
         try parseServerSelection(server_extensions.items[4..]),
     );
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        try parseServerSelection(&.{ 0, 1 }),
+    );
     try std.testing.expectError(
         error.InvalidServerHello,
-        parseServerSelection(&.{ 0, 1 }),
+        parseServerSelection(&.{1}),
     );
 }
 

@@ -428,12 +428,14 @@ pub fn writeClientCryptoFlight(
     const ech_status = try clientHelloEchStatus(parsed_client);
     if (ech_status == .rejected) return error.UnsupportedEch;
     const ech_accepted = ech_status == .accepted;
+    var offered_resumption: ?psk.Offer = null;
     if (options.resumption) |resumption| {
         if (parsed_client.pre_shared_key == null) return error.MissingPskOffer;
-        const offer = try psk.parseClientOfferForHash(
+        const offer = try psk.findClientOfferForIdentityForHash(
             options.client_hello_bytes,
+            resumption.identity,
             resumption.secret.hash,
-        );
+        ) orelse return error.InvalidPskIdentity;
         try psk.verifyClientOfferForSecret(
             options.client_hello_bytes,
             offer,
@@ -444,6 +446,7 @@ pub fn writeClientCryptoFlight(
         if (resumption.age_policy) |age_policy| {
             try psk.validateTicketAge(offer, age_policy);
         }
+        offered_resumption = offer;
     } else if (parsed_client.pre_shared_key != null) {
         return error.MissingPskConfiguration;
     }
@@ -479,10 +482,13 @@ pub fn writeClientCryptoFlight(
     {
         return error.ServerSelectedUnofferedGroup;
     }
-    const resumed = parsed_server.selected_psk_identity != null;
-    if (resumed and options.resumption == null) {
-        return error.MissingPskConfiguration;
-    }
+    const resumed = if (parsed_server.selected_psk_identity) |identity| blk: {
+        if (options.resumption == null) return error.MissingPskConfiguration;
+        if (identity != offered_resumption.?.selected_identity) {
+            return error.InvalidServerHello;
+        }
+        break :blk true;
+    } else false;
     if (options.retry) |retry| {
         try validateRetryState(
             retry,
@@ -808,6 +814,7 @@ pub fn writeServerCryptoFlight(
         );
     }
     var psk_age_within_tolerance = true;
+    var selected_psk_identity: ?u16 = null;
     const selected_psk: ?secret.Secret = if (ech_rejected)
         null
     else if (options.resumption) |resumption| blk: {
@@ -816,13 +823,11 @@ pub fn writeServerCryptoFlight(
         {
             break :blk null;
         }
-        const offer = try psk.parseClientOfferForHash(
+        const offer = try psk.findClientOfferForIdentityForHash(
             options.client_hello_bytes,
+            resumption.identity,
             selection.suite.hash(),
-        );
-        if (!std.mem.eql(u8, offer.identity, resumption.identity)) {
-            break :blk null;
-        }
+        ) orelse break :blk null;
         try psk.verifyClientOfferForSecret(
             options.client_hello_bytes,
             offer,
@@ -836,6 +841,9 @@ pub fn writeServerCryptoFlight(
                 age_policy,
             );
         }
+        selected_psk_identity = offer.selected_identity;
+        psk_age_within_tolerance = psk_age_within_tolerance and
+            offer.selected_identity == psk.selected_identity_first;
         break :blk resumption.secret;
     } else null;
     if (options.accept_early_data and
@@ -882,10 +890,7 @@ pub fn writeServerCryptoFlight(
         .cipher_suite = selection.suite,
         .key_share_group = selection.key_share_group,
         .key_share = options.server_key_share,
-        .selected_psk_identity = if (selected_psk != null)
-            psk.selected_identity_first
-        else
-            null,
+        .selected_psk_identity = selected_psk_identity,
     });
     if (ech_accepted) {
         const confirmation_prefix = if (options.retry) |retry|
@@ -2970,6 +2975,111 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
         stale_client_crypto.items,
     );
     defer stale_verified_client.deinit();
+
+    var unknown_secret = secret.Secret.fromSha256([_]u8{0xb6} ** 32);
+    defer unknown_secret.deinit();
+    var multi_hello: std.ArrayList(u8) = .empty;
+    defer multi_hello.deinit(allocator);
+    try client_hello.write(&multi_hello, allocator, .{
+        .random = [_]u8{0xb7} ** 32,
+        .session_id = "quic-psk-multi",
+        .server_name = "quic.example",
+        .x25519_public_key = [_]u8{0xb8} ** 32,
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .alpn_protocols = &.{"h3"},
+        .quic_transport_parameters = &.{ 1, 2, 3 },
+        .server_certificate_types = &.{.raw_public_key},
+        .application_settings_protocols = &.{"h3"},
+    });
+    try psk.appendClientOffersForSecrets(
+        &multi_hello,
+        allocator,
+        &.{
+            .{
+                .identity = "unknown-ticket",
+                .obfuscated_ticket_age = 17,
+                .psk_secret = unknown_secret,
+            },
+            .{
+                .identity = client_resumption.identity,
+                .obfuscated_ticket_age = 17,
+                .psk_secret = client_resumption.secret,
+            },
+        },
+        true,
+        null,
+    );
+    var multi_initial: std.ArrayList(u8) = .empty;
+    defer multi_initial.deinit(allocator);
+    var multi_server_crypto: std.ArrayList(u8) = .empty;
+    defer multi_server_crypto.deinit(allocator);
+    var multi_server = try writeServerCryptoFlight(
+        &multi_initial,
+        &multi_server_crypto,
+        allocator,
+        .{
+            .client_hello_bytes = multi_hello.items,
+            .parsed_client_hello = try client_hello.parse(multi_hello.items),
+            .policy = .{
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .alpn_protocols = &.{"h3"},
+                .quic_transport_parameters = &.{ 4, 5, 6 },
+                .server_certificate_type = .raw_public_key,
+                .application_settings = &.{.{
+                    .protocol = "h3",
+                    .settings = "quic-server-settings",
+                }},
+            },
+            .server_random = [_]u8{0xb9} ** 32,
+            .server_key_share = &([_]u8{0xba} ** 32),
+            .shared_secret = &shared_secret,
+            .certificate_chain = &.{&public_key_spki},
+            .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+            .resumption = server_resumption,
+            .accept_early_data = true,
+        },
+    );
+    defer multi_server.deinit();
+    try std.testing.expect(multi_server.resumed);
+    try std.testing.expect(multi_server.early_data_limit == null);
+    try std.testing.expect(multi_server.client_early_packet_keys == null);
+    const parsed_multi_server = try server_hello.parseServerHello(
+        multi_initial.items,
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 1),
+        parsed_multi_server.selected_psk_identity,
+    );
+
+    var multi_client_crypto: std.ArrayList(u8) = .empty;
+    defer multi_client_crypto.deinit(allocator);
+    var multi_client = try writeClientCryptoFlight(
+        &multi_client_crypto,
+        allocator,
+        .{
+            .client_hello_bytes = multi_hello.items,
+            .server_hello_bytes = multi_initial.items,
+            .server_handshake_crypto = multi_server_crypto.items,
+            .shared_secret = &shared_secret,
+            .server_verifier = .{},
+            .server_name = "quic.example",
+            .server_certificate_type = .raw_public_key,
+            .application_settings = &.{.{
+                .protocol = "h3",
+                .settings = "quic-client-settings",
+            }},
+            .resumption = client_resumption,
+        },
+    );
+    defer multi_client.deinit();
+    try std.testing.expect(multi_client.resumed);
+    try std.testing.expect(!multi_client.verified.early_data_accepted);
+    var multi_verified_client = try verifyClientCryptoFlight(
+        allocator,
+        &multi_server,
+        multi_client_crypto.items,
+    );
+    defer multi_verified_client.deinit();
 
     var keyring = try ticket_keyring.Keyring.init(.{
         .id = 19,

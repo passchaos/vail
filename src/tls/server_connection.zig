@@ -520,6 +520,7 @@ pub fn ServerConnection(
 
         const SelectedResumption = struct {
             psk_secret: secret.Secret,
+            selected_identity: u16,
             max_early_data_size: ?u32,
             issued_at_ms: ?u64,
             lifetime_seconds: ?u32,
@@ -1059,8 +1060,8 @@ pub fn ServerConnection(
                         selected.psk_secret
                     else
                         null,
-                    .selected_psk_identity = if (selected_psk != null)
-                        psk.selected_identity_first
+                    .selected_psk_identity = if (selected_psk) |selected|
+                        selected.selected_identity
                     else
                         null,
                     .accept_early_data = early_limit != null,
@@ -1190,17 +1191,16 @@ pub fn ServerConnection(
             const configured = self.config.resumption orelse return null;
             const parsed = try client_hello.parse(client_hello_bytes);
             if (parsed.pre_shared_key == null) return null;
-            const offer = try psk.parseClientOfferForHash(
-                client_hello_bytes,
-                selection.suite.hash(),
-            );
             return switch (configured) {
                 .fixed => |fixed| blk: {
-                    if (!std.mem.eql(u8, offer.identity, fixed.identity) or
-                        fixed.secret.hash != selection.suite.hash())
-                    {
+                    if (fixed.secret.hash != selection.suite.hash()) {
                         break :blk null;
                     }
+                    const offer = try psk.findClientOfferForIdentityForHash(
+                        client_hello_bytes,
+                        fixed.identity,
+                        selection.suite.hash(),
+                    ) orelse break :blk null;
                     try psk.verifyClientOfferForSecret(
                         client_hello_bytes,
                         offer,
@@ -1208,12 +1208,16 @@ pub fn ServerConnection(
                         fixed.secret,
                         binder_prefix,
                     );
-                    const age_within_tolerance = if (fixed.age_policy) |age_policy|
+                    const reported_age_fresh = if (fixed.age_policy) |age_policy|
                         try psk.ticketAgeWithinTolerance(offer, age_policy)
                     else
                         true;
+                    const age_within_tolerance =
+                        offer.selected_identity == psk.selected_identity_first and
+                        reported_age_fresh;
                     break :blk .{
                         .psk_secret = fixed.secret,
+                        .selected_identity = offer.selected_identity,
                         .max_early_data_size = fixed.max_early_data_size,
                         .issued_at_ms = if (fixed.age_policy) |age|
                             age.issued_at_ms
@@ -1228,63 +1232,80 @@ pub fn ServerConnection(
                     };
                 },
                 .tickets => |tickets| blk: {
-                    var opened = tickets.keyring.openSecretWithApplicationSettings(
-                        self.config.allocator,
-                        offer.identity,
-                        tickets.server_id,
-                        selection.alpn_protocol orelse "",
-                        tickets.now_ms,
-                    ) catch break :blk null;
-                    defer opened.deinit();
-                    if (opened.cipher_suite_wire !=
-                        selection.suite.wireValue() or
-                        opened.secret.hash != selection.suite.hash())
-                    {
-                        break :blk null;
-                    }
-                    try psk.verifyClientOfferForSecret(
+                    var offers = (try psk.parseClientOffers(
                         client_hello_bytes,
-                        offer,
-                        offer.identity,
-                        opened.secret,
-                        binder_prefix,
-                    );
-                    const age_within_tolerance = try psk.ticketAgeWithinTolerance(offer, .{
-                        .age_add = opened.age_add,
-                        .issued_at_ms = opened.issued_at_ms,
-                        .lifetime_seconds = opened.lifetime_seconds,
-                        .now_ms = tickets.now_ms,
-                    });
-                    const selected_application_settings = if (opened.application_settings_codepoint) |codepoint| application_settings.Session{
-                        .codepoint = codepoint,
-                        .local = try self.config.allocator.dupe(
-                            u8,
-                            opened.local_application_settings.?,
-                        ),
-                        .peer = undefined,
-                    } else null;
-                    errdefer if (selected_application_settings) |settings| {
-                        self.config.allocator.free(settings.local);
-                    };
-                    var owned_application_settings = selected_application_settings;
-                    if (owned_application_settings) |*settings| {
-                        settings.peer = try self.config.allocator.dupe(
-                            u8,
-                            opened.peer_application_settings.?,
+                    )).iterator();
+                    while (offers.next()) |offered| {
+                        var opened = tickets.keyring
+                            .openSecretWithApplicationSettings(
+                            self.config.allocator,
+                            offered.identity,
+                            tickets.server_id,
+                            selection.alpn_protocol orelse "",
+                            tickets.now_ms,
+                        ) catch |err| {
+                            if (err == error.OutOfMemory) {
+                                return error.OutOfMemory;
+                            }
+                            continue;
+                        };
+                        defer opened.deinit();
+                        if (opened.cipher_suite_wire !=
+                            selection.suite.wireValue() or
+                            opened.secret.hash != selection.suite.hash())
+                        {
+                            continue;
+                        }
+                        const offer = try offered.forHash(opened.secret.hash);
+                        try psk.verifyClientOfferForSecret(
+                            client_hello_bytes,
+                            offer,
+                            offer.identity,
+                            opened.secret,
+                            binder_prefix,
                         );
+                        const reported_age_fresh =
+                            try psk.ticketAgeWithinTolerance(offer, .{
+                                .age_add = opened.age_add,
+                                .issued_at_ms = opened.issued_at_ms,
+                                .lifetime_seconds = opened.lifetime_seconds,
+                                .now_ms = tickets.now_ms,
+                            });
+                        const selected_application_settings = if (opened.application_settings_codepoint) |codepoint| application_settings.Session{
+                            .codepoint = codepoint,
+                            .local = try self.config.allocator.dupe(
+                                u8,
+                                opened.local_application_settings.?,
+                            ),
+                            .peer = undefined,
+                        } else null;
+                        errdefer if (selected_application_settings) |settings| {
+                            self.config.allocator.free(settings.local);
+                        };
+                        var owned_application_settings = selected_application_settings;
+                        if (owned_application_settings) |*settings| {
+                            settings.peer = try self.config.allocator.dupe(
+                                u8,
+                                opened.peer_application_settings.?,
+                            );
+                        }
+                        break :blk .{
+                            .psk_secret = opened.secret,
+                            .selected_identity = offered.selected_identity,
+                            .max_early_data_size = opened.max_early_data_size,
+                            .issued_at_ms = opened.issued_at_ms,
+                            .lifetime_seconds = opened.lifetime_seconds,
+                            .age_within_tolerance = offered.selected_identity ==
+                                psk.selected_identity_first and
+                                reported_age_fresh,
+                            .application_settings = owned_application_settings,
+                            .settings_allocator = if (owned_application_settings != null)
+                                self.config.allocator
+                            else
+                                null,
+                        };
                     }
-                    break :blk .{
-                        .psk_secret = opened.secret,
-                        .max_early_data_size = opened.max_early_data_size,
-                        .issued_at_ms = opened.issued_at_ms,
-                        .lifetime_seconds = opened.lifetime_seconds,
-                        .age_within_tolerance = age_within_tolerance,
-                        .application_settings = owned_application_settings,
-                        .settings_allocator = if (owned_application_settings != null)
-                            self.config.allocator
-                        else
-                            null,
-                    };
+                    break :blk null;
                 },
             };
         }
@@ -2131,6 +2152,122 @@ test "identity set honors certificate signature algorithms separately" {
     try std.testing.expect((try identities.resolver().resolve(
         try client_hello.parse(encoded.items),
     )) != null);
+}
+
+test "server selects a later PSK identity and rejects its 0-RTT" {
+    const allocator = std.testing.allocator;
+    const client_private = [_]u8{0x21} ** key_exchange.secret_len;
+    const client_public = try key_exchange.publicKey(client_private);
+    var hello: std.ArrayList(u8) = .empty;
+    defer hello.deinit(allocator);
+    try client_hello.write(&hello, allocator, .{
+        .random = [_]u8{0x22} ** 32,
+        .server_name = "example.com",
+        .x25519_public_key = client_public,
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .alpn_protocols = &.{"h2"},
+    });
+    var unknown_secret = secret.Secret.fromSha256([_]u8{0x23} ** 32);
+    defer unknown_secret.deinit();
+    const selected_secret = secret.Secret.fromSha256([_]u8{0x24} ** 32);
+    var keyring = try ticket_keyring.Keyring.init(.{
+        .id = 31,
+        .secret = [_]u8{0x28} ** ticket_keyring.key_len,
+    });
+    defer keyring.deinit();
+    const selected_identity = try keyring.sealSecret(
+        [_]u8{0x29} ** ticket_keyring.nonce_len,
+        "example.com",
+        "h2",
+        .{
+            .secret = selected_secret,
+            .age_add = 7,
+            .issued_at_ms = 1000,
+            .lifetime_seconds = 60,
+            .cipher_suite_wire = cipher_suite.Suite.aes_128_gcm_sha256.wireValue(),
+            .max_early_data_size = 1024,
+        },
+    );
+    try psk.appendClientOffersForSecrets(
+        &hello,
+        allocator,
+        &.{
+            .{
+                .identity = "unknown-ticket",
+                .obfuscated_ticket_age = 11,
+                .psk_secret = unknown_secret,
+            },
+            .{
+                .identity = &selected_identity,
+                .obfuscated_ticket_age = 17,
+                .psk_secret = selected_secret,
+            },
+        },
+        true,
+        null,
+    );
+
+    var hello_record: [record.header_len + max_client_hello_for_test]u8 =
+        undefined;
+    hello_record[0] = record.content_type_handshake;
+    hello_record[1..3].* = .{ 3, 1 };
+    std.mem.writeInt(u16, hello_record[3..5], @intCast(hello.items.len), .big);
+    @memcpy(hello_record[record.header_len..][0..hello.items.len], hello.items);
+
+    const signing_key = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0x25} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const certificate = signing_key.public_key.toBytes();
+    var material = key_exchange.ServerKeyMaterial{
+        .x25519 = [_]u8{0x26} ** key_exchange.secret_len,
+    };
+    var replay_cache = early_data.ReplayCache(4){};
+    var server = ServerConnection(max_client_hello_for_test, 256).init(.{
+        .allocator = allocator,
+        .policy = .{
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .groups = &.{key_exchange.named_group_x25519},
+            .alpn_protocols = &.{"h2"},
+        },
+        .server_random = [_]u8{0x27} ** 32,
+        .key_material = &material,
+        .certificate_chain = &.{&certificate},
+        .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+        .resumption = .{ .tickets = .{
+            .keyring = &keyring,
+            .server_id = "example.com",
+            .now_ms = 1010,
+        } },
+        .early_data = .{
+            .replay_guard = replay_cache.guard(),
+            .max_bytes = 1024,
+        },
+    });
+    defer server.deinit();
+    var flight: std.ArrayList(u8) = .empty;
+    defer flight.deinit(allocator);
+    const received = try server.receive(
+        hello_record[0 .. record.header_len + hello.items.len],
+        &flight,
+    );
+    switch (received.event.?) {
+        .server_flight => {},
+        else => return error.ExpectedServerFlight,
+    }
+    try std.testing.expect(server.pending.resumed);
+    try std.testing.expect(!server.pending.early_data_accepted);
+    const server_hello_len = 4 +
+        ((@as(usize, flight.items[1]) << 16) |
+            (@as(usize, flight.items[2]) << 8) |
+            flight.items[3]);
+    const parsed_server = try server_hello.parseServerHello(
+        flight.items[0..server_hello_len],
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 1),
+        parsed_server.selected_psk_identity,
+    );
 }
 
 test "server connection incrementally establishes X25519 TLS" {
