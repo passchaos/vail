@@ -409,7 +409,7 @@ pub const Keyring = struct {
         if (now_ms < opened.issued_at_ms) return error.ExpiredTicket;
         const lifetime_ms = @as(u64, opened.lifetime_seconds) *
             std.time.ms_per_s;
-        if (now_ms - opened.issued_at_ms > lifetime_ms) {
+        if (now_ms - opened.issued_at_ms >= lifetime_ms) {
             return error.ExpiredTicket;
         }
         return opened;
@@ -712,7 +712,7 @@ fn parseSecretPlaintext(
     );
     if (now_ms < opened.issued_at_ms) return error.ExpiredTicket;
     const lifetime_ms = @as(u64, opened.lifetime_seconds) * std.time.ms_per_s;
-    if (now_ms - opened.issued_at_ms > lifetime_ms) {
+    if (now_ms - opened.issued_at_ms >= lifetime_ms) {
         return error.ExpiredTicket;
     }
     return opened;
@@ -845,6 +845,15 @@ test "stateless ticket preserves TLS SM4-CCM suite binding" {
         original.max_early_data_size,
         opened.max_early_data_size,
     );
+    try std.testing.expectError(
+        error.ExpiredTicket,
+        keyring.openSecret(
+            &encoded,
+            "sm4-ccm.example",
+            "h2",
+            90_000,
+        ),
+    );
 }
 
 test "stateless ticket round trip preserves bounded ALPS state" {
@@ -896,6 +905,16 @@ test "stateless ticket round trip preserves bounded ALPS state" {
     try std.testing.expectEqualStrings(
         "client-settings",
         opened.peer_application_settings.?,
+    );
+    try std.testing.expectError(
+        error.ExpiredTicket,
+        keyring.openSecretWithApplicationSettings(
+            allocator,
+            encoded,
+            "example.com",
+            "h2",
+            70_000,
+        ),
     );
     try std.testing.expectError(
         error.AuthenticationFailed,

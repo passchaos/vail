@@ -300,7 +300,10 @@ The current foundation provides:
   codec preserves any RFC 8446 `max_early_data_size`, including finite and zero
   limits, while QUIC entry points separately enforce RFC 9001's `0xffffffff`
   sentinel. A zero-lifetime ticket remains valid on the wire but returns a
-  distinct discard result before any cache allocation. RFC 9149 ticket
+  distinct discard result before any cache allocation. Client caches, PSK age
+  validation, and both stateless ticket formats agree that a ticket expires at
+  the exact advertised lifetime boundary and reject clocks before issuance.
+  RFC 9149 ticket
   requests distinguish new and resumed handshakes,
   advertise the server's bounded expected count, and expose a decrementing
   issuance budget. Stream 0-RTT installs separate early traffic keys, enforces the

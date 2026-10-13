@@ -63,7 +63,7 @@ pub const Cached = struct {
     ) Error!u32 {
         if (now_ms < self.received_at_ms) return error.TicketNotYetValid;
         const age = now_ms - self.received_at_ms;
-        if (age > @as(u64, self.lifetime_seconds) * std.time.ms_per_s or
+        if (age >= @as(u64, self.lifetime_seconds) * std.time.ms_per_s or
             age > std.math.maxInt(u32))
         {
             return error.ExpiredTicket;
@@ -539,9 +539,17 @@ test "authenticated NewSessionTicket becomes an owned client cache entry" {
         @as(u32, 1_017),
         try cached.obfuscatedTicketAge(11_000),
     );
+    try std.testing.expectEqual(
+        @as(u32, 60_016),
+        try cached.obfuscatedTicketAge(69_999),
+    );
+    try std.testing.expectError(
+        error.TicketNotYetValid,
+        cached.obfuscatedTicketAge(9_999),
+    );
     try std.testing.expectError(
         error.ExpiredTicket,
-        cached.obfuscatedTicketAge(70_001),
+        cached.obfuscatedTicketAge(70_000),
     );
 }
 

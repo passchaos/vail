@@ -579,7 +579,7 @@ pub fn validateTicketAge(
     const actual_age = policy.now_ms - policy.issued_at_ms;
     const lifetime_ms = @as(u64, policy.lifetime_seconds) *
         std.time.ms_per_s;
-    if (actual_age > lifetime_ms or actual_age > std.math.maxInt(u32)) {
+    if (actual_age >= lifetime_ms or actual_age > std.math.maxInt(u32)) {
         return error.ExpiredPsk;
     }
     const offered_age = offer.obfuscated_ticket_age -% policy.age_add;
@@ -1174,8 +1174,17 @@ test "TLS PSK validates ticket age, lifetime, and skew" {
         validateTicketAge(offer, .{
             .age_add = 17,
             .issued_at_ms = 1000,
+            .lifetime_seconds = 10,
+            .now_ms = 999,
+        }),
+    );
+    try std.testing.expectError(
+        error.ExpiredPsk,
+        validateTicketAge(offer, .{
+            .age_add = 17,
+            .issued_at_ms = 1000,
             .lifetime_seconds = 1,
-            .now_ms = 2001,
+            .now_ms = 2000,
         }),
     );
 }
