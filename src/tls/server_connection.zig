@@ -523,6 +523,7 @@ pub fn ServerConnection(
             max_early_data_size: ?u32,
             issued_at_ms: ?u64,
             lifetime_seconds: ?u32,
+            age_within_tolerance: bool,
             application_settings: ?application_settings.Session = null,
             settings_allocator: ?std.mem.Allocator = null,
 
@@ -1207,9 +1208,10 @@ pub fn ServerConnection(
                         fixed.secret,
                         binder_prefix,
                     );
-                    if (fixed.age_policy) |age_policy| {
-                        try psk.validateTicketAge(offer, age_policy);
-                    }
+                    const age_within_tolerance = if (fixed.age_policy) |age_policy|
+                        try psk.ticketAgeWithinTolerance(offer, age_policy)
+                    else
+                        true;
                     break :blk .{
                         .psk_secret = fixed.secret,
                         .max_early_data_size = fixed.max_early_data_size,
@@ -1221,6 +1223,7 @@ pub fn ServerConnection(
                             age.lifetime_seconds
                         else
                             null,
+                        .age_within_tolerance = age_within_tolerance,
                         .application_settings = fixed.application_settings,
                     };
                 },
@@ -1246,7 +1249,7 @@ pub fn ServerConnection(
                         opened.secret,
                         binder_prefix,
                     );
-                    try psk.validateTicketAge(offer, .{
+                    const age_within_tolerance = try psk.ticketAgeWithinTolerance(offer, .{
                         .age_add = opened.age_add,
                         .issued_at_ms = opened.issued_at_ms,
                         .lifetime_seconds = opened.lifetime_seconds,
@@ -1275,6 +1278,7 @@ pub fn ServerConnection(
                         .max_early_data_size = opened.max_early_data_size,
                         .issued_at_ms = opened.issued_at_ms,
                         .lifetime_seconds = opened.lifetime_seconds,
+                        .age_within_tolerance = age_within_tolerance,
                         .application_settings = owned_application_settings,
                         .settings_allocator = if (owned_application_settings != null)
                             self.config.allocator
@@ -1293,6 +1297,7 @@ pub fn ServerConnection(
             after_retry: bool,
         ) Error!?usize {
             if (after_retry or
+                !selected.age_within_tolerance or
                 !(try client_hello.parse(client_hello_bytes)).early_data)
             {
                 return null;

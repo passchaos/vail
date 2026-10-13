@@ -807,6 +807,7 @@ pub fn writeServerCryptoFlight(
             ech_accepted,
         );
     }
+    var psk_age_within_tolerance = true;
     const selected_psk: ?secret.Secret = if (ech_rejected)
         null
     else if (options.resumption) |resumption| blk: {
@@ -830,12 +831,14 @@ pub fn writeServerCryptoFlight(
             if (options.retry) |retry| retry.binder_prefix else null,
         );
         if (resumption.age_policy) |age_policy| {
-            try psk.validateTicketAge(offer, age_policy);
+            psk_age_within_tolerance = try psk.ticketAgeWithinTolerance(
+                offer,
+                age_policy,
+            );
         }
         break :blk resumption.secret;
     } else null;
-    const early_data_accepted = options.accept_early_data;
-    if (early_data_accepted and
+    if (options.accept_early_data and
         (options.retry != null or
             !options.parsed_client_hello.early_data or
             selected_psk == null or
@@ -846,7 +849,7 @@ pub fn writeServerCryptoFlight(
     {
         return error.InvalidEarlyDataConfiguration;
     }
-    if (early_data_accepted and
+    if (options.accept_early_data and
         !application_settings.resumptionMatches(
             selection.application_settings,
             options.resumption.?.application_settings,
@@ -854,6 +857,8 @@ pub fn writeServerCryptoFlight(
     {
         return error.InvalidEarlyDataConfiguration;
     }
+    const early_data_accepted = options.accept_early_data and
+        psk_age_within_tolerance;
     if (selected_psk == null) {
         if (!try options.parsed_client_hello.supportsSignatureScheme(
             options.signer.scheme(),
@@ -2889,6 +2894,82 @@ test "QUIC TLS PSK resumption verifies binders and supports full-handshake fallb
         "quic-client-settings",
         verified_client.peer_application_settings.?,
     );
+
+    var stale_server_resumption = server_resumption;
+    stale_server_resumption.age_policy.?.now_ms = 21_000;
+    var stale_initial: std.ArrayList(u8) = .empty;
+    defer stale_initial.deinit(allocator);
+    var stale_server_crypto: std.ArrayList(u8) = .empty;
+    defer stale_server_crypto.deinit(allocator);
+    var stale_server = try writeServerCryptoFlight(
+        &stale_initial,
+        &stale_server_crypto,
+        allocator,
+        .{
+            .client_hello_bytes = hello.items,
+            .parsed_client_hello = parsed,
+            .policy = .{
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .alpn_protocols = &.{"h3"},
+                .quic_transport_parameters = &.{ 4, 5, 6 },
+                .server_certificate_type = .raw_public_key,
+                .application_settings = &.{.{
+                    .protocol = "h3",
+                    .settings = "quic-server-settings",
+                }},
+            },
+            .server_random = [_]u8{0xb4} ** 32,
+            .server_key_share = &([_]u8{0xb5} ** 32),
+            .shared_secret = &shared_secret,
+            .certificate_chain = &.{&public_key_spki},
+            .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+            .resumption = stale_server_resumption,
+            .accept_early_data = true,
+        },
+    );
+    defer stale_server.deinit();
+    try std.testing.expect(stale_server.resumed);
+    try std.testing.expect(stale_server.early_data_limit == null);
+    try std.testing.expect(stale_server.client_early_packet_keys == null);
+    const stale_flight = try client_handshake.splitServerFlightForMode(
+        stale_server_crypto.items,
+        true,
+    );
+    try std.testing.expect(stale_flight.certificate == null);
+    const stale_extensions = try server_hello.parseEncryptedExtensions(
+        stale_flight.encrypted_extensions,
+    );
+    try std.testing.expect(!stale_extensions.early_data_accepted);
+
+    var stale_client_crypto: std.ArrayList(u8) = .empty;
+    defer stale_client_crypto.deinit(allocator);
+    var stale_client = try writeClientCryptoFlight(
+        &stale_client_crypto,
+        allocator,
+        .{
+            .client_hello_bytes = hello.items,
+            .server_hello_bytes = stale_initial.items,
+            .server_handshake_crypto = stale_server_crypto.items,
+            .shared_secret = &shared_secret,
+            .server_verifier = .{},
+            .server_name = "quic.example",
+            .server_certificate_type = .raw_public_key,
+            .application_settings = &.{.{
+                .protocol = "h3",
+                .settings = "quic-client-settings",
+            }},
+            .resumption = client_resumption,
+        },
+    );
+    defer stale_client.deinit();
+    try std.testing.expect(stale_client.resumed);
+    try std.testing.expect(!stale_client.verified.early_data_accepted);
+    var stale_verified_client = try verifyClientCryptoFlight(
+        allocator,
+        &stale_server,
+        stale_client_crypto.items,
+    );
+    defer stale_verified_client.deinit();
 
     var keyring = try ticket_keyring.Keyring.init(.{
         .id = 19,

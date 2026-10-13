@@ -3824,10 +3824,11 @@ test "client connection rejects a second HelloRetryRequest" {
     );
 }
 
-test "client and server states complete PSK-DHE resumption" {
+test "client and server resume PSK but reject stale 0-RTT" {
     const allocator = std.testing.allocator;
     const Client = ClientConnection(64 * 1024, 256);
     const server_module = @import("server_connection.zig");
+    const early_module = @import("early_data.zig");
     const Server = server_module.ServerConnection(64 * 1024, 256);
     const psk_secret = secret.Secret.fromSha256([_]u8{0xa7} ** 32);
     const age_add: u32 = 100;
@@ -3848,8 +3849,10 @@ test "client and server states complete PSK-DHE resumption" {
             .issued_at_ms = 10_000,
             .lifetime_seconds = 60,
             .cipher_suite_wire = cipher_suite.Suite.aes_128_gcm_sha256.wireValue(),
+            .max_early_data_size = 1024,
         },
     );
+    var replay_cache = early_module.ReplayCache(4){};
 
     var client_material = key_exchange.ClientKeyMaterial{
         .x25519 = [_]u8{0xa8} ** key_exchange.secret_len,
@@ -3858,6 +3861,8 @@ test "client and server states complete PSK-DHE resumption" {
         .identity = &identity,
         .secret = psk_secret,
         .obfuscated_ticket_age = actual_age +% age_add,
+        .max_early_data_size = 1024,
+        .alpn = "h2",
     };
     var client_wire: std.ArrayList(u8) = .empty;
     defer client_wire.deinit(allocator);
@@ -3899,8 +3904,12 @@ test "client and server states complete PSK-DHE resumption" {
         .resumption = .{ .tickets = .{
             .keyring = &keyring,
             .server_id = "example.com",
-            .now_ms = 10_000 + actual_age,
+            .now_ms = 30_000,
         } },
+        .early_data = .{
+            .replay_guard = replay_cache.guard(),
+            .max_bytes = 1024,
+        },
         .max_requested_tickets = 2,
         .client_auth = .{ .request_context = &.{} },
         .client_auth_policy = .{
@@ -3922,6 +3931,7 @@ test "client and server states complete PSK-DHE resumption" {
     }
     try std.testing.expect(server.has_pending);
     try std.testing.expect(server.pending.resumed);
+    try std.testing.expect(!server.pending.early_data_accepted);
 
     const server_hello_len = 4 +
         ((@as(usize, server_output.items[1]) << 16) |
@@ -3969,6 +3979,7 @@ test "client and server states complete PSK-DHE resumption" {
         return error.ClientDidNotEstablish;
     defer established_client.deinit();
     try std.testing.expect(established_client.resumed);
+    try std.testing.expect(!established_client.early_data_accepted);
     try std.testing.expectEqual(
         @as(usize, 0),
         established_client.peer_certificate_chain.len,
@@ -3985,6 +3996,7 @@ test "client and server states complete PSK-DHE resumption" {
     var established_server = server_established_result.event.?.established;
     defer established_server.deinit();
     try std.testing.expect(established_server.resumed);
+    try std.testing.expect(!established_server.early_data_accepted);
     try std.testing.expectEqual(
         @as(u8, 1),
         established_server.requestedTicketsRemaining(),

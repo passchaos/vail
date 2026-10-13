@@ -569,10 +569,9 @@ fn verifyClientOfferForSchedule(
     }
 }
 
-pub fn validateTicketAge(
-    offer: Offer,
-    policy: TicketAgePolicy,
-) Error!void {
+/// Validate that a ticket is still usable for PSK resumption and return its
+/// server-observed age in milliseconds.
+pub fn validateTicketLifetime(policy: TicketAgePolicy) Error!u32 {
     if (policy.lifetime_seconds == 0 or policy.now_ms < policy.issued_at_ms) {
         return error.ExpiredPsk;
     }
@@ -582,13 +581,33 @@ pub fn validateTicketAge(
     if (actual_age >= lifetime_ms or actual_age > std.math.maxInt(u32)) {
         return error.ExpiredPsk;
     }
+    return @intCast(actual_age);
+}
+
+/// Report whether a valid ticket is fresh enough to permit 0-RTT. RFC 8446
+/// allows PSK resumption to continue when this returns false.
+pub fn ticketAgeWithinTolerance(
+    offer: Offer,
+    policy: TicketAgePolicy,
+) Error!bool {
+    const actual_age = try validateTicketLifetime(policy);
     const offered_age = offer.obfuscated_ticket_age -% policy.age_add;
-    const actual_age_u32: u32 = @intCast(actual_age);
-    const skew = if (offered_age > actual_age_u32)
-        offered_age - actual_age_u32
+    const skew = if (offered_age > actual_age)
+        offered_age - actual_age
     else
-        actual_age_u32 - offered_age;
-    if (skew > policy.tolerance_ms) return error.InvalidPskAge;
+        actual_age - offered_age;
+    return skew <= policy.tolerance_ms;
+}
+
+/// Strict client-side validation for callers that require both a live ticket
+/// and an age within tolerance.
+pub fn validateTicketAge(
+    offer: Offer,
+    policy: TicketAgePolicy,
+) Error!void {
+    if (!try ticketAgeWithinTolerance(offer, policy)) {
+        return error.InvalidPskAge;
+    }
 }
 
 pub fn appendServerSelection(
@@ -1159,6 +1178,13 @@ test "TLS PSK validates ticket age, lifetime, and skew" {
         .now_ms = 1500,
         .tolerance_ms = 0,
     });
+    try std.testing.expect(!(try ticketAgeWithinTolerance(offer, .{
+        .age_add = 17,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 10,
+        .now_ms = 1600,
+        .tolerance_ms = 10,
+    })));
     try std.testing.expectError(
         error.InvalidPskAge,
         validateTicketAge(offer, .{
