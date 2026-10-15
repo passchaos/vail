@@ -1200,6 +1200,26 @@ Run `zig build -Doptimize=ReleaseFast bench-p256-one-shot`,
 `zig build -Doptimize=ReleaseFast bench-p256-prepared`, and
 `zig build bench-aws-lc-p256` to reproduce the comparison.
 
+Linux ARM64 ReleaseFast/ReleaseSafe additionally use embedded Montgomery field
+multiply and square kernels from the formally verified s2n-bignum ARMv8 P-256
+implementation (Apache-2.0 OR ISC OR MIT-0, pinned at `4d1356a7`). The kernels
+operate directly on Vail's existing four-limb Montgomery representation and
+use only caller-saved GPR/vector registers with no stack workspace. Debug and
+ReleaseSmall retain the portable Zig arithmetic as an independent oracle and
+size-oriented fallback. The boundary set plus 4,096 deterministic field
+multiply/square cases match Zig std in both accelerated optimization modes.
+Eight CPU-0 fixed-binary mirrored pairs reduced prepared verification with one
+retained public key from a 35,642 ns midpoint median to 29,458 ns (17.4%), with
+all eight candidate arms faster; table preparation fell from 923,607.5 to
+728,520.5 ns (21.1%). The same-host AWS-LC parsed-key verifier measured
+49,135 ns, so the accelerated Vail online path is about 40.0% lower latency.
+In a fixed-Quinn-server client matrix, retired instructions and post-trust
+latency improved in all eight pairs by median ratios of 0.914 and 0.876; the
+complete P50 pair median improved 2.25% with five of eight wins, so only the
+primitive/instruction/post-trust results are treated as causal. The prepared
+microbenchmark and complete Netz handshake ELF `.text` grew by 5,080 and 8,168
+bytes respectively.
+
 P-256 signing and ECDH now share a constant-schedule fixed-base path, while
 ECDH arbitrary-peer multiplication uses a constant-schedule
 Montgomery-Jacobian path on Linux x86_64 BMI2/ADX systems. These instruction

@@ -10,6 +10,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const point_adx = @import("p256_point_ops_adx.zig");
 const base_mul_x86 = @import("p256_base_mul_x86.zig");
+const field_arm64 = @import("p256_field_arm64.zig");
 const field_inv_x86 = @import("p256_field_inv_x86.zig");
 const scalar_inv_x86 = @import("p256_scalar_inv_x86.zig");
 const scalar_mul_x86 = @import("p256_scalar_mul_x86.zig");
@@ -941,6 +942,11 @@ fn fieldMul(a: Fe, b: Fe) Fe {
         );
         return .{ .limbs = result };
     }
+    if (comptime field_arm64.enabled) {
+        var result: [4]u64 = undefined;
+        field_arm64.mul(&result, &a.limbs, &b.limbs);
+        return .{ .limbs = result };
+    }
     return fieldMulPortable(a, b);
 }
 
@@ -1269,6 +1275,11 @@ inline fn fieldSquare(value: Fe) Fe {
             &value.limbs,
             &field_modulus,
         );
+        return .{ .limbs = result };
+    }
+    if (comptime field_arm64.enabled) {
+        var result: [4]u64 = undefined;
+        field_arm64.square(&result, &value.limbs);
         return .{ .limbs = result };
     }
     return fieldMul(value, value);
