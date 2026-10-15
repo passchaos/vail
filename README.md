@@ -12,7 +12,10 @@ The current foundation provides:
 - the dependency-free `archive_crypto` subpackage, including resumable
   Traditional PKZIP/ZipCrypto byte-stream state with explicit
   caller-supplied header entropy, password verification, allocation-safe
-  one-shot helpers, and key/header wiping for archive compatibility;
+  one-shot helpers, and key/header wiping, plus WinZip AE-1/AE-2
+  PBKDF2-HMAC-SHA1 key derivation, AES-128/192/256 little-endian CTR,
+  HMAC-SHA1-80 authentication, explicit caller salt, constant-time verifier/
+  tag checks, allocation-safe helpers, and secure state clearing;
 - allocation-free RFC 9180 HPKE base mode with the ECH mandatory suite:
   DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, and AES-128-GCM. Sender and
   receiver contexts retain prepared AEAD state, implement the complete 96-bit
