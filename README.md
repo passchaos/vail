@@ -1240,8 +1240,8 @@ table preparation, still outside the online verification timer, improved from
 728,880.5 to 675,097 ns (7.38%, every pair faster). The online result is 63.75%
 below the same-host 49,135 ns AWS-LC parsed-key reference, or about 2.76x its
 throughput. Despite adding 13,840 bytes of point-kernel machine code, replacing
-repeatedly inlined Zig formulas reduced the prepared benchmark ELF `.text`
-from 504,432 to 412,728 bytes (-91,704).
+repeatedly inlined Zig formulas reduced the prepared benchmark's GNU `size`
+text total from 645,864 to 554,200 bytes (-91,664).
 
 P-256 signing and ECDH now share a constant-schedule fixed-base path, while
 ECDH arbitrary-peer multiplication uses a constant-schedule
