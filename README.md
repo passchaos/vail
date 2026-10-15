@@ -18,9 +18,9 @@ The current foundation provides:
   tag checks, allocation-safe helpers, and secure state clearing. The same
   subpackage also provides the password-based AES-128/192/256 subset of
   PKWARE Strong Encryption: SHA-1/CryptDeriveKey-compatible master and file
-  keys, resumable AES-CBC, bounded block-streaming file encryption, PKCS#7
-  validation, explicit caller entropy, allocation-safe protocol helpers, and
-  secure key/state clearing;
+  keys, resumable AES-CBC, bounded block-streaming file encryption/decryption,
+  final-block PKCS#7 withholding, explicit caller entropy, allocation-safe
+  protocol helpers, and secure key/state clearing;
 - allocation-free RFC 9180 HPKE base mode with the ECH mandatory suite:
   DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, and AES-128-GCM. Sender and
   receiver contexts retain prepared AEAD state, implement the complete 96-bit
