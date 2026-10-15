@@ -4,8 +4,8 @@ const std = @import("std");
 
 const Edwards25519 = std.crypto.ecc.Edwards25519;
 const Fe = Edwards25519.Fe;
-const comb_groups = 4;
-const comb_width = 5;
+const comb_groups = 5;
+const comb_width = 4;
 const comb_entries = 1 << comb_width;
 const comb_windows = 13;
 const point_count = comb_groups * comb_entries;
@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
     const tables = buildTables();
     const file = try std.Io.Dir.cwd().createFile(
         init.io,
-        "src/crypto/x25519_tables.zig",
+        "src/crypto/x25519_public_tables.zig",
         .{},
     );
     defer file.close(init.io);

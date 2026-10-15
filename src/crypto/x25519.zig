@@ -14,10 +14,10 @@ const StdX25519 = std.crypto.dh.X25519;
 const Edwards25519 = std.crypto.ecc.Edwards25519;
 const Fe = Edwards25519.Fe;
 const IdentityElementError = std.crypto.errors.IdentityElementError;
-const table_values = @import("x25519_tables.zig");
+const table_values = @import("x25519_public_tables.zig");
 
-const comb_groups = 4;
-const comb_width = 5;
+const comb_groups = 5;
+const comb_width = 4;
 const comb_entries = 1 << comb_width;
 const comb_windows = 13;
 const selection_lanes = 16;
