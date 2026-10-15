@@ -9,6 +9,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const point_adx = @import("p256_point_ops_adx.zig");
+const point_arm64 = @import("p256_point_arm64.zig");
 const base_mul_x86 = @import("p256_base_mul_x86.zig");
 const field_arm64 = @import("p256_field_arm64.zig");
 const field_inv_x86 = @import("p256_field_inv_x86.zig");
@@ -1574,6 +1575,12 @@ const JacobianPoint = struct {
     }
 
     inline fn dbl(point: JacobianPoint) JacobianPoint {
+        if (comptime point_arm64.enabled) {
+            const input = encodeJacobian(point);
+            var output: [12]u64 = undefined;
+            point_arm64.pointDouble(&output, &input);
+            return decodeJacobian(output);
+        }
         if (comptime point_adx.enabled) {
             const input = encodeJacobian(point);
             return decodeJacobian(point_adx.pointDouble(&input));
@@ -1599,6 +1606,22 @@ const JacobianPoint = struct {
     }
 
     inline fn addMixed(point: JacobianPoint, other: AffinePoint) JacobianPoint {
+        if (comptime point_arm64.enabled) {
+            const input = encodeJacobian(point);
+            const affine = encodeAffine(other);
+            var output: [12]u64 = undefined;
+            point_arm64.pointMixedAdd(&output, &input, &affine);
+            const sum = decodeJacobian(output);
+            // The verified schedule deliberately excludes equal non-identity
+            // inputs. It returns the identity for that exceptional case, so
+            // pay for equality only when the result can be ambiguous.
+            if (sum.isIdentity() and
+                point.equivalent(JacobianPoint.fromAffine(other)))
+            {
+                return point.dbl();
+            }
+            return sum;
+        }
         if (point.isIdentity()) return fromAffine(other);
         const z_squared = fieldSquare(point.z);
         const other_x = fieldMul(other.x, z_squared);
@@ -1689,6 +1712,10 @@ const JacobianPoint = struct {
 
 inline fn encodeJacobian(point: JacobianPoint) [12]u64 {
     return point.x.limbs ++ point.y.limbs ++ point.z.limbs;
+}
+
+inline fn encodeAffine(point: AffinePoint) [8]u64 {
+    return point.x.limbs ++ point.y.limbs;
 }
 
 inline fn decodeJacobian(encoded: [12]u64) JacobianPoint {
@@ -2801,6 +2828,23 @@ test "P-256 Jacobian addition handles inverse inputs" {
     const generator = JacobianPoint.fromAffine(affineFromP256(P256.basePoint));
 
     try std.testing.expect(generator.add(generator.neg()).isIdentity());
+}
+
+test "P-256 Jacobian mixed addition handles identity equal and inverse inputs" {
+    const generator_affine = affineFromP256(P256.basePoint);
+    const generator = JacobianPoint.fromAffine(generator_affine);
+
+    try expectJacobianMatchesP256(
+        JacobianPoint.identity.addMixed(generator_affine),
+        P256.basePoint,
+    );
+    try expectJacobianMatchesP256(
+        generator.addMixed(generator_affine),
+        P256.basePoint.dbl(),
+    );
+    try std.testing.expect(
+        generator.addMixed(generator_affine.neg()).isIdentity(),
+    );
 }
 
 fn expectJacobianMatchesP256(actual: JacobianPoint, expected: P256) !void {

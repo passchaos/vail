@@ -1220,6 +1220,29 @@ primitive/instruction/post-trust results are treated as causal. The prepared
 microbenchmark and complete Netz handshake ELF `.text` grew by 5,080 and 8,168
 bytes respectively.
 
+The next ARM64 step routes the public-input comb verifier's complete
+Montgomery-Jacobian doubling and mixed-add formulas through the matching
+formally verified s2n-bignum schedules from the same pinned revision. The
+mixed-add kernel accepts an identity accumulator directly; Vail detects its
+otherwise ambiguous equal-point identity result and dispatches that exceptional
+public case to the dedicated doubling kernel, while inverse points retain the
+correct identity result. Focused tests cover identity, equal, inverse, and 64
+deterministic double-scalar comparisons against Zig std in ReleaseFast and
+ReleaseSafe. Debug and ReleaseSmall keep the portable formulas as independent
+fallbacks. The complete Debug and ReleaseFast Vail suites pass, as does the
+x86_64 Linux ReleaseFast compile gate.
+
+Eight CPU-0 fixed-binary mirrored pairs compared the published field-only ELF
+(`9530cf58...`) with the final point-kernel ELF (`259cccb3...`). Prepared
+verification improved in every pair: the midpoint median fell from 29,531 to
+17,808.5 ns/verify (39.70%), with a 0.603439 median paired ratio. Caller-retained
+table preparation, still outside the online verification timer, improved from
+728,880.5 to 675,097 ns (7.38%, every pair faster). The online result is 63.75%
+below the same-host 49,135 ns AWS-LC parsed-key reference, or about 2.76x its
+throughput. Despite adding 13,840 bytes of point-kernel machine code, replacing
+repeatedly inlined Zig formulas reduced the prepared benchmark ELF `.text`
+from 504,432 to 412,728 bytes (-91,704).
+
 P-256 signing and ECDH now share a constant-schedule fixed-base path, while
 ECDH arbitrary-peer multiplication uses a constant-schedule
 Montgomery-Jacobian path on Linux x86_64 BMI2/ADX systems. These instruction
