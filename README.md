@@ -15,7 +15,11 @@ The current foundation provides:
   one-shot helpers, and key/header wiping, plus WinZip AE-1/AE-2
   PBKDF2-HMAC-SHA1 key derivation, AES-128/192/256 little-endian CTR,
   HMAC-SHA1-80 authentication, explicit caller salt, constant-time verifier/
-  tag checks, allocation-safe helpers, and secure state clearing;
+  tag checks, allocation-safe helpers, and secure state clearing. The same
+  subpackage also provides the password-based AES-128/192/256 subset of
+  PKWARE Strong Encryption: SHA-1/CryptDeriveKey-compatible master and file
+  keys, resumable AES-CBC, PKCS#7 validation, explicit caller entropy,
+  allocation-safe protocol helpers, and secure key/state clearing;
 - allocation-free RFC 9180 HPKE base mode with the ECH mandatory suite:
   DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, and AES-128-GCM. Sender and
   receiver contexts retain prepared AEAD state, implement the complete 96-bit

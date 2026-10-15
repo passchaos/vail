@@ -1,9 +1,9 @@
-//! Portable AES-192 encryption context.
+//! Portable AES-192 encryption and decryption contexts.
 //!
 //! Zig's standard AES core exposes AES-128 and AES-256 key schedules. WinZip
 //! AES also standardizes 192-bit keys, so this small context supplies the
 //! missing FIPS-197 expansion while reusing Zig's selected constant-time AES
-//! round primitive for block encryption.
+//! round primitives.
 
 const std = @import("std");
 
@@ -21,30 +21,7 @@ pub const EncryptContext = struct {
     const Self = @This();
 
     pub fn init(key: [key_len]u8) Self {
-        var words: [word_count]u32 = undefined;
-        for (0..6) |index|
-            words[index] = std.mem.readInt(u32, key[index * 4 ..][0..4], .big);
-
-        var rcon: u8 = 1;
-        for (6..word_count) |index| {
-            var temporary = words[index - 1];
-            if (index % 6 == 0) {
-                temporary = subWord(std.math.rotl(u32, temporary, 8)) ^
-                    (@as(u32, rcon) << 24);
-                rcon = multiply(rcon, 2);
-            }
-            words[index] = words[index - 6] ^ temporary;
-        }
-
-        var round_keys: [rounds + 1]Block = undefined;
-        for (&round_keys, 0..) |*round_key, round| {
-            var bytes: [block_len]u8 = undefined;
-            for (0..4) |column|
-                std.mem.writeInt(u32, bytes[column * 4 ..][0..4], words[round * 4 + column], .big);
-            round_key.* = Block.fromBytes(&bytes);
-        }
-        std.crypto.secureZero(u32, &words);
-        return .{ .round_keys = round_keys };
+        return .{ .round_keys = expandKey(key) };
     }
 
     pub fn encrypt(self: *const Self, output: *[block_len]u8, input: *const [block_len]u8) void {
@@ -58,6 +35,61 @@ pub const EncryptContext = struct {
         std.crypto.secureZero(Self, (&self.*)[0..1]);
     }
 };
+
+pub const DecryptContext = struct {
+    inverse_round_keys: [rounds + 1]Block,
+
+    const Self = @This();
+
+    pub fn init(key: [key_len]u8) Self {
+        var encryption_round_keys = expandKey(key);
+        defer std.crypto.secureZero(Block, &encryption_round_keys);
+        var inverse_round_keys: [rounds + 1]Block = undefined;
+        inverse_round_keys[0] = encryption_round_keys[rounds];
+        for (1..rounds) |round|
+            inverse_round_keys[round] = encryption_round_keys[rounds - round].invMixColumns();
+        inverse_round_keys[rounds] = encryption_round_keys[0];
+        return .{ .inverse_round_keys = inverse_round_keys };
+    }
+
+    pub fn decrypt(self: *const Self, output: *[block_len]u8, input: *const [block_len]u8) void {
+        var block = Block.fromBytes(input).xorBlocks(self.inverse_round_keys[0]);
+        for (1..rounds) |round|
+            block = block.decrypt(self.inverse_round_keys[round]);
+        output.* = block.decryptLast(self.inverse_round_keys[rounds]).toBytes();
+    }
+
+    pub fn deinit(self: *Self) void {
+        std.crypto.secureZero(Self, (&self.*)[0..1]);
+    }
+};
+
+fn expandKey(key: [key_len]u8) [rounds + 1]Block {
+    var words: [word_count]u32 = undefined;
+    defer std.crypto.secureZero(u32, &words);
+    for (0..6) |index|
+        words[index] = std.mem.readInt(u32, key[index * 4 ..][0..4], .big);
+
+    var rcon: u8 = 1;
+    for (6..word_count) |index| {
+        var temporary = words[index - 1];
+        if (index % 6 == 0) {
+            temporary = subWord(std.math.rotl(u32, temporary, 8)) ^
+                (@as(u32, rcon) << 24);
+            rcon = multiply(rcon, 2);
+        }
+        words[index] = words[index - 6] ^ temporary;
+    }
+
+    var round_keys: [rounds + 1]Block = undefined;
+    for (&round_keys, 0..) |*round_key, round| {
+        var bytes: [block_len]u8 = undefined;
+        for (0..4) |column|
+            std.mem.writeInt(u32, bytes[column * 4 ..][0..4], words[round * 4 + column], .big);
+        round_key.* = Block.fromBytes(&bytes);
+    }
+    return round_keys;
+}
 
 fn subWord(word: u32) u32 {
     var output: u32 = 0;
@@ -123,4 +155,10 @@ test "AES-192 matches the FIPS-197 block vector" {
     var output: [block_len]u8 = undefined;
     context.encrypt(&output, &input);
     try std.testing.expectEqualSlices(u8, &expected, &output);
+
+    var decrypt_context = DecryptContext.init(key);
+    defer decrypt_context.deinit();
+    var decrypted: [block_len]u8 = undefined;
+    decrypt_context.decrypt(&decrypted, &expected);
+    try std.testing.expectEqualSlices(u8, &input, &decrypted);
 }
