@@ -748,6 +748,34 @@ variable-base optimization gaps. A cross-process Quinn handshake block run was
 too scheduler-sensitive to attribute an end-to-end change and is not used for
 the performance claim.
 
+Linux ARM64 ReleaseFast/ReleaseSafe now also use an embedded constant-time
+arbitrary-point ladder derived from the formally verified s2n-bignum schedule
+(Apache-2.0 OR ISC OR MIT-0). The self-contained function masks the peer's high
+bit, clamps the scalar, performs a fixed 251-step ladder plus three final
+doublings and constant-schedule inversion, then clears its complete 320-byte
+secret stack and caller-saved general-purpose registers. Debug and ReleaseSmall
+retain the portable implementation as an independent oracle and size-oriented
+fallback. Eight CPU-0 fixed-binary ABBA arms compared portable/candidate
+SHA-256 values
+`d54cccdc04cc230dcf09de401659232d48bf04c0215a87198f89cfa79b3b3920`
+and `c908fc3c027b8c5b5bf77a8f7139e71017b49f255669c8fbac6f600a5b457e87`.
+Under the same thermally throttled window, midpoint medians fell from 97,889 to
+56,310 ns (42.5%), with every candidate arm faster; unthrottled samples moved
+48,818 to about 28,100 ns with the same ratio. The isolated candidate is also
+about 31.8% below the same-host AWS-LC 41,210 ns reference. A separate
+5,000-iteration in-memory TLS client handshake comparison used baseline and
+candidate SHA-256 values
+`2042448fef1db4d2be9a44453bebe7ba8deea1f8f194efb16a1cb6ffec327560`
+and `deab068fc9b6d087ca85cb1cd0ced073b32e61af2609a3203adaa97f285a9774`;
+its midpoint median fell from 102,013 to 80,991.5 ns (20.6%), again with every
+candidate arm faster and identical wire lengths/checksum. A 997-Hz profile
+captured 2,828 samples with zero loss: 94.4% remained in the fixed ladder loop,
+5.4% in inversion, and only 0.2% in the wrapper, all-zero check, and explicit
+clearing. The primitive and TLS benchmark ELF `.text` grew by 4,152 and 9,428
+bytes respectively. Cross-process Quinn blocks remained host-load-sensitive
+and are retained as passing interoperability controls rather than causal
+latency evidence.
+
 Fixed-CPU independent-binary measurements on the same i9-13900K produced these
 representative x86_64 medians:
 

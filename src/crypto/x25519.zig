@@ -1,13 +1,15 @@
 //! X25519 with a constant-time fixed-base public-key path.
 //!
-//! Linux x86_64 AVX2/BMI2/ADX builds use an in-tree constant-time ladder for
-//! arbitrary-point multiplication; other targets use Zig's standard-library
-//! ladder. Public-key recovery uses a fixed-base Edwards25519 comb so TLS and
-//! HPKE key generation do not pay for a general ladder.
+//! Linux x86_64 AVX2/BMI2/ADX and optimized Linux ARM64 builds use in-tree
+//! constant-time ladders for arbitrary-point multiplication; other targets use
+//! Zig's standard-library ladder. Public-key recovery uses a fixed-base
+//! Edwards25519 comb so TLS and HPKE key generation do not pay for a general
+//! ladder.
 
 const std = @import("std");
 const ed25519_base_adx = @import("ed25519_base_adx.zig");
 const x25519_adx = @import("x25519_adx.zig");
+const x25519_arm64 = @import("x25519_arm64.zig");
 const x25519_base_adx = @import("x25519_base_adx.zig");
 
 const StdX25519 = std.crypto.dh.X25519;
@@ -123,6 +125,14 @@ pub const X25519 = struct {
         secret_key: *const [secret_length]u8,
         public_key: *const [public_length]u8,
     ) IdentityElementError!void {
+        if (comptime x25519_arm64.enabled) {
+            if (!x25519_arm64.scalarMultInto(
+                shared_secret,
+                secret_key,
+                public_key,
+            )) return error.IdentityElement;
+            return;
+        }
         if (comptime x25519_adx.enabled) {
             if (!x25519_adx.scalarMultInto(
                 shared_secret,
@@ -433,7 +443,7 @@ test "arbitrary-point X25519 matches Zig std" {
     }
 
     var state: u64 = 0x082e_fa98_ec4e_6c89;
-    for (0..512) |_| {
+    for (0..4_096) |_| {
         var scalar: [32]u8 = undefined;
         var point: [32]u8 = undefined;
         for (0..4) |word| {
