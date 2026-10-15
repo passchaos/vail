@@ -13,6 +13,7 @@ const point_arm64 = @import("p256_point_arm64.zig");
 const base_mul_x86 = @import("p256_base_mul_x86.zig");
 const field_arm64 = @import("p256_field_arm64.zig");
 const field_inv_x86 = @import("p256_field_inv_x86.zig");
+const scalar_inv_arm64 = @import("p256_scalar_inv_arm64.zig");
 const scalar_inv_x86 = @import("p256_scalar_inv_x86.zig");
 const scalar_mul_x86 = @import("p256_scalar_mul_x86.zig");
 const sha256 = @import("sha256.zig");
@@ -739,6 +740,14 @@ fn verifyWithTable(
 /// Variable-time inversion for public P-256 signature scalars.
 fn invertPublicScalar(value: Scalar) Scalar {
     std.debug.assert(!value.isZero());
+    if (comptime scalar_inv_arm64.enabled) {
+        const first = decodeScalar(value.toBytes(.little));
+        const inverse = scalar_inv_arm64.invert(&first, &scalar_modulus);
+        return Scalar.fromBytes(
+            encodeScalar(inverse),
+            .little,
+        ) catch unreachable;
+    }
     var first = decodeScalar(value.toBytes(.little));
     var second = scalar_modulus;
     var first_coefficient = scalarOne();
@@ -2282,6 +2291,18 @@ test "P-256 Jacobian x check accepts r and r+n representatives" {
 }
 
 test "P-256 public scalar inversion matches the fixed-time inverse" {
+    var maximum_limbs = scalar_modulus;
+    maximum_limbs[0] -= 1;
+    const maximum = Scalar.fromBytes(
+        encodeScalar(maximum_limbs),
+        .little,
+    ) catch unreachable;
+    for ([_]Scalar{ Scalar.one, maximum }) |value| {
+        try std.testing.expect(
+            invertPublicScalar(value).equivalent(value.invert()),
+        );
+    }
+
     var state: u64 = 0x1319_8a2e_0370_7344;
     for (0..256) |_| {
         var wide: [48]u8 = undefined;

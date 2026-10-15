@@ -1247,6 +1247,27 @@ throughput. Despite adding 13,840 bytes of point-kernel machine code, replacing
 repeatedly inlined Zig formulas reduced the prepared benchmark's GNU `size`
 text total from 645,864 to 554,200 bytes (-91,664).
 
+Linux ARM64 ReleaseFast/ReleaseSafe now also use BoringSSL/AWS-LC's
+four-limb variable-time BEEU schedule for the public ECDSA scalar inverse. The
+embedded ISC-licensed source is pinned to BoringSSL `7eab8046`; it consumes and
+returns canonical little-endian integers modulo the P-256 subgroup order, then
+Vail converts the result back to its existing Montgomery scalar type. This
+route is deliberately limited to signature-verification input: secret signing
+inversion retains the constant-schedule implementation. Debug and ReleaseSmall
+keep the portable binary-GCD path. The one, `n - 1`, and 256 deterministic
+nonzero scalar cases match the fixed-time Zig inverse in both accelerated
+optimization modes.
+
+The component benchmark moved public inversion from 2,797 to 971 ns/op
+(65.28%). Eight CPU-0 fixed-binary prepared-verifier pairs all improved from a
+17,789.5 to 15,520.5 ns midpoint median (12.75%), with a 0.872092 median paired
+ratio. Preparation stayed neutral at a 0.999954 ratio with four wins per side,
+so the online gain was not shifted outside the verification timer. The final
+online result is 68.41% below the same-host 49,135 ns AWS-LC parsed-key
+reference, or about 3.17x its throughput. Replacing the inlined Zig binary-GCD
+body also reduced the prepared benchmark's GNU `size` text total from 554,200
+to 552,472 bytes (-1,728).
+
 P-256 signing and ECDH now share a constant-schedule fixed-base path, while
 ECDH arbitrary-peer multiplication uses a constant-schedule
 Montgomery-Jacobian path on Linux x86_64 BMI2/ADX systems. These instruction
