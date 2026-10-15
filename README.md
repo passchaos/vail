@@ -9,6 +9,10 @@ The current foundation provides:
 - domain-separated HMAC-SHA256 and constant-time tag verification;
 - fixed-size SHA-256 and SM3 digests, portable SM2 signing/verification,
   SM4 block/SM4-GCM primitives, and explicit secure-memory wiping;
+- the dependency-free `archive_crypto` subpackage, including resumable
+  Traditional PKZIP/ZipCrypto byte-stream state with explicit
+  caller-supplied header entropy, password verification, allocation-safe
+  one-shot helpers, and key/header wiping for archive compatibility;
 - allocation-free RFC 9180 HPKE base mode with the ECH mandatory suite:
   DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, and AES-128-GCM. Sender and
   receiver contexts retain prepared AEAD state, implement the complete 96-bit

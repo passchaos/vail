@@ -1,4 +1,5 @@
 /.zig-cache/
+/archive_crypto/.zig-cache/
 /zig-out/
 /bench/rustls_client_hello/target/
 /bench/rustls_min_client/target/
