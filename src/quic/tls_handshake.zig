@@ -773,6 +773,9 @@ pub fn writeServerCryptoFlight(
     errdefer initial_crypto.shrinkRetainingCapacity(initial_start);
     const handshake_start = handshake_crypto.items.len;
     errdefer handshake_crypto.shrinkRetainingCapacity(handshake_start);
+    if (options.client_auth) |value| {
+        try client_auth.validateInitialRequestContext(value.request_context);
+    }
     if (options.resumption) |resumption| {
         try validateQuicResumption(resumption);
     }
@@ -1608,6 +1611,51 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
     });
     const parsed_client = try client_hello.parse(client_hello_bytes.items);
 
+    var invalid_context_initial_crypto: std.ArrayList(u8) = .empty;
+    defer invalid_context_initial_crypto.deinit(allocator);
+    var invalid_context_server_crypto: std.ArrayList(u8) = .empty;
+    defer invalid_context_server_crypto.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidCertificateRequest,
+        writeServerCryptoFlight(
+            &invalid_context_initial_crypto,
+            &invalid_context_server_crypto,
+            allocator,
+            .{
+                .client_hello_bytes = client_hello_bytes.items,
+                .parsed_client_hello = parsed_client,
+                .policy = .{
+                    .alpn_protocols = &.{"h3"},
+                    .quic_transport_parameters = &server_parameters,
+                    .server_certificate_type = .raw_public_key,
+                    .client_certificate_type = .raw_public_key,
+                },
+                .server_random = [_]u8{0x75} ** 32,
+                .server_key_share = &.{ 0x76, 0x77, 0x78 },
+                .shared_secret = &shared_secret,
+                .certificate_chain = &.{&public_key_spki},
+                .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+                .client_auth = .{
+                    .policy = .{
+                        .verifier = .{
+                            .pinned_raw_public_key = &client_public_key_spki,
+                        },
+                        .certificate_type = .raw_public_key,
+                    },
+                    .request_context = "quic-mtls",
+                },
+            },
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        invalid_context_initial_crypto.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        invalid_context_server_crypto.items.len,
+    );
+
     var initial_crypto: std.ArrayList(u8) = .empty;
     defer initial_crypto.deinit(allocator);
     var server_crypto: std.ArrayList(u8) = .empty;
@@ -1641,7 +1689,6 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
                     },
                     .certificate_type = .raw_public_key,
                 },
-                .request_context = "quic-mtls",
             },
             .ech_accepted = true,
         },
