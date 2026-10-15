@@ -776,6 +776,31 @@ bytes respectively. Cross-process Quinn blocks remained host-load-sensitive
 and are retained as passing interoperability controls rather than causal
 latency evidence.
 
+The ARM64 fixed-base follow-up embeds the companion s2n-bignum schedule and its
+48,576-byte affine table. It absorbs 63 signed four-bit windows through
+constant-time table selection, converts the final Edwards point back to the
+Montgomery X coordinate with constant-schedule inversion, and clears its full
+448-byte secret stack plus caller-saved GPRs before returning. Debug and
+ReleaseSmall continue to use the 11.25 KiB portable table. Eight CPU-0
+fixed-binary ABBA arms compared portable/candidate SHA-256 values
+`5a1744291e85d9f8293a0914e7dd88257f5857289f33b68be5c113a4e64ab5e3`
+and `cd74d39efeb2688624706cf722e11bf884c12bb712de8da5fb45c9938413d6a6`.
+Public-key recovery midpoint medians fell from 19,289.5 to 7,829 ns (59.4%),
+with every candidate arm faster; the candidate is about 21.0% below the
+same-host AWS-LC 9,915 ns reference. A 5,000-iteration in-memory TLS client
+comparison used baseline/candidate SHA-256 values
+`deab068fc9b6d087ca85cb1cd0ced073b32e61af2609a3203adaa97f285a9774`
+and `6a646e1472fcb100c8d324be7aa2d64addefc3f41fcb7dde10086abd5e622a25`;
+its midpoint median fell from 81,138 to 69,570.5 ns (14.3%), again with every
+candidate arm faster and identical wire lengths/checksum. A zero-loss 997-Hz
+profile attributed 81.9% of 800 samples to the fixed window loop and 18.1% to
+inversion; wrapper and explicit clearing stayed below the reporting threshold.
+The primitive and TLS benchmark ELF `.text` grew by 17,816 and 55,900 bytes.
+Two mirrored fixed-Quinn-server blocks reduced complete netz-client P50 by
+0.4% and 4.9% even though the Quinn controls were slower in both candidate
+blocks. These are supporting same-host workload results, not a universal
+cross-stack latency claim.
+
 Fixed-CPU independent-binary measurements on the same i9-13900K produced these
 representative x86_64 medians:
 

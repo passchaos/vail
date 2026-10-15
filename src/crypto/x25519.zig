@@ -11,6 +11,7 @@ const ed25519_base_adx = @import("ed25519_base_adx.zig");
 const x25519_adx = @import("x25519_adx.zig");
 const x25519_arm64 = @import("x25519_arm64.zig");
 const x25519_base_adx = @import("x25519_base_adx.zig");
+const x25519_base_arm64 = @import("x25519_base_arm64.zig");
 
 const StdX25519 = std.crypto.dh.X25519;
 const Edwards25519 = std.crypto.ecc.Edwards25519;
@@ -47,6 +48,9 @@ pub const X25519 = struct {
         defer std.crypto.secureZero(u8, &secret);
         if (comptime x25519_base_adx.enabled) {
             return x25519_base_adx.scalarMultBase(&secret);
+        }
+        if (comptime x25519_base_arm64.enabled) {
+            return x25519_base_arm64.scalarMultBase(&secret);
         }
         var scalar = [_]u8{0} ** 33;
         defer std.crypto.secureZero(u8, &scalar);
@@ -377,7 +381,7 @@ test "fixed-base recovery matches the Montgomery ladder" {
     }
 
     var state: u64 = 0x243f_6a88_85a3_08d3;
-    for (0..256) |_| {
+    for (0..4_096) |_| {
         var secret_key: [X25519.secret_length]u8 = undefined;
         for (0..4) |word| {
             std.mem.writeInt(
