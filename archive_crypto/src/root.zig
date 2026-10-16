@@ -6,6 +6,7 @@ pub const pkware_strong = @import("pkware_strong.zig");
 pub const pkware_strong_stream = @import("pkware_strong_stream.zig");
 pub const pkware_strong_decrypt_stream = @import("pkware_strong_decrypt_stream.zig");
 pub const rar5 = @import("rar5.zig");
+pub const rar4 = @import("rar4.zig");
 
 test {
     _ = zipcrypto;
@@ -14,5 +15,6 @@ test {
     _ = pkware_strong_stream;
     _ = pkware_strong_decrypt_stream;
     _ = rar5;
+    _ = rar4;
     _ = @import("pkware_strong_tests.zig");
 }
