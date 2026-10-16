@@ -15,6 +15,29 @@ fn decodeHex(comptime encoded: []const u8) [encoded.len / 2]u8 {
     return result;
 }
 
+test "server certificate identity verification covers DNS and IP authorities" {
+    const dns_leaf = decodeHex(path_vectors.leaf_hex);
+    try trust.verifyServerCertificateIdentity(&dns_leaf, "localhost");
+    try std.testing.expectError(
+        error.CertificateHostMismatch,
+        trust.verifyServerCertificateIdentity(&dns_leaf, "other.example"),
+    );
+
+    const ip4_leaf = decodeHex(path_vectors.ip_constraints_allowed_leaf_hex);
+    try trust.verifyServerCertificateIdentity(&ip4_leaf, "10.1.2.3");
+    try std.testing.expectError(
+        error.CertificateHostMismatch,
+        trust.verifyServerCertificateIdentity(&ip4_leaf, "10.1.2.4"),
+    );
+
+    const ip6_leaf = decodeHex(path_vectors.ip_constraints_ipv6_leaf_hex);
+    try trust.verifyServerCertificateIdentity(&ip6_leaf, "2001:db8:1::42");
+    try std.testing.expectError(
+        error.CertificateHostMismatch,
+        trust.verifyServerCertificateIdentity(&ip6_leaf, "2001:db8:1::43"),
+    );
+}
+
 test "TLS leaf OCSP staple is enforced by bundle trust policy" {
     const allocator = std.testing.allocator;
     const root = decodeHex(path_vectors.root_hex);

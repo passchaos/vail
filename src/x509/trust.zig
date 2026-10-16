@@ -1346,6 +1346,25 @@ fn verifyServerIdentity(
     }
 }
 
+/// Verify only the server-identity binding of one DER leaf certificate.
+///
+/// This is intended for an already authenticated TLS connection that is being
+/// considered for another authority, such as HTTP connection coalescing. It
+/// deliberately does not replace trust-path, validity, revocation, or EKU
+/// verification: callers must have completed those checks when the connection
+/// was established. DNS names use the certificate parser's RFC 6125 matching;
+/// IPv4 and IPv6 literals require an exact iPAddress subjectAltName.
+pub fn verifyServerCertificateIdentity(
+    certificate_der: []const u8,
+    server_name: []const u8,
+) !void {
+    const certificate = try parseCertificate(certificate_der);
+    try verifyServerIdentity(
+        certificate,
+        parseServerIdentity(server_name),
+    );
+}
+
 fn verifyIpSubjectAltName(
     certificate: Certificate.Parsed,
     address: []const u8,
