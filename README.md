@@ -20,7 +20,12 @@ The current foundation provides:
   PKWARE Strong Encryption: SHA-1/CryptDeriveKey-compatible master and file
   keys, resumable AES-CBC, bounded block-streaming file encryption/decryption,
   final-block PKCS#7 withholding, explicit caller entropy, allocation-safe
-  protocol helpers, and secure key/state clearing;
+  protocol helpers, and secure key/state clearing. Archive-specific modules
+  additionally provide RAR4 SHA-1/AES-128-CBC, RAR5 extended
+  PBKDF2-HMAC-SHA256/AES-256-CBC with keyed checksum transforms, and 7zAES
+  UTF-16LE/SHA-256 key derivation plus resumable AES-256-CBC. Wire records,
+  padding policy, IV allocation, and archive integrity checks remain owned by
+  the calling archive library;
 - allocation-free RFC 9180 HPKE base mode with the ECH mandatory suite:
   DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, and AES-128-GCM. Sender and
   receiver contexts retain prepared AEAD state, implement the complete 96-bit
