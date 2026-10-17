@@ -177,7 +177,7 @@ const RarSha1 = struct {
         mutable: ?[]u8,
     ) void {
         var offset: usize = 0;
-        if (self.buffer_len != 0 and self.buffer_len + input.len >= 64) {
+        if (self.buffer_len + input.len >= 64) {
             const take = 64 - self.buffer_len;
             @memcpy(self.buffer[self.buffer_len..][0..take], input[0..take]);
             self.transform(&self.buffer, null);
