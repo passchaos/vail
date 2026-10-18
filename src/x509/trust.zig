@@ -95,6 +95,19 @@ pub const BundleVerifier = struct {
         };
     }
 
+    /// Verify a TLS server certificate path without matching its DNS/IP
+    /// identity. CA trust, validity, signatures, serverAuth EKU, policy,
+    /// revocation, and stapled OCSP remain enforced. This is intended only for
+    /// explicit compatibility opt-outs such as Mosquitto `bridge_insecure`.
+    pub fn serverChainVerifier(
+        self: *const BundleVerifier,
+    ) auth.ClientVerifier {
+        return .{
+            .verify_trust = verifyServerChainCallback,
+            .context = @ptrCast(@constCast(self)),
+        };
+    }
+
     pub fn verify(
         self: BundleVerifier,
         trust_context: auth.TrustContext,
@@ -116,6 +129,29 @@ pub const BundleVerifier = struct {
             self.path_limits,
             self.revocation,
             server_identity,
+            trust_context.ocsp_response,
+            trust_context.ocsp_responses,
+            self.stapled_ocsp,
+            self.ocsp_validation,
+            self.certificate_policy,
+        );
+    }
+
+    /// Direct counterpart to `serverChainVerifier` for callers that already
+    /// own the parsed TLS trust context.
+    pub fn verifyServerChain(
+        self: BundleVerifier,
+        trust_context: auth.TrustContext,
+    ) !void {
+        try verifyChain(
+            self.bundle,
+            self.compatible_trust_anchors,
+            self.now_seconds,
+            trust_context.chain,
+            .server_auth,
+            self.path_limits,
+            self.revocation,
+            null,
             trust_context.ocsp_response,
             trust_context.ocsp_responses,
             self.stapled_ocsp,
@@ -203,6 +239,16 @@ pub const BundleVerifier = struct {
             context orelse return error.MissingTrustContext,
         ));
         try self.verify(trust_context);
+    }
+
+    fn verifyServerChainCallback(
+        context: ?*anyopaque,
+        trust_context: auth.TrustContext,
+    ) anyerror!void {
+        const self: *const BundleVerifier = @ptrCast(@alignCast(
+            context orelse return error.MissingTrustContext,
+        ));
+        try self.verifyServerChain(trust_context);
     }
 };
 

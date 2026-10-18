@@ -573,6 +573,25 @@ test "bundle verifier validates hostname and time" {
             .chain = &.{server_der},
         }),
     );
+
+    try verifier.verifyServerChain(.{
+        .server_name = "other.example",
+        .chain = &.{server_der},
+    });
+    try verifier.serverChainVerifier().verifyTrust(
+        "other.example",
+        &.{server_der},
+    );
+
+    var corrupted = server_der.*;
+    corrupted[corrupted.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.CertificateUntrusted,
+        verifier.serverChainVerifier().verifyTrust(
+            "other.example",
+            &.{&corrupted},
+        ),
+    );
 }
 
 test "bundle verifier accepts RSA-PSS signed leaves and intermediates" {
