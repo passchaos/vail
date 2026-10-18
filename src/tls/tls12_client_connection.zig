@@ -56,6 +56,7 @@ pub const Config = struct {
     random: [32]u8,
     session_id: []const u8 = &.{},
     server_name: ?[]const u8 = null,
+    client_private_key_x25519: ?*[key_exchange.secret_len]u8 = null,
     client_private_key: ?*[key_exchange.p256.secret_len]u8 = null,
     client_private_key_p384: ?*[key_exchange.p384.secret_len]u8 = null,
     client_private_key_p521: ?*[key_exchange.p521.secret_len]u8 = null,
@@ -161,6 +162,7 @@ pub const ApplicationReceiveResult = struct {
 
 const Pending = struct {
     allocator: std.mem.Allocator,
+    client_private_key_x25519: ?[key_exchange.secret_len]u8,
     client_private_key: ?[key_exchange.p256.secret_len]u8,
     client_private_key_p384: ?[key_exchange.p384.secret_len]u8,
     client_private_key_p521: ?[key_exchange.p521.secret_len]u8,
@@ -191,6 +193,9 @@ const Pending = struct {
     peer_record_size_limit: ?u16 = null,
 
     fn deinit(self: *Pending) void {
+        if (self.client_private_key_x25519) |*private_key| {
+            std.crypto.secureZero(u8, private_key);
+        }
         if (self.client_private_key) |*private_key| {
             std.crypto.secureZero(u8, private_key);
         }
@@ -499,6 +504,17 @@ pub fn ClientConnection(
                     return error.SessionContextMismatch;
                 }
             }
+            var private_key_x25519: ?[key_exchange.secret_len]u8 =
+                if (config.client_private_key_x25519) |value|
+                    value.*
+                else
+                    null;
+            if (config.client_private_key_x25519) |value| {
+                std.crypto.secureZero(u8, value);
+            }
+            errdefer if (private_key_x25519) |*value| {
+                std.crypto.secureZero(u8, value);
+            };
             var private_key: ?[key_exchange.p256.secret_len]u8 = if (config.client_private_key) |value|
                 value.*
             else
@@ -528,6 +544,9 @@ pub fn ClientConnection(
                 std.crypto.secureZero(u8, value);
             };
             for (config.policy.groups) |group| switch (group) {
+                key_exchange.named_group_x25519 => if (private_key_x25519 == null) {
+                    return error.UnsupportedProfile;
+                },
                 key_exchange.named_group_secp256r1 => if (private_key == null) {
                     return error.UnsupportedProfile;
                 },
@@ -614,6 +633,7 @@ pub fn ClientConnection(
             self.*.messages.buffered = 0;
             self.*.pending = .{
                 .allocator = config.allocator,
+                .client_private_key_x25519 = private_key_x25519,
                 .client_private_key = private_key,
                 .client_private_key_p384 = private_key_p384,
                 .client_private_key_p521 = private_key_p521,
@@ -703,6 +723,17 @@ pub fn ClientConnection(
                 return error.UnsupportedProfile;
             }
 
+            var private_key_x25519: ?[key_exchange.secret_len]u8 =
+                if (config.client_private_key_x25519) |value|
+                    value.*
+                else
+                    null;
+            if (config.client_private_key_x25519) |value| {
+                std.crypto.secureZero(u8, value);
+            }
+            errdefer if (private_key_x25519) |*value| {
+                std.crypto.secureZero(u8, value);
+            };
             var private_key: ?[key_exchange.p256.secret_len]u8 =
                 if (config.client_private_key) |value| value.* else null;
             if (config.client_private_key) |value| {
@@ -728,6 +759,13 @@ pub fn ClientConnection(
                 std.crypto.secureZero(u8, value);
             };
             for (config.policy.groups) |group| switch (group) {
+                key_exchange.named_group_x25519 => {
+                    if (private_key_x25519 == null or
+                        !try parsed.supportsGroup(group))
+                    {
+                        return error.UnsupportedProfile;
+                    }
+                },
                 key_exchange.named_group_secp256r1 => {
                     if (private_key == null or !try parsed.supportsGroup(group)) {
                         return error.UnsupportedProfile;
@@ -767,6 +805,7 @@ pub fn ClientConnection(
                 .now_seconds = config.now_seconds,
                 .pending = .{
                     .allocator = config.allocator,
+                    .client_private_key_x25519 = private_key_x25519,
                     .client_private_key = private_key,
                     .client_private_key_p384 = private_key_p384,
                     .client_private_key_p521 = private_key_p521,
@@ -1032,6 +1071,18 @@ pub fn ClientConnection(
                 [_]u8{0} ** key_exchange.p521.public_len;
             var shared_storage = [_]u8{0} ** key_exchange.p521.shared_len;
             const client_public: []const u8 = switch (server_key_exchange.group) {
+                key_exchange.named_group_x25519 => blk: {
+                    const private_key = pending.client_private_key_x25519 orelse
+                        return error.UnsupportedProfile;
+                    const public = try key_exchange.publicKey(private_key);
+                    client_public_storage[0..public.len].* = public;
+                    const shared = try key_exchange.sharedSecret(
+                        private_key,
+                        server_key_exchange.public_key,
+                    );
+                    shared_storage[0..shared.len].* = shared;
+                    break :blk client_public_storage[0..public.len];
+                },
                 key_exchange.named_group_secp256r1 => blk: {
                     const private_key = pending.client_private_key orelse
                         return error.UnsupportedProfile;
@@ -1070,6 +1121,7 @@ pub fn ClientConnection(
                 else => return error.UnsupportedProfile,
             };
             const shared_secret: []const u8 = switch (server_key_exchange.group) {
+                key_exchange.named_group_x25519 => shared_storage[0..key_exchange.shared_len],
                 key_exchange.named_group_secp256r1 => shared_storage[0..key_exchange.p256.shared_len],
                 key_exchange.named_group_secp384r1 => shared_storage[0..key_exchange.p384.shared_len],
                 key_exchange.named_group_secp521r1 => &shared_storage,
@@ -1077,6 +1129,9 @@ pub fn ClientConnection(
             };
             defer std.crypto.secureZero(u8, &client_public_storage);
             defer std.crypto.secureZero(u8, &shared_storage);
+            if (pending.client_private_key_x25519) |*value| {
+                std.crypto.secureZero(u8, value);
+            }
             if (pending.client_private_key) |*value| {
                 std.crypto.secureZero(u8, value);
             }
@@ -1368,6 +1423,9 @@ pub fn ClientConnection(
             };
             const empty_chain = try self.allocator.alloc([]const u8, 0);
             errdefer self.allocator.free(empty_chain);
+            if (pending.client_private_key_x25519) |*private_key| {
+                std.crypto.secureZero(u8, private_key);
+            }
             if (pending.client_private_key) |*private_key| {
                 std.crypto.secureZero(u8, private_key);
             }
@@ -1641,7 +1699,8 @@ fn validatePolicy(policy: handshake.Policy) Error!void {
         return error.UnsupportedProfile;
     }
     for (policy.groups) |group| {
-        if (group != key_exchange.named_group_secp256r1 and
+        if (group != key_exchange.named_group_x25519 and
+            group != key_exchange.named_group_secp256r1 and
             group != key_exchange.named_group_secp384r1 and
             group != key_exchange.named_group_secp521r1)
         {
@@ -2441,6 +2500,7 @@ test "TLS 1.2 client rejects a bad encrypted server Finished and locks" {
         .stage = .server_finished,
         .pending = .{
             .allocator = allocator,
+            .client_private_key_x25519 = null,
             .client_private_key = [_]u8{0} ** key_exchange.p256.secret_len,
             .client_private_key_p384 = null,
             .client_private_key_p521 = null,
@@ -2553,7 +2613,7 @@ test "high-level TLS 1.2 client requests OCSP by default with opt-out" {
     try std.testing.expect(!opt_out_hello.requests_ocsp_multi);
 }
 
-test "TLS 1.2 client and server complete every AEAD suite on P-256" {
+test "TLS 1.2 client and server complete AEAD suites across groups" {
     const allocator = std.testing.allocator;
     const rsa = @import("../crypto/rsa.zig");
     const vectors = @import("../crypto/testdata/rsa_signing.zig");
@@ -2604,6 +2664,21 @@ test "TLS 1.2 client and server complete every AEAD suite on P-256" {
             false,
         );
     }
+    try completeSuiteHandshake(
+        allocator,
+        .ecdhe_rsa_aes_128_gcm_sha256,
+        key_exchange.named_group_x25519,
+        &rsa_certificate,
+        .{ .rsa_pss = .{
+            .prepared_key = &prepared_key,
+            .io = std.testing.io,
+        } },
+        .{ .verify_trust = acceptTestCertificate },
+        null,
+        null,
+        null,
+        false,
+    );
     try completeSuiteHandshake(
         allocator,
         .ecdhe_rsa_aes_256_gcm_sha384,
@@ -2878,6 +2953,7 @@ fn completeSuiteHandshake(
         .alpn_protocols = &.{"h2"},
         .client_certificate_authorities = client_certificate_authorities,
     };
+    var client_private_x25519 = [_]u8{0x71} ** key_exchange.secret_len;
     var client_private = [_]u8{0} ** key_exchange.p256.secret_len;
     client_private[client_private.len - 1] = 7;
     var client_private_p384 = [_]u8{0} ** key_exchange.p384.secret_len;
@@ -2888,6 +2964,11 @@ fn completeSuiteHandshake(
         .allocator = allocator,
         .random = [_]u8{0xb2} ** 32,
         .server_name = "localhost",
+        .client_private_key_x25519 = if (group ==
+            key_exchange.named_group_x25519)
+            &client_private_x25519
+        else
+            null,
         .client_private_key = if (group == key_exchange.named_group_secp256r1)
             &client_private
         else
@@ -2902,6 +2983,7 @@ fn completeSuiteHandshake(
         .client_identity = client_identity,
     }, &client_wire);
     defer client.deinit();
+    var server_private_x25519 = [_]u8{0x72} ** key_exchange.secret_len;
     var server_private = [_]u8{0} ** key_exchange.p256.secret_len;
     server_private[server_private.len - 1] = 8;
     var server_private_p384 = [_]u8{0} ** key_exchange.p384.secret_len;
@@ -2910,6 +2992,11 @@ fn completeSuiteHandshake(
         .allocator = allocator,
         .policy = policy,
         .server_random = [_]u8{0xb3} ** 32,
+        .server_private_key_x25519 = if (group ==
+            key_exchange.named_group_x25519)
+            &server_private_x25519
+        else
+            null,
         .server_private_key = if (group == key_exchange.named_group_secp256r1)
             &server_private
         else

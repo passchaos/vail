@@ -29,6 +29,8 @@ pub fn main(init: std.process.Init) !void {
     addr.addr = std.mem.nativeToBig(u32, 0x7f000001);
     try sysConnect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
 
+    var private_key_x25519 =
+        [_]u8{0x91} ** vail.tls.key_exchange.secret_len;
     var private_key = [_]u8{0} ** vail.tls.key_exchange.p256.secret_len;
     private_key[private_key.len - 1] = 3;
     var private_key_p384 = [_]u8{0} ** vail.tls.key_exchange.p384.secret_len;
@@ -41,6 +43,11 @@ pub fn main(init: std.process.Init) !void {
         .allocator = std.heap.smp_allocator,
         .random = [_]u8{0x93} ** 32,
         .server_name = "localhost",
+        .client_private_key_x25519 = if (profile.group ==
+            vail.tls.key_exchange.named_group_x25519)
+            &private_key_x25519
+        else
+            null,
         .client_private_key = if (profile.group ==
             vail.tls.key_exchange.named_group_secp256r1)
             &private_key
@@ -117,6 +124,8 @@ pub fn main(init: std.process.Init) !void {
     );
     if (profile.group == vail.tls.key_exchange.named_group_secp521r1) {
         std.debug.print("TLS 1.2 P-521 ECDH negotiated\n", .{});
+    } else if (profile.group == vail.tls.key_exchange.named_group_x25519) {
+        std.debug.print("TLS 1.2 X25519 ECDH negotiated\n", .{});
     }
 
     var request: [512]u8 = undefined;
@@ -162,6 +171,12 @@ fn selectedProfile(init: std.process.Init) !Profile {
     if (args.next() != null) return error.InvalidArguments;
     if (std.mem.eql(u8, name, "aes128")) {
         return .{ .suite = .ecdhe_rsa_aes_128_gcm_sha256 };
+    }
+    if (std.mem.eql(u8, name, "x25519")) {
+        return .{
+            .suite = .ecdhe_rsa_aes_128_gcm_sha256,
+            .group = vail.tls.key_exchange.named_group_x25519,
+        };
     }
     if (std.mem.eql(u8, name, "aes256")) {
         return .{ .suite = .ecdhe_rsa_aes_256_gcm_sha384 };

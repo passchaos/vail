@@ -578,7 +578,8 @@ pub fn select(
             signerMatchesSuite(signer, candidate)) break candidate;
     } else return error.NoSharedCipherSuite;
     const group = for (policy.groups) |candidate| {
-        const implemented = candidate == key_exchange.named_group_secp256r1 or
+        const implemented = candidate == key_exchange.named_group_x25519 or
+            candidate == key_exchange.named_group_secp256r1 or
             candidate == key_exchange.named_group_secp384r1 or
             candidate == key_exchange.named_group_secp521r1;
         if (!implemented) continue;
@@ -632,13 +633,16 @@ pub fn writeServerFlight(
     }
     const selection = try select(client, signer, policy);
     const expected_public_len: usize = switch (selection.group) {
+        key_exchange.named_group_x25519 => key_exchange.public_len,
         key_exchange.named_group_secp256r1 => key_exchange.p256.public_len,
         key_exchange.named_group_secp384r1 => key_exchange.p384.public_len,
         key_exchange.named_group_secp521r1 => key_exchange.p521.public_len,
         else => return error.NoSupportedGroup,
     };
     if (server_public_key.len != expected_public_len or
-        server_public_key[0] != 4 or certificate_chain.len == 0)
+        (selection.group != key_exchange.named_group_x25519 and
+            server_public_key[0] != 4) or
+        certificate_chain.len == 0)
     {
         return error.InvalidClientHello;
     }
@@ -1630,6 +1634,55 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
         &server_public,
         parsed_key_exchange.public_key,
     );
+
+    var x25519_flight: std.ArrayList(u8) = .empty;
+    defer x25519_flight.deinit(allocator);
+    const x25519_public = try key_exchange.publicKey(
+        [_]u8{0x36} ** key_exchange.secret_len,
+    );
+    _ = try writeServerFlight(
+        &x25519_flight,
+        allocator,
+        hello.items,
+        parsed,
+        .{ .groups = &.{key_exchange.named_group_x25519} },
+        [_]u8{0x33} ** 32,
+        &x25519_public,
+        &.{&certificate},
+        signer,
+    );
+    const x25519_messages = try splitServerFlight(x25519_flight.items);
+    const x25519_server_hello = try parseServerHello(
+        x25519_messages.server_hello,
+        .{
+            .groups = &.{key_exchange.named_group_x25519},
+            .require_secure_renegotiation = false,
+        },
+        true,
+    );
+    var x25519_certificate = try parseCertificate(
+        allocator,
+        x25519_messages.certificate,
+    );
+    defer x25519_certificate.deinit(allocator);
+    const parsed_x25519 = try parseAndVerifyServerKeyExchange(
+        x25519_messages.server_key_exchange,
+        x25519_certificate.entries[0],
+        parsed.random.*,
+        x25519_server_hello.random,
+        x25519_server_hello.suite,
+        .{ .groups = &.{key_exchange.named_group_x25519} },
+    );
+    try std.testing.expectEqual(
+        key_exchange.named_group_x25519,
+        parsed_x25519.group,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &x25519_public,
+        parsed_x25519.public_key,
+    );
+
     var tampered_key_exchange = try allocator.dupe(
         u8,
         messages.server_key_exchange,

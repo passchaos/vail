@@ -362,8 +362,8 @@ The current foundation provides:
   sequence numbers, conservative AEAD usage limits, and allocation-free RFC
   5705 exporters. Incremental client and server states negotiate all six modern
   ECDHE-RSA/ECDHE-ECDSA AES-128-GCM, AES-256-GCM, and ChaCha20-Poly1305 suites
-  over P-256, P-384, or native P-521, require Extended Master Secret and RFC
-  5746 signaling,
+  over X25519, P-256, P-384, or native P-521, require Extended Master Secret
+  and RFC 5746 signaling,
   authenticate ephemeral parameters with RSA-PSS or ECDSA using TLS 1.2's
   hash-only signature-scheme semantics; RSA PKCS#1 v1.5 remains available for
   compatible TLS 1.2 peers while being rejected in TLS 1.3. The states verify
@@ -2112,7 +2112,7 @@ AWS-LC provider and remain test-only dependencies; Vail itself links no
 external cryptographic library.
 `zig build interop-openssl-tls12-client-matrix` additionally forces all six
 TLS 1.2 AEAD suites, both RSA and ECDSA authentication, and
-P-256/P-384/P-521 ECDHE.
+X25519/P-256/P-384/P-521 ECDHE.
 `interop-openssl-tls12-rsa-pkcs1-client`,
 `interop-openssl-tls12-rsa-pkcs1-server`,
 `interop-rustls-tls12-rsa-pkcs1-client`, and

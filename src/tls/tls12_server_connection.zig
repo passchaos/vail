@@ -50,6 +50,8 @@ pub const Config = struct {
     allocator: std.mem.Allocator,
     policy: handshake.Policy = .{},
     server_random: [32]u8,
+    /// Single-use X25519 scalar required when X25519 is selected.
+    server_private_key_x25519: ?*[key_exchange.secret_len]u8 = null,
     /// Single-use P-256 scalar retained for source compatibility. It is
     /// required when the selected group is secp256r1.
     server_private_key: ?*[key_exchange.p256.secret_len]u8 = null,
@@ -118,6 +120,7 @@ pub const ApplicationReceiveResult = struct {
 
 const PrivateKey = union(enum) {
     none,
+    x25519: [key_exchange.secret_len]u8,
     secp256r1: [key_exchange.p256.secret_len]u8,
     secp384r1: [key_exchange.p384.secret_len]u8,
     secp521r1: [key_exchange.p521.secret_len]u8,
@@ -342,6 +345,7 @@ pub fn ServerConnection(
 
         config: Config,
         stage: Stage = .client_hello,
+        x25519_private_key_consumed: bool = false,
         p256_private_key_consumed: bool = false,
         p384_private_key_consumed: bool = false,
         p521_private_key_consumed: bool = false,
@@ -362,6 +366,7 @@ pub fn ServerConnection(
         pub fn initInto(self: *Self, config: Config) void {
             self.*.config = config;
             self.*.stage = .client_hello;
+            self.*.x25519_private_key_consumed = false;
             self.*.p256_private_key_consumed = false;
             self.*.p384_private_key_consumed = false;
             self.*.p521_private_key_consumed = false;
@@ -537,6 +542,17 @@ pub fn ServerConnection(
             var private_key: PrivateKey = undefined;
             var public_key_storage: [key_exchange.p521.public_len]u8 = undefined;
             const public_key_len: usize = switch (selection.group) {
+                key_exchange.named_group_x25519 => blk: {
+                    const configured = self.config.server_private_key_x25519 orelse
+                        return error.NoSupportedGroup;
+                    private_key = .{ .x25519 = configured.* };
+                    self.consumeX25519PrivateKey();
+                    const public = try key_exchange.publicKey(
+                        private_key.x25519,
+                    );
+                    public_key_storage[0..public.len].* = public;
+                    break :blk public.len;
+                },
                 key_exchange.named_group_secp256r1 => blk: {
                     const configured = self.config.server_private_key orelse
                         return error.NoSupportedGroup;
@@ -788,8 +804,10 @@ pub fn ServerConnection(
                 self.config.allocator,
                 encrypted_finished[0..encrypted_len],
             );
+            self.consumeX25519PrivateKey();
             self.consumeP256PrivateKey();
             self.consumeP384PrivateKey();
+            self.consumeP521PrivateKey();
             self.pending = .{
                 .allocator = self.config.allocator,
                 .server_private_key = .none,
@@ -873,6 +891,17 @@ pub fn ServerConnection(
             const pending = &self.pending;
             var shared_storage = [_]u8{0} ** key_exchange.p521.shared_len;
             const shared_secret: []u8 = switch (pending.selection.group) {
+                key_exchange.named_group_x25519 => blk: {
+                    if (pending.server_private_key != .x25519) {
+                        return error.NoSupportedGroup;
+                    }
+                    const shared = try key_exchange.sharedSecret(
+                        pending.server_private_key.x25519,
+                        client_public,
+                    );
+                    shared_storage[0..shared.len].* = shared;
+                    break :blk shared_storage[0..shared.len];
+                },
                 key_exchange.named_group_secp256r1 => blk: {
                     if (pending.server_private_key != .secp256r1) {
                         return error.NoSupportedGroup;
@@ -1172,6 +1201,14 @@ pub fn ServerConnection(
             self.stage = .established;
         }
 
+        fn consumeX25519PrivateKey(self: *Self) void {
+            if (self.x25519_private_key_consumed) return;
+            if (self.config.server_private_key_x25519) |private_key| {
+                std.crypto.secureZero(u8, private_key);
+            }
+            self.x25519_private_key_consumed = true;
+        }
+
         fn consumeP256PrivateKey(self: *Self) void {
             if (self.p256_private_key_consumed) return;
             if (self.config.server_private_key) |private_key| {
@@ -1210,6 +1247,9 @@ pub fn ServerConnection(
                 .client_finished,
                 => self.pending.deinit(),
                 .client_hello, .established, .failed => {},
+            }
+            if (!self.x25519_private_key_consumed) {
+                self.consumeX25519PrivateKey();
             }
             if (!self.p256_private_key_consumed) self.consumeP256PrivateKey();
             if (!self.p384_private_key_consumed) self.consumeP384PrivateKey();
