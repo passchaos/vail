@@ -30,6 +30,8 @@ pub fn main(init: std.process.Init) !void {
     );
     var prepared_key = try private_key.prepare();
     defer prepared_key.deinit();
+    var ecdh_private_x25519 =
+        [_]u8{0x85} ** vail.tls.key_exchange.secret_len;
     var ecdh_private = [_]u8{0} **
         vail.tls.key_exchange.p256.secret_len;
     ecdh_private[ecdh_private.len - 1] = 2;
@@ -75,6 +77,11 @@ pub fn main(init: std.process.Init) !void {
                 null,
         },
         .server_random = [_]u8{0x86} ** 32,
+        .server_private_key_x25519 = if (profile.group ==
+            vail.tls.key_exchange.named_group_x25519)
+            &ecdh_private_x25519
+        else
+            null,
         .server_private_key = if (profile.group ==
             vail.tls.key_exchange.named_group_secp256r1)
             &ecdh_private
@@ -131,6 +138,8 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("TLS 1.2 client Finished verified\n", .{});
     if (profile.group == vail.tls.key_exchange.named_group_secp521r1) {
         std.debug.print("TLS 1.2 P-521 ECDH negotiated\n", .{});
+    } else if (profile.group == vail.tls.key_exchange.named_group_x25519) {
+        std.debug.print("TLS 1.2 X25519 ECDH negotiated\n", .{});
     }
     if (established.peer_certificate_chain != null) {
         std.debug.print("TLS 1.2 client certificate verified\n", .{});
@@ -238,6 +247,12 @@ fn selectedProfile(init: std.process.Init) !Profile {
     if (args.next() != null) return error.InvalidArguments;
     if (std.mem.eql(u8, name, "aes128")) {
         return .{ .suite = .ecdhe_rsa_aes_128_gcm_sha256 };
+    }
+    if (std.mem.eql(u8, name, "x25519")) {
+        return .{
+            .suite = .ecdhe_rsa_aes_128_gcm_sha256,
+            .group = vail.tls.key_exchange.named_group_x25519,
+        };
     }
     if (std.mem.eql(u8, name, "aes256")) {
         return .{ .suite = .ecdhe_rsa_aes_256_gcm_sha384 };

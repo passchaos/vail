@@ -2103,6 +2103,9 @@ group (`0x0201`) in both directions.
 server, requiring ECDHE-RSA-AES128-GCM-SHA256, Extended Master Secret,
 RSA-PSS-authenticated ephemeral P-256 parameters, verified client/server
 Finished messages, and bidirectional application data.
+`zig build interop-openssl-tls12-x25519-server` repeats the OpenSSL direction
+with X25519 forced at both endpoints and requires the exact negotiated group,
+both Finished messages, and bidirectional application data.
 `zig build interop-openssl-tls12-client` and
 `zig build interop-rustls-tls12-client` exercise the reverse direction and
 require the Vail client to authenticate the server's certificate-bound

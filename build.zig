@@ -2971,6 +2971,30 @@ pub fn build(b: *std.Build) void {
     );
     interop_tls12_server_step.dependOn(&check_tls12_server.step);
 
+    const check_tls12_x25519_server = b.addSystemCommand(&.{ "sh", "-c" });
+    check_tls12_x25519_server.addArg(
+        "$1 x25519 > /tmp/vail-min-tls12-x25519-server.log 2>&1 & pid=$!; " ++
+            "sleep 0.2; " ++
+            "printf ping | timeout 8s openssl s_client -connect 127.0.0.1:24446 -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups X25519 -no_ticket -brief -ign_eof > /tmp/vail-min-tls12-x25519-client.log 2>&1 || true; " ++
+            "i=0; while [ $i -lt 20 ] && ! grep -q 'TLS 1.2 application data verified' /tmp/vail-min-tls12-x25519-server.log; do sleep 0.05; i=$((i + 1)); done; " ++
+            "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; " ++
+            "grep -q 'TLS 1.2 X25519 ECDH negotiated' /tmp/vail-min-tls12-x25519-server.log && " ++
+            "grep -q 'TLS 1.2 client Finished verified' /tmp/vail-min-tls12-x25519-server.log && " ++
+            "grep -q 'TLS 1.2 application data verified' /tmp/vail-min-tls12-x25519-server.log && " ++
+            "grep -q 'Protocol version: TLSv1.2' /tmp/vail-min-tls12-x25519-client.log && " ++
+            "grep -q 'Ciphersuite: ECDHE-RSA-AES128-GCM-SHA256' /tmp/vail-min-tls12-x25519-client.log && " ++
+            "grep -q 'vail tls12 ok' /tmp/vail-min-tls12-x25519-client.log",
+    );
+    check_tls12_x25519_server.addArg("sh");
+    check_tls12_x25519_server.addArtifactArg(min_tls12_server);
+    const interop_tls12_x25519_server_step = b.step(
+        "interop-openssl-tls12-x25519-server",
+        "Exercise Vail's TLS 1.2 X25519 server against OpenSSL",
+    );
+    interop_tls12_x25519_server_step.dependOn(
+        &check_tls12_x25519_server.step,
+    );
+
     const check_tls12_aes256_server = b.addSystemCommand(&.{ "sh", "-c" });
     check_tls12_aes256_server.addArg(
         "$1 aes256 > /tmp/vail-min-tls12-aes256-server.log 2>&1 & pid=$!; " ++
