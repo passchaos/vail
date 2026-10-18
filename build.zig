@@ -38,6 +38,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const signature_primitives = b.addModule("vail_signature_primitives", .{
+        .root_source_file = b.path("src/signature_primitives.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const library = b.addLibrary(.{
         .name = "vail",
         .root_module = vail,
@@ -65,6 +70,19 @@ pub fn build(b: *std.Build) void {
     );
     test_compile_step.dependOn(&tests.step);
     test_compile_step.dependOn(&package_tests.step);
+    const signature_primitives_tests = b.addTest(.{
+        .root_module = signature_primitives,
+    });
+    const run_signature_primitives_tests = b.addRunArtifact(
+        signature_primitives_tests,
+    );
+    const signature_primitives_test_step = b.step(
+        "test-signature-primitives",
+        "Run dependency-light P-521/SM2/SM3 signature primitive tests",
+    );
+    signature_primitives_test_step.dependOn(
+        &run_signature_primitives_tests.step,
+    );
 
     const traffic_bench = b.addExecutable(.{
         .name = "vail-bench-quic-traffic-crypto",
