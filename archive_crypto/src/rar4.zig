@@ -188,8 +188,10 @@ const RarSha1 = struct {
             const mutable_block = if (mutable) |bytes| bytes[offset..][0..64] else null;
             self.transform(input[offset..][0..64], mutable_block);
         }
-        @memcpy(self.buffer[self.buffer_len..][0 .. input.len - offset], input[offset..]);
-        self.buffer_len += input.len - offset;
+        const remaining = input.len - offset;
+        if (remaining != 0)
+            @memcpy(self.buffer[self.buffer_len..][0..remaining], input[offset..]);
+        self.buffer_len += remaining;
         self.total_len +%= input.len;
     }
 
@@ -265,6 +267,55 @@ const RarSha1 = struct {
         self.* = undefined;
     }
 };
+
+test "RAR4 SHA-1 matches standard SHA-1 across streaming boundaries" {
+    const Sha1 = std.crypto.hash.Sha1;
+    var input: [257]u8 = undefined;
+    for (&input, 0..) |*byte, index| byte.* = @truncate(index *% 73 +% 19);
+    const chunk_sizes = [_]usize{ 1, 2, 3, 7, 31, 63, 64, 65, 127 };
+
+    for (0..input.len + 1) |len| {
+        var expected: [Sha1.digest_length]u8 = undefined;
+        Sha1.hash(input[0..len], &expected, .{});
+        for (chunk_sizes) |chunk_size| {
+            var actual = RarSha1.init();
+            defer actual.deinit();
+            var offset: usize = 0;
+            while (offset < len) {
+                const end = @min(len, offset + chunk_size);
+                actual.update(input[offset..end]);
+                offset = end;
+            }
+            try std.testing.expectEqualSlices(u8, &expected, &actual.digest());
+        }
+    }
+}
+
+test "RAR4 mutable SHA-1 matches standard digest at prefix and block boundaries" {
+    const Sha1 = std.crypto.hash.Sha1;
+    var prefix: [63]u8 = undefined;
+    for (&prefix, 0..) |*byte, index| byte.* = @truncate(index *% 29 +% 7);
+    var input: [257]u8 = undefined;
+    for (&input, 0..) |*byte, index| byte.* = @truncate(index *% 61 +% 11);
+    const input_lengths = [_]usize{ 0, 1, 2, 3, 62, 63, 64, 65, 66, 127, 128, 129, 255, 256, 257 };
+
+    for (0..prefix.len + 1) |prefix_len| {
+        for (input_lengths) |input_len| {
+            var standard = Sha1.init(.{});
+            standard.update(prefix[0..prefix_len]);
+            standard.update(input[0..input_len]);
+            var expected: [Sha1.digest_length]u8 = undefined;
+            standard.final(&expected);
+
+            var mutable = input;
+            var actual = RarSha1.init();
+            defer actual.deinit();
+            actual.update(prefix[0..prefix_len]);
+            actual.updateRar29(mutable[0..input_len]);
+            try std.testing.expectEqualSlices(u8, &expected, &actual.digest());
+        }
+    }
+}
 
 test "RAR4 KDF matches independent SHA-1 vectors" {
     var keys = try deriveKeys(
