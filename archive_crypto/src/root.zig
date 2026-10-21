@@ -12,6 +12,7 @@ pub const arj = @import("arj.zig");
 pub const seven_zip = @import("seven_zip.zig");
 pub const esd = @import("esd.zig");
 pub const cryptoapi_rsa = @import("cryptoapi_rsa.zig");
+pub const android_ota = @import("android_ota.zig");
 
 test {
     _ = zipcrypto;
@@ -26,5 +27,6 @@ test {
     _ = seven_zip;
     _ = esd;
     _ = cryptoapi_rsa;
+    _ = android_ota;
     _ = @import("pkware_strong_tests.zig");
 }
