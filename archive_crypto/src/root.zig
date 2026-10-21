@@ -8,6 +8,7 @@ pub const pkware_strong_decrypt_stream = @import("pkware_strong_decrypt_stream.z
 pub const rar5 = @import("rar5.zig");
 pub const rar4 = @import("rar4.zig");
 pub const rar_legacy = @import("rar_legacy.zig");
+pub const arj = @import("arj.zig");
 pub const seven_zip = @import("seven_zip.zig");
 pub const esd = @import("esd.zig");
 pub const cryptoapi_rsa = @import("cryptoapi_rsa.zig");
@@ -21,6 +22,7 @@ test {
     _ = rar5;
     _ = rar4;
     _ = rar_legacy;
+    _ = arj;
     _ = seven_zip;
     _ = esd;
     _ = cryptoapi_rsa;
