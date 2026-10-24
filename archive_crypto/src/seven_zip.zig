@@ -72,7 +72,10 @@ pub fn deriveKey(
     var counter_bytes: [8]u8 = undefined;
     defer std.crypto.secureZero(u8, &counter_bytes);
     const rounds = @as(u64, 1) << num_cycles_power;
-    for (0..rounds) |counter| {
+    // Zig ranges use usize. Keep the 7z counter full-width on narrow targets;
+    // the validated hashed power is at most 24, so the increment cannot wrap.
+    var counter: u64 = 0;
+    while (counter < rounds) : (counter += 1) {
         hash.update(salt);
         hash.update(password_bytes);
         std.mem.writeInt(u64, &counter_bytes, counter, .little);
@@ -232,6 +235,76 @@ test "7-Zip KDF releases every allocation failure" {
                 direct_key_power,
                 .{},
             );
+            defer std.crypto.secureZero(u8, &key);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Test.run, .{});
+}
+
+test "7-Zip SHA-256 KDF portable counter matches salted Unicode and small-power golden keys" {
+    // Frozen independent Python hashlib SHA-256 vectors. Each round feeds
+    // salt, UTF-16LE password, and the complete eight-byte little-endian counter.
+    const Vector = struct { password: []const u8, salt: []const u8, power: u6, key_hex: []const u8 };
+    const vectors = [_]Vector{
+        .{ .password = "", .salt = &.{}, .power = 0, .key_hex = "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc" },
+        .{ .password = "password", .salt = &.{}, .power = 0, .key_hex = "140053b53e9dd0b594a283c08f6205891b2b7717e32a04e78eaf237208e9d484" },
+        .{ .password = "password", .salt = &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, .power = 1, .key_hex = "25b58cc6b527b4ba03ac8c8f26e71a16431da8de0397c0c354c716c149161cc2" },
+        .{ .password = "密码🔒", .salt = &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, .power = 12, .key_hex = "030bdaea2db2deec556a84fe28f051d4c5ba507f022f85bbcbd43144a52137e9" },
+    };
+    const Runtime = struct {
+        // Compile the whole public derivation with a runtime coder field on
+        // both native and x86, rather than specializing a usize-sized range.
+        noinline fn derive(password: []const u8, salt: []const u8, power: u6) ![key_len]u8 {
+            return deriveKey(std.testing.allocator, password, salt, power, .{});
+        }
+    };
+    for (vectors) |vector| {
+        var expected: [key_len]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected, vector.key_hex);
+        var key = try Runtime.derive(vector.password, vector.salt, vector.power);
+        defer std.crypto.secureZero(u8, &key);
+        try std.testing.expectEqual(expected, key);
+    }
+}
+
+test "7-Zip direct key preserves UTF-16LE padding truncation and cycle-limit exemption" {
+    var direct = try deriveKey(std.testing.allocator, "密码", &.{ 0x24, 0x24, 0x24, 0x24 }, direct_key_power, .{ .max_cycles_power = 0 });
+    defer std.crypto.secureZero(u8, &direct);
+    var expected: [key_len]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "24242424c65b0178000000000000000000000000000000000000000000000000");
+    try std.testing.expectEqual(expected, direct);
+
+    var truncated = try deriveKey(std.testing.allocator, "密码🔒abcdefghijklmnop", &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, direct_key_power, .{ .max_cycles_power = 0 });
+    defer std.crypto.secureZero(u8, &truncated);
+    _ = try std.fmt.hexToBytes(&expected, "000102030405060708090a0b0c0d0e0fc65b01783dd812dd6100620063006400");
+    try std.testing.expectEqual(expected, truncated);
+    try std.testing.expectEqual([_]u8{0} ** key_len, try deriveKey(std.testing.allocator, "", &.{}, direct_key_power, .{ .max_cycles_power = 0 }));
+}
+
+test "7-Zip KDF validates cycle policy before password allocation on narrow targets" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const a = failing.allocator();
+    // The six-bit field retains its format meaning: 25 through 62 are invalid,
+    // and 63 is the direct-key mode. No platform-dependent round cap is added.
+    for (25..63) |power| {
+        try std.testing.expectError(error.InvalidKdfCycles, deriveKey(a, &.{0xff}, &.{}, @intCast(power), .{ .max_cycles_power = 63 }));
+    }
+    try std.testing.expectError(error.InvalidKdfCycles, deriveKey(a, "password", &([_]u8{0} ** 17), direct_key_power, .{}));
+    try std.testing.expectError(error.KdfWorkLimitExceeded, deriveKey(a, &.{0xff}, &.{}, 12, .{ .max_cycles_power = 11 }));
+    try std.testing.expectError(error.KdfWorkLimitExceeded, deriveKey(a, &.{0xff}, &.{}, hard_max_cycles_power, .{ .max_cycles_power = hard_max_cycles_power - 1 }));
+    try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    try std.testing.expectEqual(@as(usize, 0), failing.allocated_bytes);
+    // Power 24 is still valid policy; the failing allocator stops before its
+    // costly rounds. The reserved direct mode also reaches password allocation.
+    try std.testing.expectError(error.OutOfMemory, deriveKey(a, "password", &.{}, hard_max_cycles_power, .{}));
+    try std.testing.expectError(error.OutOfMemory, deriveKey(a, "password", &.{}, direct_key_power, .{ .max_cycles_power = 0 }));
+    try std.testing.expectEqual(@as(usize, 0), failing.allocated_bytes);
+}
+
+test "7-Zip SHA-256 KDF preserves the UTF-16 password allocation failure contract" {
+    const Test = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var key = try deriveKey(allocator, "allocation-密码🔒", &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, 12, .{});
             defer std.crypto.secureZero(u8, &key);
         }
     };
