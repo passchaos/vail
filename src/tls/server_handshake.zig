@@ -401,7 +401,8 @@ fn writeServerHandshakeFlightSelected(
         }
         var compressed_certificate: std.ArrayList(u8) = .empty;
         defer compressed_certificate.deinit(allocator);
-        const certificate_wire = for (options.policy.compressed_certificates) |prepared| {
+        var certificate_wire: []const u8 = certificate.items;
+        for (options.policy.compressed_certificates) |prepared| {
             if (options.parsed_client_hello.supportsCertificateCompression(
                 prepared.algorithm,
             ) and prepared.matchesCertificateMessage(certificate.items) and
@@ -409,9 +410,60 @@ fn writeServerHandshakeFlightSelected(
             {
                 try prepared.write(&compressed_certificate, allocator);
                 selected_certificate_compression = prepared.algorithm;
-                break compressed_certificate.items;
+                certificate_wire = compressed_certificate.items;
+                break;
             }
-        } else certificate.items;
+        }
+        if (selected_certificate_compression == null) {
+            // No precomputed entry matched: compress on demand using the
+            // client's advertised preference order.
+            const offered_algorithms = options
+                .parsed_client_hello
+                .certificate_compression_algorithms;
+            var offered_index: usize = 0;
+            while (offered_index + 2 <= offered_algorithms.len) : (offered_index += 2) {
+                const algorithm: certificate_compression.Algorithm = @enumFromInt(
+                    std.mem.readInt(
+                        u16,
+                        offered_algorithms[offered_index..][0..2],
+                        .big,
+                    ),
+                );
+                if (!algorithm.supported() or
+                    !containsAlgorithm(
+                        options.policy.auto_certificate_compression,
+                        algorithm,
+                    )) continue;
+                var prepared = switch (algorithm) {
+                    .zlib => try certificate_compression.Prepared.initZlib(
+                        allocator,
+                        certificate.items,
+                        .interactive,
+                    ),
+                    .brotli => try certificate_compression.Prepared.initBrotli(
+                        allocator,
+                        certificate.items,
+                        .interactive,
+                    ),
+                    .zstd => try certificate_compression.Prepared.initZstd(
+                        allocator,
+                        certificate.items,
+                        .interactive,
+                    ),
+                    else => continue,
+                };
+                defer prepared.deinit();
+                if (prepared.view().savesBytes(certificate.items.len)) {
+                    try prepared.view().write(
+                        &compressed_certificate,
+                        allocator,
+                    );
+                    selected_certificate_compression = algorithm;
+                    certificate_wire = compressed_certificate.items;
+                    break;
+                }
+            }
+        }
         try encrypted_flight.appendSlice(allocator, certificate_wire);
         transcript_state.update(certificate_wire);
 
@@ -485,6 +537,16 @@ fn appendEncryptedHandshake(
         try out.appendSlice(allocator, buffer[0..len]);
         offset += chunk_len;
     }
+}
+
+fn containsAlgorithm(
+    algorithms: []const certificate_compression.Algorithm,
+    algorithm: certificate_compression.Algorithm,
+) bool {
+    for (algorithms) |candidate| {
+        if (candidate == algorithm) return true;
+    }
+    return false;
 }
 
 fn writeFinished(
@@ -1141,4 +1203,176 @@ test "server handshake fragments large Certificate messages across records" {
     try std.testing.expect(saw_large_certificate);
     try std.testing.expectEqual(@as(usize, 4), message_count);
     try std.testing.expect(record_count > 1);
+}
+
+const AutoCompressionOutcome = struct {
+    result: Result,
+    selected: ?certificate_compression.Algorithm,
+    certificate_message: []const u8,
+};
+
+fn runAutoCompressionHandshake(
+    allocator: std.mem.Allocator,
+    offered: []const certificate_compression.Algorithm,
+    auto: []const certificate_compression.Algorithm,
+    plaintext: []u8,
+    ordinary_out: *[]u8,
+) !AutoCompressionOutcome {
+    const public_key = [_]u8{0x79} ** key_exchange.secret_len;
+    var hello: std.ArrayList(u8) = .empty;
+    defer hello.deinit(allocator);
+    try client_hello.write(&hello, allocator, .{
+        .random = [_]u8{0x7a} ** 32,
+        .x25519_public_key = public_key,
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+        .certificate_compression_algorithms = offered,
+    });
+    const parsed_hello = try client_hello.parse(hello.items);
+
+    const signing_key = try std.crypto.sign.Ed25519.KeyPair
+        .generateDeterministic(
+        [_]u8{0x7b} ** std.crypto.sign.Ed25519.KeyPair.seed_length,
+    );
+    const large_certificate = [_]u8{0x7c} ** 4096;
+    var ordinary_list: std.ArrayList(u8) = .empty;
+    errdefer ordinary_list.deinit(allocator);
+    try auth.writeCertificate(
+        &ordinary_list,
+        allocator,
+        &.{&large_certificate},
+    );
+    const ordinary_owned = try ordinary_list.toOwnedSlice(allocator);
+
+    var flight: std.ArrayList(u8) = .empty;
+    defer flight.deinit(allocator);
+    var result = try writeServerHandshakeFlight(
+        &flight,
+        allocator,
+        .{
+            .client_hello_bytes = hello.items,
+            .parsed_client_hello = parsed_hello,
+            .policy = .{
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .groups = &.{key_exchange.named_group_x25519},
+                .auto_certificate_compression = auto,
+            },
+            .server_random = [_]u8{0x7d} ** 32,
+            .server_key_share = &([_]u8{0x7e} ** 32),
+            .shared_secret = &([_]u8{0x7f} ** 32),
+            .certificate_chain = &.{&large_certificate},
+            .signer = .{ .ed25519 = .{ .key_pair = signing_key } },
+        },
+    );
+    errdefer result.handshake_secret.deinit();
+    errdefer result.client_handshake_traffic_secret.deinit();
+    errdefer result.server_handshake_traffic_secret.deinit();
+
+    const server_hello_len = 4 +
+        ((@as(usize, flight.items[1]) << 16) |
+            (@as(usize, flight.items[2]) << 8) |
+            flight.items[3]);
+    var keys = try record.Keys.derive(
+        result.selection.suite,
+        result.server_handshake_traffic_secret,
+    );
+    defer keys.deinit();
+    var offset = server_hello_len;
+    const encrypted_flight = try openRecordAt(
+        flight.items,
+        &offset,
+        &keys,
+        0,
+        plaintext,
+    );
+    const certificate_message = try handshakeMessageAt(encrypted_flight, 1);
+    ordinary_out.* = ordinary_owned;
+    return .{
+        .result = result,
+        .selected = result.certificate_compression,
+        .certificate_message = certificate_message,
+    };
+}
+
+test "server handshake compresses a certificate on demand without precomputation" {
+    const allocator = std.testing.allocator;
+    var ordinary: []u8 = &.{};
+    defer allocator.free(ordinary);
+    var plaintext: [8192]u8 = undefined;
+    var outcome = try runAutoCompressionHandshake(
+        allocator,
+        &.{.zlib},
+        &.{ .brotli, .zstd, .zlib },
+        &plaintext,
+        &ordinary,
+    );
+    defer {
+        outcome.result.handshake_secret.deinit();
+        outcome.result.client_handshake_traffic_secret.deinit();
+        outcome.result.server_handshake_traffic_secret.deinit();
+    }
+    try std.testing.expectEqual(
+        certificate_compression.handshake_type_compressed_certificate,
+        outcome.certificate_message[0],
+    );
+    try std.testing.expectEqual(
+        certificate_compression.Algorithm.zlib,
+        outcome.selected.?,
+    );
+    const restored = try certificate_compression.decompressCertificate(
+        allocator,
+        outcome.certificate_message,
+        &.{.zlib},
+        ordinary.len,
+    );
+    defer allocator.free(restored);
+    try std.testing.expectEqualSlices(u8, ordinary, restored);
+}
+
+test "server handshake auto compression follows the client algorithm order" {
+    const allocator = std.testing.allocator;
+    var ordinary: []u8 = &.{};
+    defer allocator.free(ordinary);
+    var plaintext: [8192]u8 = undefined;
+    var outcome = try runAutoCompressionHandshake(
+        allocator,
+        &.{ .zstd, .zlib },
+        &.{ .zstd, .zlib },
+        &plaintext,
+        &ordinary,
+    );
+    defer {
+        outcome.result.handshake_secret.deinit();
+        outcome.result.client_handshake_traffic_secret.deinit();
+        outcome.result.server_handshake_traffic_secret.deinit();
+    }
+    try std.testing.expectEqual(
+        certificate_compression.Algorithm.zstd,
+        outcome.selected.?,
+    );
+}
+
+test "server handshake leaves certificate uncompressed when auto disabled" {
+    const allocator = std.testing.allocator;
+    var ordinary: []u8 = &.{};
+    defer allocator.free(ordinary);
+    var plaintext: [8192]u8 = undefined;
+    var outcome = try runAutoCompressionHandshake(
+        allocator,
+        &.{.zlib},
+        &.{},
+        &plaintext,
+        &ordinary,
+    );
+    defer {
+        outcome.result.handshake_secret.deinit();
+        outcome.result.client_handshake_traffic_secret.deinit();
+        outcome.result.server_handshake_traffic_secret.deinit();
+    }
+    try std.testing.expect(outcome.selected == null);
+    try std.testing.expectEqual(@as(u8, 0x0b), outcome.certificate_message[0]);
+    try std.testing.expectEqualSlices(
+        u8,
+        ordinary,
+        outcome.certificate_message,
+    );
 }

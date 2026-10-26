@@ -83,6 +83,10 @@ pub const Policy = struct {
     /// Precomputed compressed Certificate messages. The first entry matching
     /// both the actual Certificate body and a client-offered algorithm wins.
     compressed_certificates: []const certificate_compression.PreparedView = &.{},
+    /// Algorithms the server may compress a Certificate message with on
+    /// demand when no precomputed entry matched, tried in the client's
+    /// advertised preference order. An empty list disables compression.
+    auto_certificate_compression: []const certificate_compression.Algorithm = &.{},
     server_certificate_type: auth.CertificateType = .x509,
     client_certificate_type: auth.CertificateType = .x509,
     application_settings: []const application_settings.Setting = &.{},
