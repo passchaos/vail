@@ -11,6 +11,7 @@ const certificate_compression = @import("certificate_compression.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const extension_set = @import("extension_set.zig");
 const record_size_limit = @import("record_size_limit.zig");
+const sni_policy = @import("client_hello/sni.zig");
 
 pub const handshake_type_client_hello: u8 = 0x01;
 pub const ext_server_name: u16 = 0x0000;
@@ -270,10 +271,10 @@ pub fn writeWithKeyShare(
     var extensions: std.ArrayList(u8) = .empty;
     defer extensions.deinit(allocator);
 
-    if (options.server_name) |server_name| {
-        if (server_name.len == 0) {
-            return error.InvalidClientHello;
-        }
+    if (options.server_name) |name| {
+        if (name.len == 0) return error.InvalidClientHello;
+    }
+    if (sni_policy.wireName(options.server_name)) |server_name| {
         var sni: std.ArrayList(u8) = .empty;
         defer sni.deinit(allocator);
         try appendInt(&sni, allocator, u16, 3 + server_name.len);
@@ -1394,6 +1395,32 @@ pub fn validateSecondClientHello(
 fn optionalBytesEql(a: ?[]const u8, b: ?[]const u8) bool {
     if (a == null or b == null) return a == null and b == null;
     return std.mem.eql(u8, a.?, b.?);
+}
+
+test "ClientHello IP identities omit SNI in TLS 1.2 and TLS 1.3" {
+    const allocator = std.testing.allocator;
+    const versions = [_][]const u16{ &.{0x0303}, &.{0x0304}, &.{ 0x0304, 0x0303 } };
+    for (versions) |offered| {
+        for ([_][]const u8{ "127.0.0.1", "::1", "::ffff:192.0.2.1", "example.com" }) |identity| {
+            var encoded: std.ArrayList(u8) = .empty;
+            defer encoded.deinit(allocator);
+            try writeWithKeyShare(&encoded, allocator, .{
+                .random = [_]u8{0x79} ** 32,
+                .server_name = identity,
+                .key_share = .{ .group = 0x001d, .key_exchange = &([_]u8{0x7a} ** 32) },
+                .supported_versions = offered,
+                .alpn_protocols = &.{"h2"},
+            });
+            const parsed = try parse(encoded.items);
+            if (std.mem.eql(u8, identity, "example.com")) {
+                try std.testing.expectEqualStrings(identity, parsed.server_name.?);
+            } else {
+                try std.testing.expect(parsed.server_name == null);
+            }
+            try std.testing.expect(try parsed.supportsAlpnProtocol("h2"));
+            try std.testing.expect((try parsed.keyShareForGroup(0x001d)) != null);
+        }
+    }
 }
 
 test "ClientHello writer carries an arbitrary single key share" {
