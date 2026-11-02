@@ -1161,6 +1161,80 @@ pub const SystemStore = struct {
         return result;
     }
 
+    pub const SystemPaths = struct {
+        /// `SSL_CERT_FILE` equivalent: one PEM file containing any number of
+        /// certificates. When this or `dirs` is provided, the platform store
+        /// is not scanned, matching rustls-native-certs.
+        file: ?[]const u8 = null,
+        /// `SSL_CERT_DIR` equivalent: non-recursive PEM directories.
+        dirs: []const []const u8 = &.{},
+    };
+
+    /// Load the platform store or caller-selected OpenSSL-style paths.
+    ///
+    /// With no paths this is `init`. With paths, only those paths are read:
+    /// `file` first, then every regular file or symlink in each directory.
+    /// Malformed certificate blocks are skipped so one bad CA file cannot
+    /// reject the rest of the store, matching rustls-native-certs tolerance.
+    pub fn initWithPaths(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        now: std.Io.Timestamp,
+        paths: SystemPaths,
+    ) !SystemStore {
+        if (paths.file == null and paths.dirs.len == 0) {
+            return init(allocator, io, now);
+        }
+        var result = SystemStore{ .allocator = allocator };
+        errdefer result.deinit();
+        if (paths.file) |file| {
+            if (file.len != 0) try result.addPemFile(io, file, now.toSeconds());
+        }
+        for (paths.dirs) |dir| {
+            if (dir.len == 0) continue;
+            try result.addPemDirectory(io, dir, now.toSeconds());
+        }
+        return result;
+    }
+
+    /// Load native roots with rustls-native-certs environment semantics.
+    ///
+    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` take precedence over the platform
+    /// store when either is present. `SSL_CERT_DIR` is split with the native
+    /// path-list delimiter (`:` on Unix, `;` on Windows). Certificates from
+    /// Vail's compatibility parser are added alongside Zig std's indexed
+    /// bundle, so SHA3- and RSA-PSS-signed roots participate in trust paths.
+    pub fn initWithEnviron(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        now: std.Io.Timestamp,
+        environ: std.process.Environ,
+    ) !SystemStore {
+        var map = try std.process.Environ.createMap(environ, allocator);
+        defer map.deinit();
+        const file = map.get("SSL_CERT_FILE");
+        const dirs = map.get("SSL_CERT_DIR");
+        if (file == null and dirs == null) return init(allocator, io, now);
+
+        var result = SystemStore{ .allocator = allocator };
+        errdefer result.deinit();
+        if (file) |path| {
+            if (path.len != 0) try result.addPemFile(io, path, now.toSeconds());
+        }
+        if (dirs) |dir_list| {
+            var it = std.mem.splitScalar(
+                u8,
+                dir_list,
+                std.fs.path.delimiter,
+            );
+            while (it.next()) |dir| {
+                if (dir.len == 0) continue;
+                try result.addPemDirectory(io, dir, now.toSeconds());
+            }
+        }
+        return result;
+    }
+
     pub fn deinit(self: *SystemStore) void {
         self.rollbackCompatibleAnchors(0);
         self.compatible_trust_anchors.deinit(self.allocator);
@@ -1335,6 +1409,152 @@ pub const SystemStore = struct {
             position = end + pem_certificate_end.len;
         }
         if (!found) return error.MissingCertificateMarker;
+        return added;
+    }
+
+    fn addPemFile(
+        self: *SystemStore,
+        io: std.Io,
+        path: []const u8,
+        now_seconds: i64,
+    ) !void {
+        const pem = if (std.fs.path.isAbsolute(path)) blk: {
+            var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+            defer file.close(io);
+            var reader = file.reader(io, &.{});
+            break :blk try reader.interface.allocRemaining(
+                self.allocator,
+                .limited(default_max_compatible_pem_bytes),
+            );
+        } else blk: {
+            var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+            defer file.close(io);
+            var reader = file.reader(io, &.{});
+            break :blk try reader.interface.allocRemaining(
+                self.allocator,
+                .limited(default_max_compatible_pem_bytes),
+            );
+        };
+        defer self.allocator.free(pem);
+        _ = try self.addPemBuffer(pem, now_seconds);
+    }
+
+    fn addPemDirectory(
+        self: *SystemStore,
+        io: std.Io,
+        path: []const u8,
+        now_seconds: i64,
+    ) !void {
+        var dir = if (std.fs.path.isAbsolute(path))
+            try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true })
+        else
+            try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+        defer dir.close(io);
+
+        var iterator = dir.iterate();
+        while (try iterator.next(io)) |entry| {
+            switch (entry.kind) {
+                .file, .sym_link => {},
+                else => continue,
+            }
+            const pem = dir.readFileAlloc(
+                io,
+                entry.name,
+                self.allocator,
+                .limited(default_max_compatible_pem_bytes),
+            ) catch |err| switch (err) {
+                // Match rustls-native-certs: one unreadable or oversized
+                // file does not reject the rest of the directory.
+                error.FileNotFound,
+                error.AccessDenied,
+                error.IsDir,
+                error.StreamTooLong,
+                error.SymLinkLoop,
+                error.NotDir,
+                => continue,
+                else => return err,
+            };
+            defer self.allocator.free(pem);
+            _ = try self.addPemBuffer(pem, now_seconds);
+        }
+    }
+
+    /// Decode a PEM buffer into the std-indexed bundle and the compatibility
+    /// anchor list. Invalid blocks are skipped independently so a single bad
+    /// CA file cannot fail the whole native store load.
+    fn addPemBuffer(
+        self: *SystemStore,
+        pem: []const u8,
+        now_seconds: i64,
+    ) !usize {
+        var added: usize = 0;
+        var position: usize = 0;
+        while (std.mem.indexOfPos(
+            u8,
+            pem,
+            position,
+            pem_certificate_begin,
+        )) |begin| {
+            const encoded_start = begin + pem_certificate_begin.len;
+            const end = std.mem.indexOfPos(
+                u8,
+                pem,
+                encoded_start,
+                pem_certificate_end,
+            ) orelse break;
+            position = end + pem_certificate_end.len;
+            const encoded = std.mem.trim(
+                u8,
+                pem[encoded_start..end],
+                " \t\r\n",
+            );
+            var significant_len: usize = 0;
+            for (encoded) |byte| switch (byte) {
+                ' ', '\t', '\r', '\n' => {},
+                else => significant_len += 1,
+            };
+            const decoded_capacity = std.base64.standard.Decoder
+                .calcSizeUpperBound(significant_len) catch continue;
+            if (decoded_capacity == 0 or
+                decoded_capacity > max_compatible_certificate_bytes)
+            {
+                continue;
+            }
+            const decoded = try self.allocator.alloc(u8, decoded_capacity);
+            defer self.allocator.free(decoded);
+            const decoded_len = pem_base64.decode(decoded, encoded) catch
+                continue;
+            const certificate_der = decoded[0..decoded_len];
+
+            if (Certificate.parse(.{
+                .buffer = certificate_der,
+                .index = 0,
+            })) |_| {
+                const start = self.bundle.bytes.items.len;
+                if (start > std.math.maxInt(u32)) {
+                    return error.CertificateAuthorityBundleTooBig;
+                }
+                try self.bundle.bytes.appendSlice(
+                    self.allocator,
+                    certificate_der,
+                );
+                self.bundle.parseCert(
+                    self.allocator,
+                    @intCast(start),
+                    now_seconds,
+                ) catch {
+                    self.bundle.bytes.shrinkRetainingCapacity(start);
+                    continue;
+                };
+                if (self.bundle.bytes.items.len != start) added += 1;
+            } else |_| {
+                const compatible = self.addCompatibleCertificate(
+                    certificate_der,
+                    now_seconds,
+                ) catch continue;
+                if (compatible) added += 1;
+            }
+        }
         return added;
     }
 

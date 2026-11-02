@@ -29,4 +29,5 @@ test {
     _ = ocsp;
     _ = policy;
     _ = @import("tests.zig");
+    _ = @import("system_store_tests.zig");
 }
