@@ -4,6 +4,7 @@
 //! zero-allocation verification callback suitable for `auth.ClientVerifier`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const auth = @import("../tls/auth.zig");
 const p521 = @import("../crypto/p521.zig");
 const certificate_compat = @import("certificate.zig");
@@ -1154,10 +1155,63 @@ pub const SystemStore = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         now: std.Io.Timestamp,
+    ) !SystemStore {
+        return switch (builtin.os.tag) {
+            .linux => initLinux(allocator, io, now),
+            else => initPlatformRescan(allocator, io, now),
+        };
+    }
+
+    fn initPlatformRescan(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        now: std.Io.Timestamp,
     ) Certificate.Bundle.RescanError!SystemStore {
         var result = SystemStore{ .allocator = allocator };
         errdefer result.deinit();
         try result.bundle.rescan(allocator, io, now);
+        return result;
+    }
+
+    /// Linux native roots with the same file/directory preference order as
+    /// Zig std, but with per-certificate tolerance and compatibility anchors.
+    fn initLinux(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        now: std.Io.Timestamp,
+    ) !SystemStore {
+        const cert_file_paths = [_][]const u8{
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/ca-bundle.pem",
+            "/etc/pki/tls/cacert.pem",
+            "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+            "/etc/ssl/cert.pem",
+        };
+        const cert_dir_paths = [_][]const u8{
+            "/etc/ssl/certs",
+            "/etc/pki/tls/certs",
+            "/system/etc/security/cacerts",
+        };
+        var result = SystemStore{ .allocator = allocator };
+        errdefer result.deinit();
+        var found_file = false;
+        for (cert_file_paths) |path| {
+            result.addPemFile(io, path, now.toSeconds()) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
+            found_file = true;
+            break;
+        }
+        if (!found_file) {
+            for (cert_dir_paths) |path| {
+                result.addPemDirectory(io, path, now.toSeconds()) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    else => return err,
+                };
+            }
+        }
         return result;
     }
 

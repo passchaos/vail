@@ -225,3 +225,22 @@ test "SystemStore initWithEnviron honors SSL_CERT_FILE and SSL_CERT_DIR" {
         .chain = &.{&sha3_leaf},
     });
 }
+
+test "SystemStore init loads Linux native roots tolerantly" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const now = std.Io.Timestamp.now(io, .real);
+    var store = try trust.SystemStore.init(allocator, io, now);
+    defer store.deinit();
+
+    const default_bundle = std.Io.Dir.openFileAbsolute(
+        io,
+        "/etc/ssl/certs/ca-certificates.crt",
+        .{},
+    ) catch null;
+    if (default_bundle) |file| {
+        file.close(io);
+        try std.testing.expect(store.bundle.bytes.items.len != 0);
+    }
+}
