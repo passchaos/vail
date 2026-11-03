@@ -2,6 +2,7 @@
 
 pub const aes_gcm = @import("aes_gcm.zig");
 pub const aes_ccm = @import("aes_ccm.zig");
+pub const blake2s = @import("blake2s.zig");
 pub const chacha20_poly1305 = @import("chacha20_poly1305.zig");
 pub const ed25519 = @import("ed25519.zig");
 pub const hpke = @import("hpke.zig");
@@ -19,6 +20,7 @@ pub const sm2 = @import("sm2.zig");
 pub const sm3 = @import("sm3.zig");
 pub const sm4 = @import("sm4.zig");
 pub const x25519 = @import("x25519.zig");
+pub const xchacha20_poly1305 = @import("xchacha20_poly1305.zig");
 
 pub const testing = struct {
     pub const rsa_signing = @import("testdata/rsa_signing.zig");
@@ -43,4 +45,5 @@ test {
     _ = sm3;
     _ = sm4;
     _ = x25519;
+    _ = xchacha20_poly1305;
 }
