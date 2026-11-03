@@ -2,6 +2,7 @@
 
 pub const aes_gcm = @import("aes_gcm.zig");
 pub const aes_ccm = @import("aes_ccm.zig");
+pub const aes_ctr = @import("aes_ctr.zig");
 pub const blake2s = @import("blake2s.zig");
 pub const chacha20_poly1305 = @import("chacha20_poly1305.zig");
 pub const ed25519 = @import("ed25519.zig");
@@ -31,6 +32,7 @@ test {
     _ = @import("mldsa_tests.zig");
     _ = aes_gcm;
     _ = aes_ccm;
+    _ = aes_ctr;
     _ = chacha20_poly1305;
     _ = ed25519;
     _ = hpke;
