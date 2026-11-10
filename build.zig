@@ -23,6 +23,26 @@ pub fn build(b: *std.Build) void {
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const enable_bench = b.option(
+        bool,
+        "bench",
+        "Register benchmark steps",
+    ) orelse true;
+    const enable_interop = b.option(
+        bool,
+        "interop",
+        "Register interoperability steps",
+    ) orelse true;
+    const enable_archive = b.option(
+        bool,
+        "archive",
+        "Include archive_crypto tests in test-all",
+    ) orelse true;
+    const enable_examples = b.option(
+        bool,
+        "examples",
+        "Build example programs",
+    ) orelse true;
     const vort_dep = b.dependency("vort", .{
         .target = target,
         .optimize = optimize,
@@ -86,14 +106,6 @@ pub fn build(b: *std.Build) void {
         &run_signature_primitives_tests.step,
     );
 
-    const archive_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("archive_crypto/src/root.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_archive_tests = b.addRunArtifact(archive_tests);
     const test_all_step = b.step(
         "test-all",
         "Run Vail, signature-primitive, package, and archive test suites",
@@ -101,10 +113,20 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_tests.step);
     test_all_step.dependOn(&run_package_tests.step);
     test_all_step.dependOn(&run_signature_primitives_tests.step);
-    test_all_step.dependOn(&run_archive_tests.step);
+    if (enable_archive) {
+        const archive_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("archive_crypto/src/root.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_archive_tests = b.addRunArtifact(archive_tests);
+        test_all_step.dependOn(&run_archive_tests.step);
+    }
 
-    benches.add(b, vail, target, optimize);
-    interop.add(b, vail, target, optimize);
+    if (enable_bench) benches.add(b, vail, target, optimize);
+    if (enable_interop) interop.add(b, vail, target, optimize);
 
     var bench_deps: std.ArrayList(*std.Build.Step) = .empty;
     var interop_deps: std.ArrayList(*std.Build.Step) = .empty;
@@ -187,19 +209,21 @@ pub fn build(b: *std.Build) void {
 
     const example_names = [_][]const u8{ "sha256", "aes_gcm", "mac" };
     const examples_step = b.step("examples", "Build example programs");
-    for (example_names) |name| {
-        const example = b.addExecutable(.{
-            .name = b.fmt("vail-example-{s}", .{name}),
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(
-                    b.fmt("examples/{s}.zig", .{name}),
-                ),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{.{ .name = "vail", .module = vail }},
-            }),
-        });
-        examples_step.dependOn(&example.step);
+    if (enable_examples) {
+        for (example_names) |name| {
+            const example = b.addExecutable(.{
+                .name = b.fmt("vail-example-{s}", .{name}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(
+                        b.fmt("examples/{s}.zig", .{name}),
+                    ),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "vail", .module = vail }},
+                }),
+            });
+            examples_step.dependOn(&example.step);
+        }
     }
     check_step.dependOn(examples_step);
 }

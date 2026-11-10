@@ -25,6 +25,21 @@ Individual benchmark and interoperability steps are still available, for
 example `zig build bench-tls-client-connection` or
 `zig build interop-openssl-p384-sign`.
 
+## Build options
+
+The optional build graphs can be disabled to keep configure time and build
+graphs small:
+
+```sh
+zig build -Dbench=false
+zig build -Dinterop=false
+zig build -Darchive=false
+zig build -Dexamples=false
+```
+
+`-Darchive=false` removes the `archive_crypto` test suite from `test-all`;
+the library and its own `archive_crypto/build.zig` remain available.
+
 ## Cross-compilation
 
 Use the standard Zig target options:
