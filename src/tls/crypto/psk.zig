@@ -5,11 +5,11 @@
 //! extension while computing the binder over the correctly truncated message.
 
 const std = @import("std");
-const sha256 = @import("../crypto/hash/sha256.zig");
+const sha256 = @import("../../crypto/hash/sha256.zig");
 
 const Sha256 = sha256.Hash;
 const Sha384 = std.crypto.hash.sha2.Sha384;
-const Sm3 = @import("../crypto/hash/sm3.zig").Hash;
+const Sm3 = @import("../../crypto/hash/sm3.zig").Hash;
 const key_schedule = @import("key_schedule.zig");
 const secret = @import("secret.zig");
 const tls_transcript = @import("transcript.zig");
@@ -1098,7 +1098,7 @@ test "TLS client can advertise future PSK-DHE resumption without a ticket" {
     var hello = try baseClientHello(allocator);
     defer hello.deinit(allocator);
     try appendPskDheMode(&hello, allocator);
-    const parsed = try @import("client_hello.zig").parse(hello.items);
+    const parsed = try @import("../handshake/client_hello.zig").parse(hello.items);
     try std.testing.expectEqualSlices(
         u8,
         &.{psk_dhe_ke},

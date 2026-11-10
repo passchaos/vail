@@ -6,14 +6,14 @@
 //! AES-128-GCM.
 
 const std = @import("std");
-const hpke = @import("../crypto/kex/hpke.zig");
-const X25519 = @import("../crypto/kex/x25519.zig").X25519;
+const hpke = @import("../../crypto/kex/hpke.zig");
+const X25519 = @import("../../crypto/kex/x25519.zig").X25519;
 const client_hello = @import("client_hello.zig");
 const extension_set = @import("extension_set.zig");
-const psk = @import("psk.zig");
-const secret = @import("secret.zig");
-const sm3 = @import("../crypto/hash/sm3.zig");
-const transcript = @import("transcript.zig");
+const psk = @import("../crypto/psk.zig");
+const secret = @import("../crypto/secret.zig");
+const sm3 = @import("../../crypto/hash/sm3.zig");
+const transcript = @import("../crypto/transcript.zig");
 
 pub const version: u16 = 0xfe0d;
 pub const extension_type: u16 = version;

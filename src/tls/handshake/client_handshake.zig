@@ -9,14 +9,14 @@ const std = @import("std");
 const application_settings = @import("application_settings.zig");
 const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
-const cipher_suite = @import("cipher_suite.zig");
+const cipher_suite = @import("../crypto/cipher_suite.zig");
 const client_auth = @import("client_auth.zig");
 const client_hello = @import("client_hello.zig");
-const key_schedule = @import("key_schedule.zig");
-const secret = @import("secret.zig");
+const key_schedule = @import("../crypto/key_schedule.zig");
+const secret = @import("../crypto/secret.zig");
 const server_handshake = @import("server_handshake.zig");
 const server_hello = @import("server_hello.zig");
-const transcript = @import("transcript.zig");
+const transcript = @import("../crypto/transcript.zig");
 
 pub const handshake_type_end_of_early_data: u8 = 0x05;
 
@@ -703,7 +703,7 @@ test "authenticated client handshake verifies server and writes identity" {
         .application_settings_protocols = &.{"h2"},
     });
     const client_hello_bytes = client_hello_message.items;
-    const suite = @import("cipher_suite.zig").Suite
+    const suite = @import("../crypto/cipher_suite.zig").Suite
         .aes_128_gcm_sha256;
     var server_hello_bytes: std.ArrayList(u8) = .empty;
     defer server_hello_bytes.deinit(allocator);

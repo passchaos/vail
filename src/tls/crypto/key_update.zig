@@ -1,8 +1,8 @@
 //! TLS 1.3 post-handshake KeyUpdate codec and record-key transition helpers.
 
 const std = @import("std");
-const record = @import("record.zig");
-const record_fragment = @import("record_fragment.zig");
+const record = @import("../record.zig");
+const record_fragment = @import("../record_fragment.zig");
 const traffic = @import("traffic.zig");
 const traffic_secrets = @import("traffic_secrets.zig");
 

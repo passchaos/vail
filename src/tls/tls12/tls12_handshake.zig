@@ -1,12 +1,12 @@
 //! TLS 1.2 ECDHE server-handshake message construction and parsing.
 
 const std = @import("std");
-const auth = @import("auth.zig");
-const client_hello = @import("client_hello.zig");
-const key_exchange = @import("key_exchange.zig");
-const record_size_limit = @import("record_size_limit.zig");
+const auth = @import("../handshake/auth.zig");
+const client_hello = @import("../handshake/client_hello.zig");
+const key_exchange = @import("../key_exchange.zig");
+const record_size_limit = @import("../handshake/record_size_limit.zig");
 const tls12 = @import("tls12.zig");
-const transcript = @import("transcript.zig");
+const transcript = @import("../crypto/transcript.zig");
 
 pub const handshake_type_server_hello: u8 = 0x02;
 pub const handshake_type_certificate: u8 = 0x0b;
@@ -1490,10 +1490,10 @@ test "RFC 6961 CertificateStatus response lists round-trip strictly" {
 
 test "TLS 1.2 server flight is transcript-bound and signed" {
     const allocator = std.testing.allocator;
-    const vector = @import("../crypto/testdata/rsa_signing.zig");
+    const vector = @import("../../crypto/testdata/rsa_signing.zig");
     const certificate = decodeHex(vector.certificate_hex);
     const private_der = decodeHex(vector.private_key_pkcs8_hex);
-    const private = try @import("../crypto/sign/rsa.zig").PrivateKey.fromDer(
+    const private = try @import("../../crypto/sign/rsa.zig").PrivateKey.fromDer(
         &private_der,
     );
     var prepared = try private.prepare();

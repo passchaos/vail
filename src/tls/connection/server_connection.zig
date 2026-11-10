@@ -6,31 +6,31 @@
 //! shared secrets, transcript hashes, traffic keys, or record sequence numbers.
 
 const std = @import("std");
-const alert = @import("alert.zig");
-const application_settings = @import("application_settings.zig");
-const auth = @import("auth.zig");
-const certificate_compression = @import("certificate_compression.zig");
-const client_auth = @import("client_auth.zig");
-const cipher_suite = @import("cipher_suite.zig");
-const client_hello = @import("client_hello.zig");
+const alert = @import("../alert.zig");
+const application_settings = @import("../handshake/application_settings.zig");
+const auth = @import("../handshake/auth.zig");
+const certificate_compression = @import("../handshake/certificate_compression.zig");
+const client_auth = @import("../handshake/client_auth.zig");
+const cipher_suite = @import("../crypto/cipher_suite.zig");
+const client_hello = @import("../handshake/client_hello.zig");
 const connection = @import("connection.zig");
-const early_data = @import("early_data.zig");
-const ech = @import("ech.zig");
-const key_exchange = @import("key_exchange.zig");
-const key_log = @import("key_log.zig");
-const key_schedule = @import("key_schedule.zig");
-const psk = @import("psk.zig");
-const record = @import("record.zig");
-const record_size_limit = @import("record_size_limit.zig");
-const secret = @import("secret.zig");
-const server_flight = @import("server_flight.zig");
-const server_handshake = @import("server_handshake.zig");
-const server_hello = @import("server_hello.zig");
+const early_data = @import("../handshake/early_data.zig");
+const ech = @import("../handshake/ech.zig");
+const key_exchange = @import("../key_exchange.zig");
+const key_log = @import("../handshake/key_log.zig");
+const key_schedule = @import("../crypto/key_schedule.zig");
+const psk = @import("../crypto/psk.zig");
+const record = @import("../record.zig");
+const record_size_limit = @import("../handshake/record_size_limit.zig");
+const secret = @import("../crypto/secret.zig");
+const server_flight = @import("../handshake/server_flight.zig");
+const server_handshake = @import("../handshake/server_handshake.zig");
+const server_hello = @import("../handshake/server_hello.zig");
 const stream = @import("stream.zig");
-const ticket = @import("ticket.zig");
-const ticket_keyring = @import("ticket_keyring.zig");
-const traffic = @import("traffic.zig");
-const transcript = @import("transcript.zig");
+const ticket = @import("../crypto/ticket.zig");
+const ticket_keyring = @import("../crypto/ticket_keyring.zig");
+const traffic = @import("../crypto/traffic.zig");
+const transcript = @import("../crypto/transcript.zig");
 
 pub const Error = std.mem.Allocator.Error || client_hello.Error ||
     server_handshake.Error || stream.ProtectedError || key_schedule.Error ||
@@ -2118,7 +2118,7 @@ test "resolved identity validates per-entry OCSP configuration" {
 
 test "identity set honors certificate signature algorithms separately" {
     const allocator = std.testing.allocator;
-    const path_vectors = @import("../x509/testdata/path_vectors.zig");
+    const path_vectors = @import("../../x509/testdata/path_vectors.zig");
     const leaf = decodeHex(path_vectors.leaf_hex);
     const intermediate = decodeHex(path_vectors.intermediate_hex);
     const signing_key = try std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair

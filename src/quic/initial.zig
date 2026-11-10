@@ -13,7 +13,7 @@ const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const sha256 = @import("../crypto/hash/sha256.zig");
 const common = @import("traffic_crypto/common.zig");
 const traffic = @import("traffic_crypto.zig");
-const tls_secret = @import("../tls/secret.zig");
+const tls_secret = @import("../tls/crypto/secret.zig");
 
 pub const version_1: u32 = 0x00000001;
 pub const version_2: u32 = 0x6b3343cf;

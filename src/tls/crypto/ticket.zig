@@ -5,10 +5,10 @@
 
 const std = @import("std");
 
-const application_settings = @import("application_settings.zig");
+const application_settings = @import("../handshake/application_settings.zig");
 const cipher_suite = @import("cipher_suite.zig");
-const client_hello = @import("client_hello.zig");
-const extension_set = @import("extension_set.zig");
+const client_hello = @import("../handshake/client_hello.zig");
+const extension_set = @import("../handshake/extension_set.zig");
 const key_schedule = @import("key_schedule.zig");
 const secret = @import("secret.zig");
 const transcript = @import("transcript.zig");

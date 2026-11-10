@@ -5,9 +5,9 @@
 //! keeps the cryptographic conversion narrow: TLS runtime secrets in,
 //! QUIC packet-protection keys out.
 
-const key_schedule = @import("../tls/key_schedule.zig");
-const secret = @import("../tls/secret.zig");
-const transcript = @import("../tls/transcript.zig");
+const key_schedule = @import("../tls/crypto/key_schedule.zig");
+const secret = @import("../tls/crypto/secret.zig");
+const transcript = @import("../tls/crypto/transcript.zig");
 const traffic = @import("traffic_crypto.zig");
 
 pub const Error = key_schedule.Error || error{UnsupportedCipherSuite};

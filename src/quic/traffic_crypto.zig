@@ -20,9 +20,9 @@ const prepared_chacha = @import("../crypto/aead/chacha20_poly1305.zig");
 const sha256 = @import("../crypto/hash/sha256.zig");
 const sm3 = @import("../crypto/hash/sm3.zig");
 const sm4 = @import("../crypto/block/sm4.zig");
-const cipher_suite = @import("../tls/cipher_suite.zig");
+const cipher_suite = @import("../tls/crypto/cipher_suite.zig");
 const common = @import("traffic_crypto/common.zig");
-const tls_secret = @import("../tls/secret.zig");
+const tls_secret = @import("../tls/crypto/secret.zig");
 
 /// SHA-384 traffic protection is exposed separately until the higher-level TLS
 /// key schedule can carry both 32-byte and 48-byte traffic secrets.

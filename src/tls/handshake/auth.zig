@@ -10,14 +10,14 @@
 
 const std = @import("std");
 
-const crypto_ed25519 = @import("../crypto/sign/ed25519.zig");
-const crypto_mldsa = @import("../crypto/pq/mldsa.zig");
-const p521 = @import("../crypto/ec/p521.zig");
-const p256 = @import("../crypto/ec/p256.zig");
-const p384 = @import("../crypto/ec/p384.zig");
-const rsa = @import("../crypto/sign/rsa.zig");
-const sm2 = @import("../crypto/sign/sm2.zig");
-const x509 = @import("../x509/mod.zig");
+const crypto_ed25519 = @import("../../crypto/sign/ed25519.zig");
+const crypto_mldsa = @import("../../crypto/pq/mldsa.zig");
+const p521 = @import("../../crypto/ec/p521.zig");
+const p256 = @import("../../crypto/ec/p256.zig");
+const p384 = @import("../../crypto/ec/p384.zig");
+const rsa = @import("../../crypto/sign/rsa.zig");
+const sm2 = @import("../../crypto/sign/sm2.zig");
+const x509 = @import("../../x509/mod.zig");
 const x509_certificate = x509.certificate;
 const x509_signature = x509.signature;
 const x509_verifier = x509.verifier;
@@ -3324,7 +3324,7 @@ fn x509PssAlgorithmForScheme(
 }
 
 fn sm3DigestLen() usize {
-    return @import("../crypto/hash/sm3.zig").digest_len;
+    return @import("../../crypto/hash/sm3.zig").digest_len;
 }
 
 fn rsaCertificatePublicKeyForAlgorithm(
@@ -3449,7 +3449,7 @@ test "certificate signatures map to TLS signature schemes" {
         error.InvalidCertificate,
         certificateSignatureSchemes(&.{ 0x30, 0x00 }, null),
     );
-    const path_vectors = @import("../x509/testdata/path_vectors.zig");
+    const path_vectors = @import("../../x509/testdata/path_vectors.zig");
     const leaf = decodeHex(path_vectors.leaf_hex);
     const intermediate = decodeHex(path_vectors.intermediate_hex);
     const ecdsa = try certificateSignatureSchemes(&leaf, &intermediate);
@@ -3469,8 +3469,8 @@ test "certificate signatures map to TLS signature schemes" {
     ));
 
     const rsae_pss = try certificateSignatureSchemes(
-        @embedFile("../x509/testdata/rsa-pss-intermediate.der"),
-        @embedFile("../x509/testdata/rsa-pss-crl-ca.der"),
+        @embedFile("../../x509/testdata/rsa-pss-intermediate.der"),
+        @embedFile("../../x509/testdata/rsa-pss-crl-ca.der"),
     );
     try std.testing.expectEqual(
         signature_scheme_rsa_pss_rsae_sha512,
@@ -3479,8 +3479,8 @@ test "certificate signatures map to TLS signature schemes" {
     try std.testing.expect(rsae_pss.alternate == null);
 
     const constrained_pss = try certificateSignatureSchemes(
-        @embedFile("../x509/testdata/rsa-pss-constrained-child.der"),
-        @embedFile("../x509/testdata/rsa-pss-constrained-intermediate.der"),
+        @embedFile("../../x509/testdata/rsa-pss-constrained-child.der"),
+        @embedFile("../../x509/testdata/rsa-pss-constrained-intermediate.der"),
     );
     try std.testing.expectEqual(
         signature_scheme_rsa_pss_pss_sha384,
@@ -3489,7 +3489,7 @@ test "certificate signatures map to TLS signature schemes" {
     try std.testing.expect(constrained_pss.alternate == null);
 
     const omitted_issuer = try certificateSignatureSchemes(
-        @embedFile("../x509/testdata/rsa-pss-intermediate.der"),
+        @embedFile("../../x509/testdata/rsa-pss-intermediate.der"),
         null,
     );
     try std.testing.expectEqual(
@@ -3503,7 +3503,7 @@ test "certificate signatures map to TLS signature schemes" {
 }
 
 test "P-521 verifies TLS 1.2 and TLS 1.3 signatures" {
-    const vectors = @import("../x509/testdata/path_vectors.zig");
+    const vectors = @import("../../x509/testdata/path_vectors.zig");
     const root = decodeHex(vectors.p521_root_hex);
     const leaf = decodeHex(vectors.p521_leaf_hex);
     const content_signature = decodeHex(vectors.p521_sha512_signature_hex);
@@ -4000,7 +4000,7 @@ fn testMlDsaCertificateVerify(
 
 test "RFC 7250 RSA SubjectPublicKeyInfo signs and verifies" {
     const allocator = std.testing.allocator;
-    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    const vectors = @import("../../crypto/testdata/rsa_signing.zig");
     const private_der = decodeHex(vectors.private_key_pkcs8_hex);
     const spki = decodeHex(vectors.public_key_spki_hex);
     const private = try rsa.PrivateKey.fromDer(&private_der);
@@ -4040,7 +4040,7 @@ test "RFC 7250 RSA SubjectPublicKeyInfo signs and verifies" {
 
 test "prepared RSA verifier matches generic TLS CertificateVerify" {
     const allocator = std.testing.allocator;
-    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    const vectors = @import("../../crypto/testdata/rsa_signing.zig");
     const private_der = decodeHex(vectors.private_key_pkcs8_hex);
     const certificate = decodeHex(vectors.certificate_hex);
     const private = try rsa.PrivateKey.fromDer(&private_der);
@@ -4094,7 +4094,7 @@ test "prepared RSA verifier matches generic TLS CertificateVerify" {
 }
 
 test "prepared RSA verifier matches generic TLS 1.2 PKCS1 verification" {
-    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    const vectors = @import("../../crypto/testdata/rsa_signing.zig");
     const private_der = decodeHex(vectors.private_key_pkcs8_hex);
     const certificate = decodeHex(vectors.certificate_hex);
     const private = try rsa.PrivateKey.fromDer(&private_der);
@@ -4138,10 +4138,10 @@ test "prepared RSA verifier matches generic TLS 1.2 PKCS1 verification" {
 test "RFC 4055 constrained RSA-PSS SubjectPublicKeyInfo enforces its profile" {
     const allocator = std.testing.allocator;
     const spki = @embedFile(
-        "../x509/testdata/rsa-pss-constrained.spki.der",
+        "../../x509/testdata/rsa-pss-constrained.spki.der",
     );
     const signature_bytes = @embedFile(
-        "../x509/testdata/rsa-pss-constrained-sha384.sig",
+        "../../x509/testdata/rsa-pss-constrained-sha384.sig",
     );
     const message = "vail constrained RSA-PSS verification vector";
     try verifySignedContent(
@@ -4194,10 +4194,10 @@ test "RFC 4055 constrained RSA-PSS SubjectPublicKeyInfo enforces its profile" {
     );
 
     const certificate = @embedFile(
-        "../x509/testdata/rsa-pss-constrained-leaf.der",
+        "../../x509/testdata/rsa-pss-constrained-leaf.der",
     );
     const private_key_der = @embedFile(
-        "../crypto/testdata/rsa-pss-constrained-private.pkcs8.der",
+        "../../crypto/testdata/rsa-pss-constrained-private.pkcs8.der",
     );
     const private_key = try rsa.PrivateKey.fromDer(private_key_der);
     var prepared_key = try private_key.prepare();
@@ -4224,7 +4224,7 @@ test "RFC 4055 constrained RSA-PSS SubjectPublicKeyInfo enforces its profile" {
 }
 
 test "TLS 1.2 RSA PKCS1 v1.5 signer supports SHA-256 SHA-384 and SHA-512" {
-    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    const vectors = @import("../../crypto/testdata/rsa_signing.zig");
     const private_der = decodeHex(vectors.private_key_pkcs8_hex);
     const certificate = decodeHex(vectors.certificate_hex);
     const private = try rsa.PrivateKey.fromDer(&private_der);

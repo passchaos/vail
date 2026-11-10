@@ -53,6 +53,15 @@ TLS 1.3 and TLS 1.2 handshake and record state machines, certificate
 authentication, PSK/resumption, ECH, ALPS, and record protection. TLS may depend
 on both `crypto` and `x509`.
 
+- `tls/connection/` — client/server/versioned connection state and stream helpers
+- `tls/handshake/` — ClientHello/ServerHello, flights, authentication, ECH,
+  ALPS, and handshake extensions
+- `tls/crypto/` — key schedule, transcript, traffic secrets, PSK, tickets, and
+  cipher-suite identities
+- `tls/tls12/` — TLS 1.2 handshake and connection state
+- Root TLS files — alerts, record protection, record fragmentation, key
+  exchange, and test vectors
+
 Public entry points live in `tls/mod.zig`. Lower-level codecs and state remain
 available for transports that need them, but new code should prefer the stable
 connection and authentication APIs.

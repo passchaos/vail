@@ -7,7 +7,7 @@
 //! unused capacity so stale key material cannot leak through copies.
 
 const std = @import("std");
-const sm3 = @import("../crypto/hash/sm3.zig");
+const sm3 = @import("../../crypto/hash/sm3.zig");
 
 pub const max_len: usize = std.crypto.hash.sha2.Sha384.digest_length;
 

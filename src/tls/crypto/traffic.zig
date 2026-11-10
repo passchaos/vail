@@ -8,8 +8,8 @@
 const std = @import("std");
 const cipher_suite = @import("cipher_suite.zig");
 const key_schedule = @import("key_schedule.zig");
-const record = @import("record.zig");
-const record_fragment = @import("record_fragment.zig");
+const record = @import("../record.zig");
+const record_fragment = @import("../record_fragment.zig");
 const secret = @import("secret.zig");
 const traffic_secrets = @import("traffic_secrets.zig");
 

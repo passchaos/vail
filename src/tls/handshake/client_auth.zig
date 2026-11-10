@@ -5,10 +5,10 @@ const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
 const client_hello = @import("client_hello.zig");
 const extension_set = @import("extension_set.zig");
-const key_schedule = @import("key_schedule.zig");
-const secret = @import("secret.zig");
-const transcript = @import("transcript.zig");
-const x509 = @import("../x509/mod.zig");
+const key_schedule = @import("../crypto/key_schedule.zig");
+const secret = @import("../crypto/secret.zig");
+const transcript = @import("../crypto/transcript.zig");
+const x509 = @import("../../x509/mod.zig");
 
 pub const handshake_type_certificate_request: u8 = 0x0d;
 const ext_signature_algorithms: u16 = 0x000d;

@@ -6,29 +6,29 @@
 //! and transfers directly into established application traffic.
 
 const std = @import("std");
-const alert = @import("alert.zig");
-const application_settings = @import("application_settings.zig");
-const auth = @import("auth.zig");
-const certificate_compression = @import("certificate_compression.zig");
-const cipher_suite = @import("cipher_suite.zig");
-const client_auth = @import("client_auth.zig");
-const client_handshake = @import("client_handshake.zig");
-const client_hello = @import("client_hello.zig");
+const alert = @import("../alert.zig");
+const application_settings = @import("../handshake/application_settings.zig");
+const auth = @import("../handshake/auth.zig");
+const certificate_compression = @import("../handshake/certificate_compression.zig");
+const cipher_suite = @import("../crypto/cipher_suite.zig");
+const client_auth = @import("../handshake/client_auth.zig");
+const client_handshake = @import("../handshake/client_handshake.zig");
+const client_hello = @import("../handshake/client_hello.zig");
 const connection = @import("connection.zig");
-const ech = @import("ech.zig");
-const key_exchange = @import("key_exchange.zig");
-const key_log = @import("key_log.zig");
-const key_schedule = @import("key_schedule.zig");
-const psk = @import("psk.zig");
-const record = @import("record.zig");
-const record_size_limit = @import("record_size_limit.zig");
-const secret = @import("secret.zig");
-const server_handshake = @import("server_handshake.zig");
-const server_hello = @import("server_hello.zig");
+const ech = @import("../handshake/ech.zig");
+const key_exchange = @import("../key_exchange.zig");
+const key_log = @import("../handshake/key_log.zig");
+const key_schedule = @import("../crypto/key_schedule.zig");
+const psk = @import("../crypto/psk.zig");
+const record = @import("../record.zig");
+const record_size_limit = @import("../handshake/record_size_limit.zig");
+const secret = @import("../crypto/secret.zig");
+const server_handshake = @import("../handshake/server_handshake.zig");
+const server_hello = @import("../handshake/server_hello.zig");
 const stream = @import("stream.zig");
-const ticket = @import("ticket.zig");
-const traffic = @import("traffic.zig");
-const transcript = @import("transcript.zig");
+const ticket = @import("../crypto/ticket.zig");
+const traffic = @import("../crypto/traffic.zig");
+const transcript = @import("../crypto/transcript.zig");
 
 pub const Error = std.mem.Allocator.Error || client_hello.Error ||
     server_hello.Error || key_exchange.Error || key_schedule.Error ||
@@ -2375,7 +2375,7 @@ test "client and server states establish over one-byte transport reads" {
         ),
     );
 
-    const ticket_module = @import("ticket_keyring.zig");
+    const ticket_module = @import("../crypto/ticket_keyring.zig");
     var keyring = try ticket_module.Keyring.init(.{
         .id = 1,
         .secret = [_]u8{0xc6} ** ticket_module.key_len,
@@ -2707,7 +2707,7 @@ test "client and server establish with an accepted RFC 9849 ECH offer" {
         signing_key.public_key.toBytes(),
     );
     const ech_secret = [_]u8{0xdb} ** 32;
-    var ech_key_pair = try @import("../crypto/kex/hpke.zig").KeyPair
+    var ech_key_pair = try @import("../../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&ech_secret);
     defer ech_key_pair.deinit();
     var encoded_config: std.ArrayList(u8) = .empty;
@@ -2907,7 +2907,7 @@ test "accepted RFC 9849 ECH survives HelloRetryRequest" {
         signing_key.public_key.toBytes(),
     );
     const ech_secret = [_]u8{0xe2} ** 32;
-    var ech_key_pair = try @import("../crypto/kex/hpke.zig").KeyPair
+    var ech_key_pair = try @import("../../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&ech_secret);
     defer ech_key_pair.deinit();
     var encoded_config: std.ArrayList(u8) = .empty;
@@ -3089,7 +3089,7 @@ test "ECH client switches to the outer transcript when not accepted" {
         signing_key.public_key.toBytes(),
     );
     const ech_secret = [_]u8{0xf2} ** 32;
-    var ech_key_pair = try @import("../crypto/kex/hpke.zig").KeyPair
+    var ech_key_pair = try @import("../../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&ech_secret);
     defer ech_key_pair.deinit();
     var encoded_config: std.ArrayList(u8) = .empty;
@@ -3161,8 +3161,8 @@ test "ECH rejection authenticates public name and returns retry configs" {
     const Client = ClientConnection(64 * 1024, 256);
     const ServerModule = @import("server_connection.zig");
     const Server = ServerModule.ServerConnection(64 * 1024, 256);
-    const rsa = @import("../crypto/sign/rsa.zig");
-    const vectors = @import("../crypto/testdata/rsa_signing.zig");
+    const rsa = @import("../../crypto/sign/rsa.zig");
+    const vectors = @import("../../crypto/testdata/rsa_signing.zig");
     var certificate: [vectors.certificate_hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&certificate, vectors.certificate_hex);
     var private_key_der: [vectors.private_key_pkcs8_hex.len / 2]u8 = undefined;
@@ -3175,7 +3175,7 @@ test "ECH rejection authenticates public name and returns retry configs" {
     defer prepared_key.deinit();
 
     const client_ech_secret = [_]u8{0x81} ** 32;
-    var client_ech_key = try @import("../crypto/kex/hpke.zig").KeyPair
+    var client_ech_key = try @import("../../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&client_ech_secret);
     defer client_ech_key.deinit();
     var client_config_bytes: std.ArrayList(u8) = .empty;
@@ -3188,7 +3188,7 @@ test "ECH rejection authenticates public name and returns retry configs" {
     const client_ech_config = try ech.parseConfig(client_config_bytes.items);
 
     const server_ech_secret = [_]u8{0x82} ** 32;
-    var server_ech_key = try @import("../crypto/kex/hpke.zig").KeyPair
+    var server_ech_key = try @import("../../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&server_ech_secret);
     defer server_ech_key.deinit();
     var server_config_bytes: std.ArrayList(u8) = .empty;
@@ -3427,7 +3427,7 @@ test "ECH PSK resumption survives P-256 HelloRetryRequest" {
     };
 
     const ech_secret = [_]u8{0xe8} ** 32;
-    var ech_key_pair = try @import("../crypto/kex/hpke.zig").KeyPair
+    var ech_key_pair = try @import("../../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&ech_secret);
     defer ech_key_pair.deinit();
     var encoded_ech_config: std.ArrayList(u8) = .empty;
@@ -3501,7 +3501,7 @@ test "ECH PSK resumption survives P-256 HelloRetryRequest" {
             .alpn = "h2",
         },
     };
-    var retry_replay_cache = @import("early_data.zig").ReplayCache(2){};
+    var retry_replay_cache = @import("../handshake/early_data.zig").ReplayCache(2){};
     var resolver_context = ResolverContext{
         .identity = .{
             .certificate_chain = &.{&certificate},
@@ -3843,12 +3843,12 @@ fn testRejectedEarlyDataResumption(
     const allocator = std.testing.allocator;
     const Client = ClientConnection(64 * 1024, 256);
     const server_module = @import("server_connection.zig");
-    const early_module = @import("early_data.zig");
+    const early_module = @import("../handshake/early_data.zig");
     const Server = server_module.ServerConnection(64 * 1024, 256);
     const psk_secret = secret.Secret.fromSha256([_]u8{0xa7} ** 32);
     const age_add: u32 = 100;
     const actual_age: u32 = 1_000;
-    const ticket_module = @import("ticket_keyring.zig");
+    const ticket_module = @import("../crypto/ticket_keyring.zig");
     var keyring = try ticket_module.Keyring.init(.{
         .id = 7,
         .secret = [_]u8{0xa6} ** ticket_module.key_len,
@@ -4093,8 +4093,8 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
     var client_key_log: TestKeyLogCapture = .{};
     var server_key_log: TestKeyLogCapture = .{};
     const server_module = @import("server_connection.zig");
-    const early_module = @import("early_data.zig");
-    const ticket_module = @import("ticket_keyring.zig");
+    const early_module = @import("../handshake/early_data.zig");
+    const ticket_module = @import("../crypto/ticket_keyring.zig");
     const Client = ClientConnection(64 * 1024, 256);
     const Server = server_module.ServerConnection(64 * 1024, 256);
     const psk_secret = secret.Secret.fromSha256([_]u8{0xc7} ** 32);
@@ -4124,7 +4124,7 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
     );
     defer allocator.free(identity);
     const ech_secret = [_]u8{0xd3} ** 32;
-    var ech_key_pair = try @import("../crypto/kex/hpke.zig").KeyPair
+    var ech_key_pair = try @import("../../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&ech_secret);
     defer ech_key_pair.deinit();
     var encoded_ech_config: std.ArrayList(u8) = .empty;

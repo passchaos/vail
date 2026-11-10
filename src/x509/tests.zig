@@ -1,5 +1,5 @@
 const std = @import("std");
-const auth = @import("../tls/auth.zig");
+const auth = @import("../tls/handshake/auth.zig");
 const ed25519 = @import("../crypto/sign/ed25519.zig");
 const p256 = @import("../crypto/ec/p256.zig");
 const p521 = @import("../crypto/ec/p521.zig");

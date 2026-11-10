@@ -8,7 +8,7 @@ const std = @import("std");
 const application_settings = @import("application_settings.zig");
 const auth = @import("auth.zig");
 const certificate_compression = @import("certificate_compression.zig");
-const cipher_suite = @import("cipher_suite.zig");
+const cipher_suite = @import("../crypto/cipher_suite.zig");
 const client_hello = @import("client_hello.zig");
 const server_hello = @import("server_hello.zig");
 

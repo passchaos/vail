@@ -6,12 +6,12 @@
 //! across application security contexts without storing every issued ticket.
 
 const std = @import("std");
-const application_settings = @import("application_settings.zig");
+const application_settings = @import("../handshake/application_settings.zig");
 const codec = @import("ticket.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const secret = @import("secret.zig");
-const tls12 = @import("tls12.zig");
-const tls12_ticket = @import("tls12_ticket.zig");
+const tls12 = @import("../tls12/tls12.zig");
+const tls12_ticket = @import("../tls12/tls12_ticket.zig");
 
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;

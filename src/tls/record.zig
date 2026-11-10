@@ -12,8 +12,8 @@ const prepared_chacha = @import("../crypto/aead/chacha20_poly1305.zig");
 const sha256 = @import("../crypto/hash/sha256.zig");
 const fast_sha2 = @import("../crypto/hash/sha512.zig");
 const sm4 = @import("../crypto/block/sm4.zig");
-const cipher_suite = @import("cipher_suite.zig");
-const secret = @import("secret.zig");
+const cipher_suite = @import("crypto/cipher_suite.zig");
+const secret = @import("crypto/secret.zig");
 
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;

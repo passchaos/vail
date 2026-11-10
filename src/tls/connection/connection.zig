@@ -5,15 +5,15 @@
 //! state. It deliberately owns no socket: callers feed arbitrary byte slices
 //! and write the returned records using their preferred blocking or async I/O.
 
-const alert = @import("alert.zig");
-const cipher_suite = @import("cipher_suite.zig");
-const key_update = @import("key_update.zig");
-const record = @import("record.zig");
-const record_fragment = @import("record_fragment.zig");
-const record_size_limit = @import("record_size_limit.zig");
-const secret = @import("secret.zig");
+const alert = @import("../alert.zig");
+const cipher_suite = @import("../crypto/cipher_suite.zig");
+const key_update = @import("../crypto/key_update.zig");
+const record = @import("../record.zig");
+const record_fragment = @import("../record_fragment.zig");
+const record_size_limit = @import("../handshake/record_size_limit.zig");
+const secret = @import("../crypto/secret.zig");
 const stream = @import("stream.zig");
-const traffic_secrets = @import("traffic_secrets.zig");
+const traffic_secrets = @import("../crypto/traffic_secrets.zig");
 
 pub const SealFragmentResult = record_fragment.SealResult;
 pub const ExtractedSecrets = traffic_secrets.Extracted;
@@ -840,7 +840,7 @@ test "application connection processes requested KeyUpdate before data" {
 test "application connection latches malformed post-handshake messages" {
     const std = @import("std");
     const initial = secret.Secret.fromSha256([_]u8{0x61} ** 32);
-    var sender = try @import("traffic.zig").State.init(
+    var sender = try @import("../crypto/traffic.zig").State.init(
         .aes_128_gcm_sha256,
         initial,
     );

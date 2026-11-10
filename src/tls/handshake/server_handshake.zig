@@ -12,17 +12,17 @@ const certificate_compression = @import("certificate_compression.zig");
 const client_auth = @import("client_auth.zig");
 const client_hello = @import("client_hello.zig");
 const ech = @import("ech.zig");
-const key_exchange = @import("key_exchange.zig");
-const key_schedule = @import("key_schedule.zig");
-const psk_module = @import("psk.zig");
-const record = @import("record.zig");
+const key_exchange = @import("../key_exchange.zig");
+const key_schedule = @import("../crypto/key_schedule.zig");
+const psk_module = @import("../crypto/psk.zig");
+const record = @import("../record.zig");
 const record_size_limit = @import("record_size_limit.zig");
-const secret = @import("secret.zig");
+const secret = @import("../crypto/secret.zig");
 const server_flight = @import("server_flight.zig");
 const server_hello = @import("server_hello.zig");
-const stream = @import("stream.zig");
-const traffic = @import("traffic.zig");
-const transcript = @import("transcript.zig");
+const stream = @import("../connection/stream.zig");
+const traffic = @import("../crypto/traffic.zig");
+const transcript = @import("../crypto/transcript.zig");
 
 pub const handshake_type_finished: u8 = 0x14;
 

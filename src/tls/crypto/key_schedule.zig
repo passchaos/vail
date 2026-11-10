@@ -7,9 +7,9 @@
 //! allocation or runtime crypto dispatch.
 
 const std = @import("std");
-const sha256 = @import("../crypto/hash/sha256.zig");
-const fast_sha2 = @import("../crypto/hash/sha512.zig");
-const sm3 = @import("../crypto/hash/sm3.zig");
+const sha256 = @import("../../crypto/hash/sha256.zig");
+const fast_sha2 = @import("../../crypto/hash/sha512.zig");
+const sm3 = @import("../../crypto/hash/sm3.zig");
 const schedule = @import("key_schedule/schedule.zig");
 const secret = @import("secret.zig");
 const transcript = @import("transcript.zig");

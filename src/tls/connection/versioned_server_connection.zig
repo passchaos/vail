@@ -5,11 +5,11 @@
 //! version state machine. Unused one-shot key material is wiped at selection.
 
 const std = @import("std");
-const client_hello = @import("client_hello.zig");
-const record = @import("record.zig");
+const client_hello = @import("../handshake/client_hello.zig");
+const record = @import("../record.zig");
 const server13 = @import("server_connection.zig");
 const stream = @import("stream.zig");
-const server12 = @import("tls12_server_connection.zig");
+const server12 = @import("../tls12/tls12_server_connection.zig");
 
 pub const Protocol = enum {
     tls12,
@@ -427,10 +427,10 @@ test "versioned server selects TLS 1.3 and TLS 1.2 from ClientHello" {
     const certificate = signing_key.public_key.toUncompressedSec1();
 
     inline for (.{ Protocol.tls13, Protocol.tls12 }) |expected| {
-        var tls13_key = @import("key_exchange.zig").ServerKeyMaterial{
-            .x25519 = [_]u8{0x52} ** @import("key_exchange.zig").secret_len,
+        var tls13_key = @import("../key_exchange.zig").ServerKeyMaterial{
+            .x25519 = [_]u8{0x52} ** @import("../key_exchange.zig").secret_len,
         };
-        var tls12_key = [_]u8{0} ** @import("key_exchange.zig").p256.secret_len;
+        var tls12_key = [_]u8{0} ** @import("../key_exchange.zig").p256.secret_len;
         tls12_key[tls12_key.len - 1] = 2;
         var server = ServerConnection(4096, 4096).init(.{
             .tls13 = .{
@@ -458,7 +458,7 @@ test "versioned server selects TLS 1.3 and TLS 1.2 from ClientHello" {
         });
         defer server.deinit();
         const client_private = [_]u8{0x55} ** 32;
-        const client_public = try @import("key_exchange.zig").publicKey(
+        const client_public = try @import("../key_exchange.zig").publicKey(
             client_private,
         );
         var hello: std.ArrayList(u8) = .empty;
@@ -466,20 +466,20 @@ test "versioned server selects TLS 1.3 and TLS 1.2 from ClientHello" {
         try client_hello.writeWithKeyShare(&hello, allocator, .{
             .random = [_]u8{0x56} ** 32,
             .key_share = if (expected == .tls13) .{
-                .group = @import("key_exchange.zig").named_group_x25519,
+                .group = @import("../key_exchange.zig").named_group_x25519,
                 .key_exchange = &client_public,
             } else null,
             .supported_groups = if (expected == .tls13)
-                &.{@import("key_exchange.zig").named_group_x25519}
+                &.{@import("../key_exchange.zig").named_group_x25519}
             else
-                &.{@import("key_exchange.zig").named_group_secp256r1},
+                &.{@import("../key_exchange.zig").named_group_secp256r1},
             .cipher_suites = if (expected == .tls13)
                 &.{.aes_128_gcm_sha256}
             else
                 &.{},
             .additional_cipher_suites = if (expected == .tls12)
                 &.{@intFromEnum(
-                    @import("tls12.zig").Suite.ecdhe_ecdsa_aes_128_gcm_sha256,
+                    @import("../tls12/tls12.zig").Suite.ecdhe_ecdsa_aes_128_gcm_sha256,
                 )}
             else
                 &.{},

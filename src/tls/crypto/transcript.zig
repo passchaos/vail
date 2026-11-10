@@ -1,9 +1,9 @@
 //! Incremental TLS 1.3 transcript hashing.
 
 const std = @import("std");
-const sha256 = @import("../crypto/hash/sha256.zig");
-const fast_sha2 = @import("../crypto/hash/sha512.zig");
-const sm3 = @import("../crypto/hash/sm3.zig");
+const sha256 = @import("../../crypto/hash/sha256.zig");
+const fast_sha2 = @import("../../crypto/hash/sha512.zig");
+const sm3 = @import("../../crypto/hash/sm3.zig");
 const secret = @import("secret.zig");
 
 const Sha256 = sha256.Hash;

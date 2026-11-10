@@ -6,11 +6,11 @@
 //! record prefix into the selected state machine.
 
 const std = @import("std");
-const client12 = @import("tls12_client_connection.zig");
+const client12 = @import("../tls12/tls12_client_connection.zig");
 const client13 = @import("client_connection.zig");
-const client_hello = @import("client_hello.zig");
-const record = @import("record.zig");
-const server_hello = @import("server_hello.zig");
+const client_hello = @import("../handshake/client_hello.zig");
+const record = @import("../record.zig");
+const server_hello = @import("../handshake/server_hello.zig");
 const stream = @import("stream.zig");
 
 pub const Protocol = enum {
@@ -414,9 +414,9 @@ fn replayPrefixInto(
 
 test "versioned ClientHello carries a TLS 1.2 session ticket" {
     const allocator = std.testing.allocator;
-    const tls12 = @import("tls12.zig");
-    const tls12_ticket = @import("tls12_ticket.zig");
-    const key_exchange = @import("key_exchange.zig");
+    const tls12 = @import("../tls12/tls12.zig");
+    const tls12_ticket = @import("../tls12/tls12_ticket.zig");
+    const key_exchange = @import("../key_exchange.zig");
     var cached = try tls12_ticket.Cached.init(
         allocator,
         "opaque-rfc5077-ticket",

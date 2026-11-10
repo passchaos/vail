@@ -6,19 +6,19 @@
 //! static RSA key exchange, or renegotiation is accepted.
 
 const std = @import("std");
-const alert = @import("alert.zig");
-const auth = @import("auth.zig");
-const client_auth = @import("client_auth.zig");
-const client_hello = @import("client_hello.zig");
-const key_exchange = @import("key_exchange.zig");
-const key_log = @import("key_log.zig");
-const record13 = @import("record.zig");
-const stream = @import("stream.zig");
+const alert = @import("../alert.zig");
+const auth = @import("../handshake/auth.zig");
+const client_auth = @import("../handshake/client_auth.zig");
+const client_hello = @import("../handshake/client_hello.zig");
+const key_exchange = @import("../key_exchange.zig");
+const key_log = @import("../handshake/key_log.zig");
+const record13 = @import("../record.zig");
+const stream = @import("../connection/stream.zig");
 const tls12 = @import("tls12.zig");
 const handshake = @import("tls12_handshake.zig");
-const ticket_keyring = @import("ticket_keyring.zig");
+const ticket_keyring = @import("../crypto/ticket_keyring.zig");
 const tls12_ticket = @import("tls12_ticket.zig");
-const transcript = @import("transcript.zig");
+const transcript = @import("../crypto/transcript.zig");
 
 pub const Error = std.mem.Allocator.Error || stream.Error ||
     stream.HandshakeError || handshake.Error || key_exchange.Error ||

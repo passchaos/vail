@@ -7,9 +7,9 @@
 //! allocating or copying already-contiguous records/messages.
 
 const std = @import("std");
-const alert = @import("alert.zig");
-const record = @import("record.zig");
-const traffic = @import("traffic.zig");
+const alert = @import("../alert.zig");
+const record = @import("../record.zig");
+const traffic = @import("../crypto/traffic.zig");
 
 pub const content_type_change_cipher_spec: u8 = 20;
 
@@ -540,7 +540,7 @@ test "record and handshake framers compose across arbitrary network reads" {
 }
 
 test "protected receiver composes CCS decryption and handshake messages" {
-    const secret = @import("secret.zig");
+    const secret = @import("../crypto/secret.zig");
     const initial = secret.Secret.fromSha256([_]u8{0xa1} ** 32);
     var sender = try traffic.State.init(.aes_128_gcm_sha256, initial);
     defer sender.deinit();
@@ -587,7 +587,7 @@ test "protected receiver composes CCS decryption and handshake messages" {
 }
 
 test "protected receiver reassembles encrypted handshake across records" {
-    const secret = @import("secret.zig");
+    const secret = @import("../crypto/secret.zig");
     const initial = secret.Secret.fromSha384([_]u8{0xb1} ** 48);
     var sender = try traffic.State.init(.aes_256_gcm_sha384, initial);
     defer sender.deinit();
@@ -630,7 +630,7 @@ test "protected receiver reassembles encrypted handshake across records" {
 }
 
 test "protected receiver enforces handshake and close boundaries" {
-    const secret = @import("secret.zig");
+    const secret = @import("../crypto/secret.zig");
     const initial = secret.Secret.fromSha256([_]u8{0xc1} ** 32);
     var sender = try traffic.State.init(.chacha20_poly1305_sha256, initial);
     defer sender.deinit();
@@ -705,7 +705,7 @@ test "protected receiver enforces handshake and close boundaries" {
 }
 
 test "protected receiver latches malformed alert failures" {
-    const secret = @import("secret.zig");
+    const secret = @import("../crypto/secret.zig");
     const initial = secret.Secret.fromSha256([_]u8{0xe1} ** 32);
     var sender = try traffic.State.init(.aes_128_gcm_sha256, initial);
     defer sender.deinit();
