@@ -6,7 +6,7 @@ const Server = vail.tls.tls12_server_connection.ServerConnection(
     64 * 1024,
     64 * 1024,
 );
-const vectors = vail.crypto.testing.rsa_signing;
+const vectors = vail.testdata.crypto.rsa_signing;
 const certificate = decodeHex(vectors.certificate_hex);
 const private_key_der = decodeHex(vectors.private_key_pkcs8_hex);
 const session_id = [_]u8{0xe1} ** 32;

@@ -6,7 +6,7 @@ const decompress_iterations: usize = 5_000;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
-    const vectors = vail.x509.testing.path_vectors;
+    const vectors = vail.testdata.x509.path_vectors;
     const leaf = decodeHex(vectors.leaf_hex);
     const intermediate = decodeHex(vectors.intermediate_hex);
     const root = decodeHex(vectors.root_hex);

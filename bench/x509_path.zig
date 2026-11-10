@@ -1,6 +1,6 @@
 const std = @import("std");
 const vail = @import("vail");
-const vectors = vail.x509.testing.path_vectors;
+const vectors = vail.testdata.x509.path_vectors;
 
 const iterations: usize = 5_000;
 const batch_iterations: usize = 1_000;

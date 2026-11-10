@@ -24,10 +24,6 @@ pub const sm4 = @import("sm4.zig");
 pub const x25519 = @import("x25519.zig");
 pub const xchacha20_poly1305 = @import("xchacha20_poly1305.zig");
 
-pub const testing = struct {
-    pub const rsa_signing = @import("testdata/rsa_signing.zig");
-};
-
 test {
     _ = @import("tests.zig");
     _ = @import("mldsa_tests.zig");
@@ -35,15 +31,18 @@ test {
     _ = aes_ccm;
     _ = aes_cbc;
     _ = aes_ctr;
+    _ = blake2s;
     _ = chacha20_poly1305;
     _ = ed25519;
     _ = hpke;
     _ = mldsa;
+    _ = memory;
     _ = mlkem;
     _ = p256;
     _ = p384;
     _ = p521;
     _ = rsa;
+    _ = sha256;
     _ = sha512;
     _ = sm2;
     _ = sm3;

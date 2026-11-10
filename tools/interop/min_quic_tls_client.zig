@@ -5,7 +5,7 @@ const linux = std.os.linux;
 const max_crypto_flight = 64 * 1024;
 const client_transport_parameters = [_]u8{ 0x01, 0x02, 0x03 };
 const server_transport_parameters = [_]u8{ 0x04, 0x05, 0x06 };
-const certificate_der = decodeHex(vail.crypto.testing.rsa_signing.certificate_hex);
+const certificate_der = decodeHex(vail.testdata.crypto.rsa_signing.certificate_hex);
 const GroupMode = enum { x25519, hybrid, mlkem768, mlkem1024 };
 
 pub fn main(init: std.process.Init) !void {

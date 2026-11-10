@@ -3,7 +3,7 @@ const vail = @import("vail");
 
 const linux = std.os.linux;
 const Server = vail.tls.server_connection.ServerConnection(64 * 1024, 1024);
-const rsa_vectors = vail.crypto.testing.rsa_signing;
+const rsa_vectors = vail.testdata.crypto.rsa_signing;
 const certificate_der = decodeHex(rsa_vectors.certificate_hex);
 const private_key_der = decodeHex(rsa_vectors.private_key_pkcs8_hex);
 const response = "vail resumed tls13 ok\n";

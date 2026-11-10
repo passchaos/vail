@@ -7,7 +7,7 @@ const warmup_iterations: usize = 32;
 const message = "Vail pure Zig P-521 oracle";
 
 pub fn main(init: std.process.Init) !void {
-    const vectors = vail.x509.testing.path_vectors;
+    const vectors = vail.testdata.x509.path_vectors;
     const root = decodeHex(vectors.p521_root_hex);
     const signature = decodeHex(vectors.p521_sha512_signature_hex);
     const certificate = try std.crypto.Certificate.parse(.{

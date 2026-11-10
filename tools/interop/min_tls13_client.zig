@@ -83,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
     if (use_pss_certificate) {
         try pss_roots.bytes.appendSlice(
             std.heap.smp_allocator,
-            vail.x509.testing.rsa_pss_root,
+            vail.testdata.x509.rsa_pss_root,
         );
         try pss_roots.parseCert(std.heap.smp_allocator, 0, 1_800_000_000);
     }

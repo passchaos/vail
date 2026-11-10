@@ -125,6 +125,7 @@ paths use constant-schedule selection and explicit zeroization; see
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — module boundaries, ownership, and data flow
+- [`docs/api.md`](docs/api.md) — stable, advanced, and test-only API tiers
 - [`docs/compatibility.md`](docs/compatibility.md) — concise protocol and algorithm matrix
 - [`docs/building.md`](docs/building.md) — toolchain, build, test, and benchmark setup
 - [`docs/security.md`](docs/security.md) — threat model, constant-time policy, and limitations

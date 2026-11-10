@@ -5,7 +5,7 @@ const iterations: usize = 20_000;
 const warmup_iterations: usize = 32;
 
 pub fn main(init: std.process.Init) !void {
-    const vectors = vail.x509.testing.path_vectors;
+    const vectors = vail.testdata.x509.path_vectors;
     const root = decodeHex(vectors.p521_root_hex);
     const certificate = try std.crypto.Certificate.parse(.{
         .buffer = &root,

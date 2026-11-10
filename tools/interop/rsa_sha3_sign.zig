@@ -10,7 +10,7 @@ pub fn main(init: std.process.Init) !void {
     const output_path = args.next() orelse return error.MissingOutputPath;
     if (args.next() != null) return error.InvalidArguments;
 
-    const vectors = vail.crypto.testing.rsa_signing;
+    const vectors = vail.testdata.crypto.rsa_signing;
     const encoded_key = decodeHex(vectors.private_key_pkcs8_hex);
     const key = try vail.crypto.rsa.PrivateKey.fromDer(&encoded_key);
     var prepared = try key.prepare();

@@ -8,7 +8,7 @@ const Client = vail.tls.tls12_client_connection.ClientConnection(
 );
 const Established = vail.tls.tls12_client_connection.Established;
 const Event = vail.tls.tls12_client_connection.Event;
-const vectors = vail.crypto.testing.rsa_signing;
+const vectors = vail.testdata.crypto.rsa_signing;
 const client_certificate = decodeHex(vectors.client_certificate_hex);
 const client_private_key_der = decodeHex(vectors.private_key_pkcs8_hex);
 

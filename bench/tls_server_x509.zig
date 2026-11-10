@@ -6,7 +6,7 @@ const Server = vail.tls.server_connection.ServerConnection(4096, 256);
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
-    const vectors = vail.crypto.testing.rsa_signing;
+    const vectors = vail.testdata.crypto.rsa_signing;
     const certificate = decodeHex(vectors.certificate_hex);
     const private_der = decodeHex(vectors.private_key_pkcs8_hex);
     const private_key = try vail.crypto.rsa.PrivateKey.fromDer(&private_der);

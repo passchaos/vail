@@ -5,7 +5,7 @@ const iterations: usize = 500;
 const warmup_iterations: usize = 16;
 
 pub fn main(init: std.process.Init) !void {
-    const vectors = vail.crypto.testing.rsa_signing;
+    const vectors = vail.testdata.crypto.rsa_signing;
     const private_key_der = decodeHex(vectors.private_key_pkcs8_hex);
     const private_key = try vail.crypto.rsa.PrivateKey.fromDer(
         &private_key_der,

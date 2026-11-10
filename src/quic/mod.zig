@@ -9,4 +9,5 @@ pub const transport_parameters = @import("transport_parameters.zig");
 
 test {
     _ = @import("tests.zig");
+    _ = tls_handshake;
 }

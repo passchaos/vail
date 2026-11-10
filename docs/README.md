@@ -1,6 +1,7 @@
 # Vail documentation
 
 - [`architecture.md`](architecture.md) — module boundaries, ownership, and data flow
+- [`api.md`](api.md) — stable, advanced, and test-only API tiers
 - [`compatibility.md`](compatibility.md) — concise protocol and algorithm matrix
 - [`building.md`](building.md) — toolchain, build, test, and benchmark setup
 - [`security.md`](security.md) — threat model, constant-time policy, and limitations

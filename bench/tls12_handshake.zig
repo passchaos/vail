@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
         vail.tls.auth.signature_scheme_rsa_pss_rsae_sha256
     else
         vail.tls.auth.signature_scheme_rsa_pkcs1_sha256;
-    const vectors = vail.crypto.testing.rsa_signing;
+    const vectors = vail.testdata.crypto.rsa_signing;
     const certificate = decodeHex(vectors.certificate_hex);
     const private_der = decodeHex(vectors.private_key_pkcs8_hex);
     const private_key = try vail.crypto.rsa.PrivateKey.fromDer(&private_der);

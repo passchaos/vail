@@ -3,7 +3,7 @@ const vail = @import("vail");
 
 const linux = std.os.linux;
 const Client = vail.tls.client_connection.ClientConnection(64 * 1024, 256);
-const vectors = vail.crypto.testing.rsa_signing;
+const vectors = vail.testdata.crypto.rsa_signing;
 const private_key_der = decodeHex(vectors.private_key_pkcs8_hex);
 const public_key_spki = decodeHex(vectors.public_key_spki_hex);
 const MlDsa44 = std.crypto.sign.mldsa.MLDSA44;

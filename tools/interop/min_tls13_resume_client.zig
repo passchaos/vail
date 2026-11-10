@@ -4,7 +4,7 @@ const vail = @import("vail");
 const linux = std.os.linux;
 const Client = vail.tls.client_connection.ClientConnection(64 * 1024, 2048);
 const certificate_der = decodeHex(
-    vail.crypto.testing.rsa_signing.certificate_hex,
+    vail.testdata.crypto.rsa_signing.certificate_hex,
 );
 const response = "rustls resumed tls13 ok\n";
 
