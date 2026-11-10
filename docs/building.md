@@ -19,7 +19,9 @@
 | `zig build test` | Run Vail and package API tests |
 | `zig build test-compile` | Compile tests without running them |
 | `zig build test-all` | Run Vail, package, signature-primitive, and archive tests |
-| `zig build check` | Run `zig fmt --check` and `test-all` |
+| `zig build check-generated` | Verify generated files against their manifest |
+| `zig build check-docs` | Verify relative Markdown links |
+| `zig build check` | Run `zig fmt --check`, generated-file, docs-link, and `test-all` gates |
 | `zig build fmt` | Format Zig sources |
 | `zig build bench` | Run every benchmark step |
 | `zig build interop` | Run every interoperability step |

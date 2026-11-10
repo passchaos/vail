@@ -36,6 +36,17 @@ and commands when adding one.
 These tools are intentionally small and are not a general-purpose API example.
 See `examples/` for that.
 
+## Documentation link checker
+
+`tools/check_docs_links.zig` verifies relative links in the root Markdown files
+and under `docs/`. Run it through:
+
+```sh
+zig build check-docs
+```
+
+The `check` step includes this gate.
+
 ## Adding a tool
 
 - Keep tools allocation-light and deterministic.

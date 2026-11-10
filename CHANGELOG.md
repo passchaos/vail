@@ -24,6 +24,7 @@ minor releases may contain API changes.
 - Split QUIC TLS handshake into `quic/handshake/{common,client,server}.zig`.
 - Split X.509 and TLS tests into topic files with shared helpers.
 - Added a generated-file SHA-256 manifest and `zig build check-generated`.
+- Added `zig build check-docs` to verify relative Markdown links.
 - Added the 5,000-line guideline for hand-written source files; generated
   tables and embedded assembly are documented exceptions.
 - Added `archive_crypto` to the root `test-all` suite.

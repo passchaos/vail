@@ -207,6 +207,23 @@ pub fn build(b: *std.Build) void {
     check_generated_step.dependOn(&run_check_generated.step);
     check_step.dependOn(check_generated_step);
 
+    const check_docs = b.addExecutable(.{
+        .name = "vail-check-docs",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_docs_links.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_check_docs = b.addRunArtifact(check_docs);
+    run_check_docs.setCwd(b.path("."));
+    const check_docs_step = b.step(
+        "check-docs",
+        "Verify relative links in Markdown documentation",
+    );
+    check_docs_step.dependOn(&run_check_docs.step);
+    check_step.dependOn(check_docs_step);
+
     const example_names = [_][]const u8{ "sha256", "aes_gcm", "mac" };
     const examples_step = b.step("examples", "Build example programs");
     if (enable_examples) {
