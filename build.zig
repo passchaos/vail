@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const mldsa_benchmarks = @import("build/mldsa_benchmarks.zig");
-const mlkem_benchmarks = @import("build/mlkem_benchmarks.zig");
+const mldsa_benchmarks = @import("build_support/mldsa_benchmarks.zig");
+const mlkem_benchmarks = @import("build_support/mlkem_benchmarks.zig");
 
 const required_zig_version = "0.16";
 
@@ -3889,7 +3889,7 @@ pub fn build(b: *std.Build) void {
         "build.zig",
         "src",
         "bench",
-        "build",
+        "build_support",
         "test",
         "tools",
         "archive_crypto",
