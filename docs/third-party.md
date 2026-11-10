@@ -1,0 +1,32 @@
+# Third-party code and licenses
+
+Vail has no C, C++, or Rust runtime dependency, but some accelerated paths
+embed third-party assembly or generated data. Each source file carries its own
+SPDX header; this page summarizes the major components.
+
+| Component | License | Location / notes |
+| --- | --- | --- |
+| s2n-bignum | Apache-2.0 OR ISC OR MIT-0 | P-256/P-384/P-521, X25519, Ed25519, Keccak, and ML-DSA assembly schedules; per-file headers record the pinned revision |
+| mlkem-native / s2n-bignum | Apache-2.0 OR ISC OR MIT | ML-KEM AVX2 kernels under `src/crypto/mlkem/` |
+| OpenSSL SHA-512 x86_64 assembly | Apache-2.0 | `src/crypto/sha512/avx.S`, derived from OpenSSL `sha512-x86_64.pl` |
+| BoringSSL / AWS-LC BEEU | ISC | P-256 public scalar inverse, pinned at BoringSSL `7eab8046` |
+| Unicode 3.2 data | Unicode Data Files and Software License | `src/x509/stringprep_data.zig`, generated from Unicode 3.2 and RFC 3454 tables |
+| Zig standard library | MIT | SHA-256 and other primitives used directly where no in-tree accelerated path exists |
+| Vort | See the sibling Vort repository | Pure-Zig Brotli dependency resolved through `build.zig.zon` |
+
+## Local modifications
+
+- Assembly is preprocessed for the ELF x86_64 or AArch64 SysV ABI.
+- Wrappers add Vail's calling convention, secret stack/register clearing, and
+  constant-time boundary checks.
+- Generated tables are checked in and must be regenerated with the scripts in
+  `tools/`.
+
+## Updating third-party code
+
+1. Record the upstream repository, commit, and license in the file header.
+2. Keep the embedded assembly separate from the Zig ABI wrapper.
+3. Re-run the relevant differential, fixed-vector, and interoperability tests.
+4. Update [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) and this page.
+5. Do not silently reformat vendored assembly; preserve provenance and review
+   local modifications as a diff against upstream.

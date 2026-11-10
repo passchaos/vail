@@ -3893,6 +3893,7 @@ pub fn build(b: *std.Build) void {
         "test",
         "tools",
         "archive_crypto",
+        "examples",
     };
     const fmt_excludes = &.{
         "bench/rustls_client_hello/target",
@@ -3924,4 +3925,22 @@ pub fn build(b: *std.Build) void {
     );
     check_step.dependOn(&fmt_check.step);
     check_step.dependOn(test_all_step);
+
+    const example_names = [_][]const u8{ "sha256", "aes_gcm", "mac" };
+    const examples_step = b.step("examples", "Build example programs");
+    for (example_names) |name| {
+        const example = b.addExecutable(.{
+            .name = b.fmt("vail-example-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    b.fmt("examples/{s}.zig", .{name}),
+                ),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "vail", .module = vail }},
+            }),
+        });
+        examples_step.dependOn(&example.step);
+    }
+    check_step.dependOn(examples_step);
 }
