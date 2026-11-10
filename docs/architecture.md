@@ -94,6 +94,20 @@ The build graph is currently one Zig module, so these rules are conventions
 rather than compiler-enforced boundaries. Splitting the graph into explicit
 submodules is a planned follow-up.
 
+## Build graph
+
+`build.zig` contains the library, test, example, formatting, and umbrella
+steps. The large benchmark and interoperability graphs live in
+`build_support/`:
+
+- `build_support/benches.zig` — all `bench-*` targets;
+- `build_support/interop.zig` — all `interop-*` targets;
+- `build_support/mldsa_benchmarks.zig` and `mlkem_benchmarks.zig` — shared
+  parameter-set benchmark helpers.
+
+`zig build bench` and `zig build interop` iterate the top-level steps after the
+helper modules have registered them.
+
 ## Ownership and allocation
 
 - Hot paths are allocation-free. Callers provide output buffers and, where
