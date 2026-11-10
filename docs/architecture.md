@@ -142,4 +142,7 @@ helper modules have registered them.
   from `zig build fmt`/`check`.
 - Embedded `.S` files carry SPDX headers and are included through
   `asm(@embedFile(...))`.
+- Generated tables and embedded assembly may exceed the normal 5,000-line
+  guideline when co-location is important for provenance, regeneration, or
+  performance; they remain next to the owning module.
 - See [`third-party.md`](third-party.md) for provenance and licensing.

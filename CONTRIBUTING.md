@@ -39,6 +39,15 @@ See [`docs/architecture.md`](docs/architecture.md) for details.
   implementation-specific expectations.
 - Add a regression test for every bug fix.
 
+## File size
+
+- Keep hand-written source files under roughly 5,000 lines.
+- When a file approaches that limit, split it along cohesive module boundaries
+  rather than arbitrary line counts.
+- Generated tables and embedded assembly may exceed the limit when co-location
+  is important for provenance, regeneration, or performance; document the
+  exception in the file header or architecture docs.
+
 ## Formatting
 
 - Run `zig build fmt` before committing.

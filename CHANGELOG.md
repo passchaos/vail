@@ -13,6 +13,19 @@ minor releases may contain API changes.
   `x509 -> tls` reverse dependency.
 - Routed TLS X.509 imports through `x509/mod.zig`.
 - Added `test-all`, `bench`, `interop`, `fmt`, and `check` build steps.
+- Extracted the benchmark and interoperability graphs into
+  `build_support/benches.zig` and `build_support/interop.zig`.
+- Added `-Dbench`, `-Dinterop`, `-Darchive`, and `-Dexamples` build flags.
+- Split crypto into `aead/`, `block/`, `hash/`, `ec/`, `pq/`, `sign/`, and
+  `kex/` modules; split TLS into `connection/`, `handshake/`, `crypto/`, and
+  `tls12/` modules.
+- Split P-521 field, P-256 field/scalar, P-384 scalar, and RSA Montgomery
+  arithmetic into dedicated modules.
+- Split QUIC TLS handshake into `quic/handshake/{common,client,server}.zig`.
+- Split X.509 and TLS tests into topic files with shared helpers.
+- Added a generated-file SHA-256 manifest and `zig build check-generated`.
+- Added the 5,000-line guideline for hand-written source files; generated
+  tables and embedded assembly are documented exceptions.
 - Added `archive_crypto` to the root `test-all` suite.
 - Relaxed the Zig version check to accept `0.16.x` patch releases.
 - Added `build`, `tools`, `archive_crypto`, and `docs` to the package paths.
