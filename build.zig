@@ -104,7 +104,7 @@ pub fn build(b: *std.Build) void {
     const traffic_bench = b.addExecutable(.{
         .name = "vail-bench-quic-traffic-crypto",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/quic_traffic_crypto.zig"),
+            .root_source_file = b.path("bench/quic/quic_traffic_crypto.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -120,7 +120,7 @@ pub fn build(b: *std.Build) void {
     const tls_record_bench = b.addExecutable(.{
         .name = "vail-bench-tls-record-crypto",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls_record_crypto.zig"),
+            .root_source_file = b.path("bench/tls/tls_record_crypto.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -136,7 +136,7 @@ pub fn build(b: *std.Build) void {
     const tls12_record_bench = b.addExecutable(.{
         .name = "vail-bench-tls12-record-crypto",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls12_record_crypto.zig"),
+            .root_source_file = b.path("bench/tls/tls12_record_crypto.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -152,7 +152,7 @@ pub fn build(b: *std.Build) void {
     const chacha_components_bench = b.addExecutable(.{
         .name = "vail-bench-chacha-components",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/chacha_components.zig"),
+            .root_source_file = b.path("bench/primitives/chacha_components.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -172,7 +172,7 @@ pub fn build(b: *std.Build) void {
     const chacha20_poly1305_bench = b.addExecutable(.{
         .name = "vail-bench-chacha20-poly1305",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/chacha20_poly1305.zig"),
+            .root_source_file = b.path("bench/primitives/chacha20_poly1305.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -226,7 +226,7 @@ pub fn build(b: *std.Build) void {
     const p521_verify_bench = b.addExecutable(.{
         .name = "vail-bench-p521-verify",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p521_verify.zig"),
+            .root_source_file = b.path("bench/primitives/p521_verify.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -242,7 +242,7 @@ pub fn build(b: *std.Build) void {
     const p521_one_shot_bench = b.addExecutable(.{
         .name = "vail-bench-p521-one-shot",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p521_one_shot.zig"),
+            .root_source_file = b.path("bench/primitives/p521_one_shot.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -258,7 +258,7 @@ pub fn build(b: *std.Build) void {
     const p521_public_key_bench = b.addExecutable(.{
         .name = "vail-bench-p521-public-key",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p521_public_key.zig"),
+            .root_source_file = b.path("bench/primitives/p521_public_key.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -274,7 +274,7 @@ pub fn build(b: *std.Build) void {
     const p521_prepared_bench = b.addExecutable(.{
         .name = "vail-bench-p521-prepared",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p521_prepared.zig"),
+            .root_source_file = b.path("bench/primitives/p521_prepared.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -290,7 +290,7 @@ pub fn build(b: *std.Build) void {
     const p521_sign_bench = b.addExecutable(.{
         .name = "vail-bench-p521-sign",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p521_sign.zig"),
+            .root_source_file = b.path("bench/primitives/p521_sign.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -306,7 +306,7 @@ pub fn build(b: *std.Build) void {
     const p521_sign_one_shot_bench = b.addExecutable(.{
         .name = "vail-bench-p521-sign-one-shot",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p521_sign_one_shot.zig"),
+            .root_source_file = b.path("bench/primitives/p521_sign_one_shot.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -326,7 +326,7 @@ pub fn build(b: *std.Build) void {
     const p521_ecdh_bench = b.addExecutable(.{
         .name = "vail-bench-p521-ecdh",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p521_ecdh.zig"),
+            .root_source_file = b.path("bench/primitives/p521_ecdh.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -358,7 +358,7 @@ pub fn build(b: *std.Build) void {
     const p384_ecdh_bench = b.addExecutable(.{
         .name = "vail-bench-p384-ecdh",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p384_ecdh.zig"),
+            .root_source_file = b.path("bench/primitives/p384_ecdh.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -390,7 +390,7 @@ pub fn build(b: *std.Build) void {
     const p256_ecdh_bench = b.addExecutable(.{
         .name = "vail-bench-p256-ecdh",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p256_ecdh.zig"),
+            .root_source_file = b.path("bench/primitives/p256_ecdh.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -454,7 +454,7 @@ pub fn build(b: *std.Build) void {
     const p384_verify_bench = b.addExecutable(.{
         .name = "vail-bench-p384-verify",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p384_verify.zig"),
+            .root_source_file = b.path("bench/primitives/p384_verify.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -470,7 +470,7 @@ pub fn build(b: *std.Build) void {
     const p384_one_shot_bench = b.addExecutable(.{
         .name = "vail-bench-p384-one-shot",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p384_one_shot.zig"),
+            .root_source_file = b.path("bench/primitives/p384_one_shot.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -486,7 +486,7 @@ pub fn build(b: *std.Build) void {
     const p384_sign_bench = b.addExecutable(.{
         .name = "vail-bench-p384-sign",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p384_sign.zig"),
+            .root_source_file = b.path("bench/primitives/p384_sign.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -534,7 +534,7 @@ pub fn build(b: *std.Build) void {
     const x25519_bench = b.addExecutable(.{
         .name = "vail-bench-x25519",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/x25519.zig"),
+            .root_source_file = b.path("bench/primitives/x25519.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -550,7 +550,7 @@ pub fn build(b: *std.Build) void {
     const p256_verify_bench = b.addExecutable(.{
         .name = "vail-bench-p256-verify",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p256_verify.zig"),
+            .root_source_file = b.path("bench/primitives/p256_verify.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -566,7 +566,7 @@ pub fn build(b: *std.Build) void {
     const p256_one_shot_bench = b.addExecutable(.{
         .name = "vail-bench-p256-one-shot",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p256_one_shot.zig"),
+            .root_source_file = b.path("bench/primitives/p256_one_shot.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -582,7 +582,7 @@ pub fn build(b: *std.Build) void {
     const p256_prepared_bench = b.addExecutable(.{
         .name = "vail-bench-p256-prepared",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p256_prepared.zig"),
+            .root_source_file = b.path("bench/primitives/p256_prepared.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -598,7 +598,7 @@ pub fn build(b: *std.Build) void {
     const p256_sign_bench = b.addExecutable(.{
         .name = "vail-bench-p256-sign",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/p256_sign.zig"),
+            .root_source_file = b.path("bench/primitives/p256_sign.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -646,7 +646,7 @@ pub fn build(b: *std.Build) void {
     const ed25519_bench = b.addExecutable(.{
         .name = "vail-bench-ed25519",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/ed25519.zig"),
+            .root_source_file = b.path("bench/primitives/ed25519.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -662,7 +662,7 @@ pub fn build(b: *std.Build) void {
     const ed25519_keygen_bench = b.addExecutable(.{
         .name = "vail-bench-ed25519-keygen",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/ed25519_keygen.zig"),
+            .root_source_file = b.path("bench/primitives/ed25519_keygen.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -696,7 +696,7 @@ pub fn build(b: *std.Build) void {
     const ed25519_verify_bench = b.addExecutable(.{
         .name = "vail-bench-ed25519-verify",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/ed25519_verify.zig"),
+            .root_source_file = b.path("bench/primitives/ed25519_verify.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -746,7 +746,7 @@ pub fn build(b: *std.Build) void {
     const ed25519_sign_bench = b.addExecutable(.{
         .name = "vail-bench-ed25519-sign",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/ed25519_sign.zig"),
+            .root_source_file = b.path("bench/primitives/ed25519_sign.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -796,7 +796,7 @@ pub fn build(b: *std.Build) void {
     const x25519_shared_bench = b.addExecutable(.{
         .name = "vail-bench-x25519-shared",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/x25519_shared.zig"),
+            .root_source_file = b.path("bench/primitives/x25519_shared.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -830,7 +830,7 @@ pub fn build(b: *std.Build) void {
     const hkdf_sha256_bench = b.addExecutable(.{
         .name = "vail-bench-hkdf-sha256",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/hkdf_sha256.zig"),
+            .root_source_file = b.path("bench/primitives/hkdf_sha256.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -846,7 +846,7 @@ pub fn build(b: *std.Build) void {
     const hkdf_sha256_std_bench = b.addExecutable(.{
         .name = "vail-bench-hkdf-sha256-std",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/hkdf_sha256_std.zig"),
+            .root_source_file = b.path("bench/primitives/hkdf_sha256_std.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -883,7 +883,7 @@ pub fn build(b: *std.Build) void {
     const hkdf_sha384_bench = b.addExecutable(.{
         .name = "vail-bench-hkdf-sha384",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/hkdf_sha384.zig"),
+            .root_source_file = b.path("bench/primitives/hkdf_sha384.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -899,7 +899,7 @@ pub fn build(b: *std.Build) void {
     const hkdf_sha384_std_bench = b.addExecutable(.{
         .name = "vail-bench-hkdf-sha384-std",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/hkdf_sha384_std.zig"),
+            .root_source_file = b.path("bench/primitives/hkdf_sha384_std.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -936,7 +936,7 @@ pub fn build(b: *std.Build) void {
     const sha512_primitives_bench = b.addExecutable(.{
         .name = "vail-bench-sha512-primitives",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/sha512_primitives.zig"),
+            .root_source_file = b.path("bench/primitives/sha512_primitives.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -974,7 +974,7 @@ pub fn build(b: *std.Build) void {
     const sha256_primitives_bench = b.addExecutable(.{
         .name = "vail-bench-sha256-primitives",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/sha256_primitives.zig"),
+            .root_source_file = b.path("bench/primitives/sha256_primitives.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1014,7 +1014,7 @@ pub fn build(b: *std.Build) void {
     const x25519_public_bench = b.addExecutable(.{
         .name = "vail-bench-x25519-public",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/x25519_public.zig"),
+            .root_source_file = b.path("bench/primitives/x25519_public.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1249,7 +1249,7 @@ pub fn build(b: *std.Build) void {
     const tls_handshake_bench = b.addExecutable(.{
         .name = "vail-bench-tls-server-handshake",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls_server_handshake.zig"),
+            .root_source_file = b.path("bench/tls/tls_server_handshake.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1265,7 +1265,7 @@ pub fn build(b: *std.Build) void {
     const tls_server_connection_bench = b.addExecutable(.{
         .name = "vail-bench-tls-server-connection",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls_server_connection.zig"),
+            .root_source_file = b.path("bench/tls/tls_server_connection.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1323,7 +1323,7 @@ pub fn build(b: *std.Build) void {
     const tls_client_connection_bench = b.addExecutable(.{
         .name = "vail-bench-tls-client-connection",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls_client_connection.zig"),
+            .root_source_file = b.path("bench/tls/tls_client_connection.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1381,7 +1381,7 @@ pub fn build(b: *std.Build) void {
     const tls_client_x509_bench = b.addExecutable(.{
         .name = "vail-bench-tls-client-x509",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls_client_x509.zig"),
+            .root_source_file = b.path("bench/tls/tls_client_x509.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1401,7 +1401,7 @@ pub fn build(b: *std.Build) void {
     const tls_server_x509_bench = b.addExecutable(.{
         .name = "vail-bench-tls-server-x509",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls_server_x509.zig"),
+            .root_source_file = b.path("bench/tls/tls_server_x509.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1421,7 +1421,7 @@ pub fn build(b: *std.Build) void {
     const tls_x509_handshake_bench = b.addExecutable(.{
         .name = "vail-bench-tls-x509-handshake",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls_handshake_x509.zig"),
+            .root_source_file = b.path("bench/tls/tls_handshake_x509.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1461,7 +1461,7 @@ pub fn build(b: *std.Build) void {
     const versioned_tls_handshake_bench = b.addExecutable(.{
         .name = "vail-bench-versioned-tls-handshake",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/versioned_tls_handshake.zig"),
+            .root_source_file = b.path("bench/tls/versioned_tls_handshake.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1501,7 +1501,7 @@ pub fn build(b: *std.Build) void {
     const quic_tls_handshake_bench = b.addExecutable(.{
         .name = "vail-bench-quic-tls-handshake",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/quic_tls_handshake.zig"),
+            .root_source_file = b.path("bench/quic/quic_tls_handshake.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1539,7 +1539,7 @@ pub fn build(b: *std.Build) void {
     const quic_tls_resumption_bench = b.addExecutable(.{
         .name = "vail-bench-quic-tls-resumption",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/quic_tls_resumption.zig"),
+            .root_source_file = b.path("bench/quic/quic_tls_resumption.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1609,7 +1609,7 @@ pub fn build(b: *std.Build) void {
     const tls_resumption_bench = b.addExecutable(.{
         .name = "vail-bench-tls-resumption",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls_resumption.zig"),
+            .root_source_file = b.path("bench/tls/tls_resumption.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1645,7 +1645,7 @@ pub fn build(b: *std.Build) void {
     const x509_path_bench = b.addExecutable(.{
         .name = "vail-bench-x509-path",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/x509_path.zig"),
+            .root_source_file = b.path("bench/x509/x509_path.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1661,7 +1661,7 @@ pub fn build(b: *std.Build) void {
     const certificate_compression_bench = b.addExecutable(.{
         .name = "vail-bench-certificate-compression",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/certificate_compression.zig"),
+            .root_source_file = b.path("bench/tls/certificate_compression.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1681,7 +1681,7 @@ pub fn build(b: *std.Build) void {
     const rsa_pss_bench = b.addExecutable(.{
         .name = "vail-bench-rsa-pss",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/rsa_pss.zig"),
+            .root_source_file = b.path("bench/primitives/rsa_pss.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1697,7 +1697,7 @@ pub fn build(b: *std.Build) void {
     const hpke_bench = b.addExecutable(.{
         .name = "vail-bench-hpke",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/hpke.zig"),
+            .root_source_file = b.path("bench/primitives/hpke.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1713,7 +1713,7 @@ pub fn build(b: *std.Build) void {
     const ech_bench = b.addExecutable(.{
         .name = "vail-bench-ech",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/ech.zig"),
+            .root_source_file = b.path("bench/tls/ech.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1729,7 +1729,7 @@ pub fn build(b: *std.Build) void {
     const tls12_handshake_bench = b.addExecutable(.{
         .name = "vail-bench-tls12-server-handshake",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls12_server_handshake.zig"),
+            .root_source_file = b.path("bench/tls/tls12_server_handshake.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1749,7 +1749,7 @@ pub fn build(b: *std.Build) void {
     const tls12_client_handshake_bench = b.addExecutable(.{
         .name = "vail-bench-tls12-client-handshake",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls12_client_handshake.zig"),
+            .root_source_file = b.path("bench/tls/tls12_client_handshake.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1769,7 +1769,7 @@ pub fn build(b: *std.Build) void {
     const tls12_full_handshake_bench = b.addExecutable(.{
         .name = "vail-bench-tls12-handshake",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls12_handshake.zig"),
+            .root_source_file = b.path("bench/tls/tls12_handshake.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1867,7 +1867,7 @@ pub fn build(b: *std.Build) void {
     const tls12_resumption_bench = b.addExecutable(.{
         .name = "vail-bench-tls12-resumption",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/tls12_resumption.zig"),
+            .root_source_file = b.path("bench/tls/tls12_resumption.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},

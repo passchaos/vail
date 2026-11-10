@@ -5,9 +5,11 @@ harnesses.
 
 ## Layout
 
-- Top-level `*.zig` files are individual benchmark programs.
-- `mldsa/` and `mlkem/` contain shared benchmark helpers and parameter-set
-  variants.
+- `primitives/` — AEAD, hash, KDF, key-exchange, and signature benchmarks.
+- `tls/` — TLS 1.2/1.3 handshake, record, X.509, and resumption benchmarks.
+- `quic/` — QUIC handshake and traffic-protection benchmarks.
+- `x509/` — certificate-path benchmarks.
+- `mldsa/` and `mlkem/` — shared benchmark helpers and parameter-set variants.
 - `rustls_client_hello/`, `rustls_min_client/`, and `rustls_min_server/` are
   Rust reference projects. Their `target/` directories are local build
   artifacts and are ignored by Git.
