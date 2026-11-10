@@ -130,6 +130,8 @@ helper modules have registered them.
 - Module-level `tests.zig` files cover cross-file behavior within a layer.
 - X.509 tests are grouped under `src/x509/tests/` with shared helpers in
   `common.zig`.
+- TLS tests are grouped under `src/tls/tests/` by topic, with shared helpers in
+  `common.zig`.
 - `test/package_test.zig` checks that the public module surface is reachable.
 - `zig build test-all` runs the Vail, package, signature-primitive, and
   `archive_crypto` suites.
