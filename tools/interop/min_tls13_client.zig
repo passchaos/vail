@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
             .resumption_count = 1,
         } else null,
         .server_verifier = if (use_pss_certificate)
-            pss_verifier.clientVerifier()
+            vail.tls.auth.ClientVerifier.fromTrustVerifier(pss_verifier.clientVerifier())
         else
             .{ .verify_trust = acceptTestCertificate },
     }, &client_hello_record);

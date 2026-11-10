@@ -295,7 +295,7 @@ fn clientVerifier(
     trust: *const vail.x509.trust.BundleVerifier,
     prepared: *const vail.tls.auth.PreparedRsaVerifier,
 ) vail.tls.auth.ClientVerifier {
-    var verifier = trust.clientVerifier();
+    var verifier = vail.tls.auth.ClientVerifier.fromTrustVerifier(trust.clientVerifier());
     verifier.prepared_rsa_verifier = prepared;
     return verifier;
 }

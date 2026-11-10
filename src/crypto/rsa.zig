@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const rsa_pss = @import("../x509/signature.zig");
+const rsa_pss = @import("rsa_pss.zig");
 
 const Sha224 = std.crypto.hash.sha2.Sha224;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -3937,6 +3937,7 @@ test "PKCS1 and PKCS8 RSA keys produce verifiable PSS signatures" {
 }
 
 test "RSA private keys sign SHA3 PSS and PKCS1 signatures" {
+    const x509_signature = @import("../x509/signature.zig");
     const vectors = @import("testdata/rsa_signing.zig");
     const pkcs8 = decodeHex(vectors.private_key_pkcs8_hex);
     const certificate_der = decodeHex(vectors.certificate_hex);
@@ -3968,7 +3969,7 @@ test "RSA private keys sign SHA3 PSS and PKCS1 signatures" {
         else
             try prepared.signPssSha3_512(message, &salt, &signature);
         try std.testing.expectEqual(@as(usize, 256), pss_len);
-        try rsa_pss.verify(
+        try x509_signature.verify(
             algorithm,
             certificate,
             message,
@@ -3992,7 +3993,7 @@ test "RSA private keys sign SHA3 PSS and PKCS1 signatures" {
         else
             try prepared.signPkcs1v15Sha3_512(message, &signature);
         try std.testing.expectEqual(@as(usize, 256), pkcs1_len);
-        try rsa_pss.verify(
+        try x509_signature.verify(
             pkcs1_algorithm,
             certificate,
             message,
@@ -4006,14 +4007,14 @@ test "RSA private keys sign SHA3 PSS and PKCS1 signatures" {
         &([_]u8{0x92} ** Sha3_256.digest_length),
         &one_shot_signature,
     );
-    try rsa_pss.verify(
+    try x509_signature.verify(
         .rsa_pss_sha3_256,
         certificate,
         message,
         one_shot_signature[0..one_shot_len],
     );
     _ = try key.signPkcs1v15Sha3_256(message, &one_shot_signature);
-    try rsa_pss.verify(
+    try x509_signature.verify(
         .rsa_pkcs1_sha3_256,
         certificate,
         message,
@@ -4022,6 +4023,7 @@ test "RSA private keys sign SHA3 PSS and PKCS1 signatures" {
 }
 
 test "RSA private keys sign SHA-512 truncated PSS and PKCS1 signatures" {
+    const x509_signature = @import("../x509/signature.zig");
     const vectors = @import("testdata/rsa_signing.zig");
     const pkcs8 = decodeHex(vectors.private_key_pkcs8_hex);
     const certificate_der = decodeHex(vectors.certificate_hex);
@@ -4055,7 +4057,7 @@ test "RSA private keys sign SHA-512 truncated PSS and PKCS1 signatures" {
             try prepared.signPssSha512_224(message, &salt, &signature)
         else
             try prepared.signPssSha512_256(message, &salt, &signature);
-        try rsa_pss.verify(
+        try x509_signature.verify(
             case[1],
             certificate,
             message,
@@ -4066,7 +4068,7 @@ test "RSA private keys sign SHA-512 truncated PSS and PKCS1 signatures" {
             try prepared.signPkcs1v15Sha512_224(message, &signature)
         else
             try prepared.signPkcs1v15Sha512_256(message, &signature);
-        try rsa_pss.verify(
+        try x509_signature.verify(
             case[2],
             certificate,
             message,
@@ -4077,7 +4079,7 @@ test "RSA private keys sign SHA-512 truncated PSS and PKCS1 signatures" {
             try key.signPssSha512_224(message, &salt, &signature)
         else
             try key.signPssSha512_256(message, &salt, &signature);
-        try rsa_pss.verify(
+        try x509_signature.verify(
             case[1],
             certificate,
             message,
@@ -4088,7 +4090,7 @@ test "RSA private keys sign SHA-512 truncated PSS and PKCS1 signatures" {
             try key.signPkcs1v15Sha512_224(message, &signature)
         else
             try key.signPkcs1v15Sha512_256(message, &signature);
-        try rsa_pss.verify(
+        try x509_signature.verify(
             case[2],
             certificate,
             message,
@@ -4098,6 +4100,7 @@ test "RSA private keys sign SHA-512 truncated PSS and PKCS1 signatures" {
 }
 
 test "RSA private keys sign RFC 8692 PSS-SHAKE signatures" {
+    const x509_signature = @import("../x509/signature.zig");
     const vectors = @import("testdata/rsa_signing.zig");
     const pkcs8 = decodeHex(vectors.private_key_pkcs8_hex);
     const certificate_der = decodeHex(vectors.certificate_hex);
@@ -4121,7 +4124,7 @@ test "RSA private keys sign RFC 8692 PSS-SHAKE signatures" {
             try prepared.signPssShake128(message, &salt, &signature)
         else
             try prepared.signPssShake256(message, &salt, &signature);
-        try rsa_pss.verify(
+        try x509_signature.verify(
             case[1],
             certificate,
             message,
@@ -4130,7 +4133,7 @@ test "RSA private keys sign RFC 8692 PSS-SHAKE signatures" {
         signature[signature_len - 1] ^= 1;
         try std.testing.expectError(
             error.InvalidSignature,
-            rsa_pss.verify(
+            x509_signature.verify(
                 case[1],
                 certificate,
                 message,
@@ -4149,7 +4152,7 @@ test "RSA private keys sign RFC 8692 PSS-SHAKE signatures" {
     );
     try std.testing.expectError(
         error.InvalidSignature,
-        rsa_pss.verify(
+        x509_signature.verify(
             .rsa_pss_shake128,
             certificate,
             message,
@@ -4163,7 +4166,7 @@ test "RSA private keys sign RFC 8692 PSS-SHAKE signatures" {
         &([_]u8{0xe2} ** Shake128.digest_length),
         &signature,
     );
-    try rsa_pss.verify(
+    try x509_signature.verify(
         .rsa_pss_shake128,
         certificate,
         message,
@@ -4174,7 +4177,7 @@ test "RSA private keys sign RFC 8692 PSS-SHAKE signatures" {
         &([_]u8{0xf2} ** Shake256.digest_length),
         &signature,
     );
-    try rsa_pss.verify(
+    try x509_signature.verify(
         .rsa_pss_shake256,
         certificate,
         message,

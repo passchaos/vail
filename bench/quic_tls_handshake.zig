@@ -64,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
         &certificate,
         signature_scheme,
     );
-    var verifier = trust_verifier.clientVerifier();
+    var verifier = vail.tls.auth.ClientVerifier.fromTrustVerifier(trust_verifier.clientVerifier());
     verifier.prepared_rsa_verifier = &prepared_public;
 
     var buffers: Buffers = .{};

@@ -180,7 +180,7 @@ fn clientConfig(
         .request_ocsp = false,
         .certificate_compression_algorithms = &.{},
         .server_verifier = blk: {
-            var client_verifier = verifier.clientVerifier();
+            var client_verifier = vail.tls.auth.ClientVerifier.fromTrustVerifier(verifier.clientVerifier());
             client_verifier.prepared_rsa_verifier = prepared_verifier;
             break :blk client_verifier;
         },

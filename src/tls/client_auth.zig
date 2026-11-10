@@ -8,8 +8,7 @@ const extension_set = @import("extension_set.zig");
 const key_schedule = @import("key_schedule.zig");
 const secret = @import("secret.zig");
 const transcript = @import("transcript.zig");
-const distinguished_name = @import("../x509/distinguished_name.zig");
-const x509_trust = @import("../x509/trust.zig");
+const x509 = @import("../x509/mod.zig");
 
 pub const handshake_type_certificate_request: u8 = 0x0d;
 const ext_signature_algorithms: u16 = 0x000d;
@@ -274,7 +273,7 @@ fn certificateAuthoritiesContainIssuer(
         const encoded_name = encoded_authorities[offset..][0..name_len];
         offset += name_len;
         const name = derSequenceContents(encoded_name) orelse continue;
-        if (distinguished_name.eql(name, issuer) catch false) return true;
+        if (x509.distinguished_name.eql(name, issuer) catch false) return true;
     }
     return false;
 }
@@ -1013,7 +1012,7 @@ fn validateOidFilters(
         {
             return error.InvalidCertificateRequest;
         }
-        _ = x509_trust.validateOidFilter(
+        _ = x509.trust.validateOidFilter(
             filter.oid,
             filter.values,
         ) catch return error.InvalidCertificateRequest;
@@ -1076,7 +1075,7 @@ fn parseOidFilters(payload: []const u8) Error![]const u8 {
     var saw_extended_key_usage = false;
     var iterator = OidFilterIterator{ .bytes = filters };
     while (try iterator.next()) |filter| {
-        const kind = x509_trust.validateOidFilter(
+        const kind = x509.trust.validateOidFilter(
             filter.oid,
             filter.values,
         ) catch return error.InvalidCertificateRequest;
@@ -1103,7 +1102,7 @@ fn oidFiltersMatchCertificate(
 ) Error!bool {
     var iterator = OidFilterIterator{ .bytes = filters };
     while (try iterator.next()) |filter| {
-        const result = x509_trust.matchOidFilter(
+        const result = x509.trust.matchOidFilter(
             certificate_der,
             filter.oid,
             filter.values,

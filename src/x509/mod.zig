@@ -1,6 +1,9 @@
 //! X.509 trust stores and verification policy.
 
 pub const trust = @import("trust.zig");
+pub const certificate = @import("certificate.zig");
+pub const signature = @import("signature.zig");
+pub const verifier = @import("verifier.zig");
 pub const identity = @import("identity.zig");
 pub const distinguished_name = @import("distinguished_name.zig");
 pub const policy = @import("policy.zig");

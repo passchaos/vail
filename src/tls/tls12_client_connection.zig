@@ -3209,7 +3209,7 @@ test "TLS 1.2 RFC 6961 validates leaf and intermediate OCSP responses" {
         .server_name = "multi-staple.localhost",
         .client_private_key = &client_private,
         .policy = policy,
-        .server_verifier = verifier.clientVerifier(),
+        .server_verifier = auth.ClientVerifier.fromTrustVerifier(verifier.clientVerifier()),
     }, &client_wire);
     defer client.deinit();
 

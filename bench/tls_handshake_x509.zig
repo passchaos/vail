@@ -77,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
             .request_ocsp = false,
             .certificate_compression_algorithms = &.{},
             .server_verifier = blk: {
-                var verifier = trust_verifier.clientVerifier();
+                var verifier = vail.tls.auth.ClientVerifier.fromTrustVerifier(trust_verifier.clientVerifier());
                 verifier.prepared_rsa_verifier = &prepared_public;
                 break :blk verifier;
             },

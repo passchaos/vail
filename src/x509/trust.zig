@@ -1,11 +1,11 @@
 //! Built-in X.509 chain, validity, hostname, and endpoint-purpose policy.
 //!
 //! `SystemStore` loads the platform CA bundle once and then exposes a
-//! zero-allocation verification callback suitable for `auth.ClientVerifier`.
+//! zero-allocation verification callback suitable for `x509_verifier.TrustVerifier`.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const auth = @import("../tls/auth.zig");
+const x509_verifier = @import("verifier.zig");
 const p521 = @import("../crypto/p521.zig");
 const certificate_compat = @import("certificate.zig");
 const distinguished_name = @import("distinguished_name.zig");
@@ -89,7 +89,7 @@ pub const BundleVerifier = struct {
 
     pub fn clientVerifier(
         self: *const BundleVerifier,
-    ) auth.ClientVerifier {
+    ) x509_verifier.TrustVerifier {
         return .{
             .verify_trust = verifyCallback,
             .context = @ptrCast(@constCast(self)),
@@ -102,7 +102,7 @@ pub const BundleVerifier = struct {
     /// explicit compatibility opt-outs such as Mosquitto `bridge_insecure`.
     pub fn serverChainVerifier(
         self: *const BundleVerifier,
-    ) auth.ClientVerifier {
+    ) x509_verifier.TrustVerifier {
         return .{
             .verify_trust = verifyServerChainCallback,
             .context = @ptrCast(@constCast(self)),
@@ -111,7 +111,7 @@ pub const BundleVerifier = struct {
 
     pub fn verify(
         self: BundleVerifier,
-        trust_context: auth.TrustContext,
+        trust_context: x509_verifier.TrustContext,
     ) !void {
         if (trust_context.chain.len == 0) {
             return error.EmptyCertificateChain;
@@ -142,7 +142,7 @@ pub const BundleVerifier = struct {
     /// own the parsed TLS trust context.
     pub fn verifyServerChain(
         self: BundleVerifier,
-        trust_context: auth.TrustContext,
+        trust_context: x509_verifier.TrustContext,
     ) !void {
         try verifyChain(
             self.bundle,
@@ -167,7 +167,7 @@ pub const BundleVerifier = struct {
     /// transport, redirect, and network-access policy.
     pub fn verifyWithFetchedIssuers(
         self: BundleVerifier,
-        trust_context: auth.TrustContext,
+        trust_context: x509_verifier.TrustContext,
         issuer_storage: []u8,
         fetch_scratch: []u8,
         fetched_output: [][]const u8,
@@ -234,7 +234,7 @@ pub const BundleVerifier = struct {
 
     fn verifyCallback(
         context: ?*anyopaque,
-        trust_context: auth.TrustContext,
+        trust_context: x509_verifier.TrustContext,
     ) anyerror!void {
         const self: *const BundleVerifier = @ptrCast(@alignCast(
             context orelse return error.MissingTrustContext,
@@ -244,7 +244,7 @@ pub const BundleVerifier = struct {
 
     fn verifyServerChainCallback(
         context: ?*anyopaque,
-        trust_context: auth.TrustContext,
+        trust_context: x509_verifier.TrustContext,
     ) anyerror!void {
         const self: *const BundleVerifier = @ptrCast(@alignCast(
             context orelse return error.MissingTrustContext,
@@ -267,7 +267,7 @@ pub const ClientCertificateBundleVerifier = struct {
 
     pub fn clientVerifier(
         self: *const ClientCertificateBundleVerifier,
-    ) auth.ClientVerifier {
+    ) x509_verifier.TrustVerifier {
         return .{
             .verify_trust = verifyCallback,
             .context = @ptrCast(@constCast(self)),
@@ -276,7 +276,7 @@ pub const ClientCertificateBundleVerifier = struct {
 
     pub fn verify(
         self: ClientCertificateBundleVerifier,
-        trust_context: auth.TrustContext,
+        trust_context: x509_verifier.TrustContext,
     ) !void {
         try verifyChain(
             self.bundle,
@@ -297,7 +297,7 @@ pub const ClientCertificateBundleVerifier = struct {
 
     fn verifyCallback(
         context: ?*anyopaque,
-        trust_context: auth.TrustContext,
+        trust_context: x509_verifier.TrustContext,
     ) anyerror!void {
         const self: *const ClientCertificateBundleVerifier =
             @ptrCast(@alignCast(

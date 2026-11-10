@@ -17,8 +17,10 @@ const p256 = @import("../crypto/p256.zig");
 const p384 = @import("../crypto/p384.zig");
 const rsa = @import("../crypto/rsa.zig");
 const sm2 = @import("../crypto/sm2.zig");
-const x509_certificate = @import("../x509/certificate.zig");
-const x509_signature = @import("../x509/signature.zig");
+const x509 = @import("../x509/mod.zig");
+const x509_certificate = x509.certificate;
+const x509_signature = x509.signature;
+const x509_verifier = x509.verifier;
 const Certificate = std.crypto.Certificate;
 const Ed25519 = std.crypto.sign.Ed25519;
 const MlDsa44 = std.crypto.sign.mldsa.MLDSA44;
@@ -1011,20 +1013,8 @@ pub const CustomSigner = struct {
     ) anyerror!usize,
 };
 
-pub const TrustContext = struct {
-    server_name: ?[]const u8,
-    chain: []const []const u8,
-    /// Backward-compatible view of the leaf CertificateEntry response.
-    ocsp_response: ?[]const u8 = null,
-    /// TLS 1.3 per-CertificateEntry OCSP responses, aligned with `chain`.
-    /// Null indicates a caller using the legacy leaf-only API.
-    ocsp_responses: ?[]const ?[]const u8 = null,
-};
-
-pub const TrustCallback = *const fn (
-    context: ?*anyopaque,
-    trust: TrustContext,
-) anyerror!void;
+pub const TrustContext = x509_verifier.TrustContext;
+pub const TrustCallback = x509_verifier.TrustCallback;
 
 /// Reusable RSA-2048/65537 public-key context for repeated TLS signature
 /// checks. Certificate matching remains enforced on every use, while
@@ -1245,6 +1235,16 @@ pub const ClientVerifier = struct {
     /// Optional reusable RSA-2048/65537 Montgomery context for TLS 1.3
     /// CertificateVerify or TLS 1.2 signed-handshake verification.
     prepared_rsa_verifier: ?*const PreparedRsaVerifier = null,
+
+    /// Wrap the callback/context pair returned by an X.509 trust store.
+    pub fn fromTrustVerifier(
+        trust: x509_verifier.TrustVerifier,
+    ) ClientVerifier {
+        return .{
+            .verify_trust = trust.verify_trust,
+            .context = trust.context,
+        };
+    }
 
     pub fn verifyTrust(
         self: ClientVerifier,
@@ -3271,7 +3271,6 @@ fn parseRawSpki(bytes: []const u8) Error!?RawSpki {
         ) catch |err| switch (err) {
             error.InvalidAlgorithmIdentifier => return error.InvalidCertificate,
             error.UnsupportedSignatureAlgorithm => return error.UnsupportedCertificateKey,
-            else => return error.InvalidCertificate,
         }
     else
         null;

@@ -76,7 +76,7 @@ test "TLS leaf OCSP staple is enforced by bundle trust policy" {
         .chain = parsed.entries,
         .ocsp_response = parsed.ocsp_response,
     });
-    try required.clientVerifier().verifyTrustWithOcsp(
+    try auth.ClientVerifier.fromTrustVerifier(required.clientVerifier()).verifyTrustWithOcsp(
         "localhost",
         parsed.entries,
         parsed.ocsp_response,
@@ -578,7 +578,7 @@ test "bundle verifier validates hostname and time" {
         .server_name = "other.example",
         .chain = &.{server_der},
     });
-    try verifier.serverChainVerifier().verifyTrust(
+    try auth.ClientVerifier.fromTrustVerifier(verifier.serverChainVerifier()).verifyTrust(
         "other.example",
         &.{server_der},
     );
@@ -587,7 +587,7 @@ test "bundle verifier validates hostname and time" {
     corrupted[corrupted.len - 1] ^= 1;
     try std.testing.expectError(
         error.CertificateUntrusted,
-        verifier.serverChainVerifier().verifyTrust(
+        auth.ClientVerifier.fromTrustVerifier(verifier.serverChainVerifier()).verifyTrust(
             "other.example",
             &.{&corrupted},
         ),
@@ -731,13 +731,13 @@ test "client certificate bundle verifier validates trust without hostname" {
         .server_name = "not-the-client-name.example",
         .chain = &.{client_der},
     });
-    try verifier.clientVerifier().verifyTrust(null, &.{client_der});
+    try auth.ClientVerifier.fromTrustVerifier(verifier.clientVerifier()).verifyTrust(null, &.{client_der});
 
     var corrupted_client = client_der.*;
     corrupted_client[corrupted_client.len - 1] ^= 1;
     try std.testing.expectError(
         error.CertificateUntrusted,
-        verifier.clientVerifier().verifyTrust(null, &.{&corrupted_client}),
+        auth.ClientVerifier.fromTrustVerifier(verifier.clientVerifier()).verifyTrust(null, &.{&corrupted_client}),
     );
 }
 

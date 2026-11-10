@@ -9,6 +9,8 @@ const ed25519 = @import("../crypto/ed25519.zig");
 const p256 = @import("../crypto/p256.zig");
 const p384 = @import("../crypto/p384.zig");
 const p521 = @import("../crypto/p521.zig");
+const rsa_pss = @import("../crypto/rsa_pss.zig");
+const signature_algorithm = @import("../crypto/signature_algorithm.zig");
 
 const Certificate = std.crypto.Certificate;
 const RsaModulus = std.crypto.ff.Modulus(4096);
@@ -191,153 +193,13 @@ pub const P521Verifier = p521.CompactPreparedVerifier;
 pub const P256Verifier = p256.PreparedVerifier;
 pub const Ed25519Verifier = ed25519.PreparedVerifier;
 
-pub const Algorithm = enum {
-    /// RFC 5758 `ecdsa-with-SHA224`, using the issuer's P-256 or P-384 key.
-    ecdsa_sha224,
-    /// `ecdsa-with-SHA256`. The historical name is retained for API
-    /// compatibility; verification selects P-256 or P-384 from the issuer key.
-    ecdsa_p256_sha256,
-    /// `ecdsa-with-SHA384`. The historical name is retained for API
-    /// compatibility; verification selects P-256 or P-384 from the issuer key.
-    ecdsa_p384_sha384,
-    /// RFC 5758 `ecdsa-with-SHA512`, using the issuer's P-256 or P-384 key.
-    ecdsa_sha512,
-    ecdsa_sha3_224,
-    ecdsa_sha3_256,
-    ecdsa_sha3_384,
-    ecdsa_sha3_512,
-    ecdsa_shake128,
-    ecdsa_shake256,
-    rsa_pkcs1_sha1,
-    rsa_pkcs1_sha224,
-    rsa_pkcs1_sha256,
-    rsa_pkcs1_sha384,
-    rsa_pkcs1_sha512,
-    rsa_pkcs1_sha512_224,
-    rsa_pkcs1_sha512_256,
-    rsa_pkcs1_sha3_224,
-    rsa_pkcs1_sha3_256,
-    rsa_pkcs1_sha3_384,
-    rsa_pkcs1_sha3_512,
-    rsa_pss_sha224,
-    rsa_pss_sha256,
-    rsa_pss_sha384,
-    rsa_pss_sha512,
-    rsa_pss_sha512_224,
-    rsa_pss_sha512_256,
-    rsa_pss_sha3_224,
-    rsa_pss_sha3_256,
-    rsa_pss_sha3_384,
-    rsa_pss_sha3_512,
-    rsa_pss_shake128,
-    rsa_pss_shake256,
-    ed25519,
-};
-
-pub const PssHash = enum {
-    sha1,
-    sha224,
-    sha256,
-    sha384,
-    sha512,
-    sha512_224,
-    sha512_256,
-    sha3_224,
-    sha3_256,
-    sha3_384,
-    sha3_512,
-    shake128,
-    shake256,
-
-    fn digestLength(self: PssHash) usize {
-        return switch (self) {
-            .sha1 => std.crypto.hash.Sha1.digest_length,
-            .sha224 => Sha224.digest_length,
-            .sha256 => Sha256.digest_length,
-            .sha384 => Sha384.digest_length,
-            .sha512 => Sha512.digest_length,
-            .sha512_224 => Sha512_224.digest_length,
-            .sha512_256 => Sha512_256.digest_length,
-            .sha3_224 => Sha3_224.digest_length,
-            .sha3_256 => Sha3_256.digest_length,
-            .sha3_384 => Sha3_384.digest_length,
-            .sha3_512 => Sha3_512.digest_length,
-            .shake128 => Shake128.digest_length,
-            .shake256 => Shake256.digest_length,
-        };
-    }
-
-    fn signatureAlgorithm(self: PssHash) Error!Algorithm {
-        return switch (self) {
-            .sha1 => error.UnsupportedSignatureAlgorithm,
-            .sha224 => .rsa_pss_sha224,
-            .sha256 => .rsa_pss_sha256,
-            .sha384 => .rsa_pss_sha384,
-            .sha512 => .rsa_pss_sha512,
-            .sha512_224 => .rsa_pss_sha512_224,
-            .sha512_256 => .rsa_pss_sha512_256,
-            .sha3_224 => .rsa_pss_sha3_224,
-            .sha3_256 => .rsa_pss_sha3_256,
-            .sha3_384 => .rsa_pss_sha3_384,
-            .sha3_512 => .rsa_pss_sha3_512,
-            .shake128 => .rsa_pss_shake128,
-            .shake256 => .rsa_pss_shake256,
-        };
-    }
-};
-
-pub const PssProfile = struct {
-    hash: PssHash,
-    mgf_hash: PssHash,
-    salt_length: usize,
-    trailer_field: usize,
-};
-
-pub const PssKeyConstraints = union(enum) {
-    unrestricted,
-    restricted: PssProfile,
-
-    pub fn permits(
-        self: PssKeyConstraints,
-        signature_algorithm: Algorithm,
-    ) bool {
-        const signature_profile = pssProfileForAlgorithm(
-            signature_algorithm,
-        ) orelse return false;
-        return switch (self) {
-            .unrestricted => true,
-            .restricted => |key_profile| key_profile.hash ==
-                signature_profile.hash and
-                key_profile.mgf_hash == signature_profile.mgf_hash and
-                key_profile.trailer_field == signature_profile.trailer_field and
-                signature_profile.salt_length >= key_profile.salt_length,
-        };
-    }
-};
-
-pub fn pssProfileForAlgorithm(algorithm: Algorithm) ?PssProfile {
-    const hash: PssHash = switch (algorithm) {
-        .rsa_pss_sha224 => .sha224,
-        .rsa_pss_sha256 => .sha256,
-        .rsa_pss_sha384 => .sha384,
-        .rsa_pss_sha512 => .sha512,
-        .rsa_pss_sha512_224 => .sha512_224,
-        .rsa_pss_sha512_256 => .sha512_256,
-        .rsa_pss_sha3_224 => .sha3_224,
-        .rsa_pss_sha3_256 => .sha3_256,
-        .rsa_pss_sha3_384 => .sha3_384,
-        .rsa_pss_sha3_512 => .sha3_512,
-        .rsa_pss_shake128 => .shake128,
-        .rsa_pss_shake256 => .shake256,
-        else => return null,
-    };
-    return .{
-        .hash = hash,
-        .mgf_hash = hash,
-        .salt_length = hash.digestLength(),
-        .trailer_field = 1,
-    };
-}
+pub const Algorithm = signature_algorithm.Algorithm;
+pub const PssHash = rsa_pss.PssHash;
+pub const PssProfile = rsa_pss.PssProfile;
+pub const PssKeyConstraints = rsa_pss.PssKeyConstraints;
+pub const pssProfileForAlgorithm = rsa_pss.pssProfileForAlgorithm;
+pub const parsePssPublicKeyAlgorithmIdentifier =
+    rsa_pss.parsePssPublicKeyAlgorithmIdentifier;
 
 /// Parse the contents of an ASN.1 AlgorithmIdentifier SEQUENCE.
 pub fn parseAlgorithmIdentifier(encoded: []const u8) Error!Algorithm {
@@ -450,7 +312,7 @@ pub fn parseAlgorithmIdentifier(encoded: []const u8) Error!Algorithm {
         if (parameters.tag != 0x30 or !fields.done()) {
             return error.InvalidAlgorithmIdentifier;
         }
-        const profile = try parsePssProfile(parameters.value);
+        const profile = try rsa_pss.parsePssProfile(parameters.value);
         if (profile.hash != profile.mgf_hash or
             profile.salt_length != profile.hash.digestLength() or
             profile.trailer_field != 1)
@@ -866,157 +728,6 @@ pub fn verifyWithEd25519(
     );
     verifier.verify(signature, message) catch
         return error.InvalidSignature;
-}
-
-pub fn parsePssPublicKeyAlgorithmIdentifier(
-    encoded: []const u8,
-) Error!PssKeyConstraints {
-    var fields = Reader{ .bytes = encoded };
-    const oid = fields.require(0x06) catch
-        return error.InvalidAlgorithmIdentifier;
-    if (std.mem.eql(u8, oid.value, &oid_rsassa_pss_shake128)) {
-        if (!fields.done()) return error.InvalidAlgorithmIdentifier;
-        return .{ .restricted = pssProfileForAlgorithm(
-            .rsa_pss_shake128,
-        ).? };
-    }
-    if (std.mem.eql(u8, oid.value, &oid_rsassa_pss_shake256)) {
-        if (!fields.done()) return error.InvalidAlgorithmIdentifier;
-        return .{ .restricted = pssProfileForAlgorithm(
-            .rsa_pss_shake256,
-        ).? };
-    }
-    if (!std.mem.eql(u8, oid.value, &oid_rsassa_pss)) {
-        return error.UnsupportedSignatureAlgorithm;
-    }
-    const parameters = (fields.next() catch
-        return error.InvalidAlgorithmIdentifier) orelse
-        return .unrestricted;
-    if (parameters.tag != 0x30 or !fields.done()) {
-        return error.InvalidAlgorithmIdentifier;
-    }
-    const profile = try parsePssProfile(parameters.value);
-    if (profile.trailer_field != 1) {
-        return error.UnsupportedSignatureAlgorithm;
-    }
-    return .{ .restricted = profile };
-}
-
-fn parsePssProfile(encoded: []const u8) Error!PssProfile {
-    var fields = Reader{ .bytes = encoded };
-    var hash: PssHash = .sha1;
-    var mask_hash: PssHash = .sha1;
-    var salt_length: usize = 20;
-    var trailer_field: usize = 1;
-    var previous_tag: u8 = 0x9f;
-    while (fields.next() catch
-        return error.InvalidAlgorithmIdentifier) |field|
-    {
-        if (field.tag < 0xa0 or field.tag > 0xa3 or
-            (previous_tag != 0x9f and field.tag <= previous_tag))
-        {
-            return error.InvalidAlgorithmIdentifier;
-        }
-        previous_tag = field.tag;
-        switch (field.tag) {
-            0xa0 => hash = try parseExplicitHashAlgorithm(field),
-            0xa1 => mask_hash = try parseExplicitMaskAlgorithm(field),
-            0xa2 => salt_length = try parseExplicitSmallInteger(field),
-            0xa3 => trailer_field = try parseExplicitSmallInteger(field),
-            else => unreachable,
-        }
-    }
-    return .{
-        .hash = hash,
-        .mgf_hash = mask_hash,
-        .salt_length = salt_length,
-        .trailer_field = trailer_field,
-    };
-}
-
-fn parseExplicitHashAlgorithm(field: Element) Error!PssHash {
-    var explicit = Reader{ .bytes = field.value };
-    const algorithm = explicit.require(0x30) catch
-        return error.InvalidAlgorithmIdentifier;
-    if (!explicit.done()) return error.InvalidAlgorithmIdentifier;
-    return parseHashAlgorithm(algorithm.value);
-}
-
-fn parseExplicitMaskAlgorithm(field: Element) Error!PssHash {
-    var explicit = Reader{ .bytes = field.value };
-    const algorithm = explicit.require(0x30) catch
-        return error.InvalidAlgorithmIdentifier;
-    if (!explicit.done()) return error.InvalidAlgorithmIdentifier;
-    var fields = Reader{ .bytes = algorithm.value };
-    const oid = fields.require(0x06) catch
-        return error.InvalidAlgorithmIdentifier;
-    if (!std.mem.eql(u8, oid.value, &oid_mgf1)) {
-        return error.UnsupportedSignatureAlgorithm;
-    }
-    const parameters = fields.require(0x30) catch
-        return error.InvalidAlgorithmIdentifier;
-    if (!fields.done()) return error.InvalidAlgorithmIdentifier;
-    return parseHashAlgorithm(parameters.value);
-}
-
-fn parseHashAlgorithm(encoded: []const u8) Error!PssHash {
-    var fields = Reader{ .bytes = encoded };
-    const oid = fields.require(0x06) catch
-        return error.InvalidAlgorithmIdentifier;
-    const hash: PssHash = if (std.mem.eql(u8, oid.value, &oid_sha1))
-        .sha1
-    else if (std.mem.eql(u8, oid.value, &oid_sha224))
-        .sha224
-    else if (std.mem.eql(u8, oid.value, &oid_sha256))
-        .sha256
-    else if (std.mem.eql(u8, oid.value, &oid_sha384))
-        .sha384
-    else if (std.mem.eql(u8, oid.value, &oid_sha512))
-        .sha512
-    else if (std.mem.eql(u8, oid.value, &oid_sha512_224))
-        .sha512_224
-    else if (std.mem.eql(u8, oid.value, &oid_sha512_256))
-        .sha512_256
-    else if (std.mem.eql(u8, oid.value, &oid_sha3_224))
-        .sha3_224
-    else if (std.mem.eql(u8, oid.value, &oid_sha3_256))
-        .sha3_256
-    else if (std.mem.eql(u8, oid.value, &oid_sha3_384))
-        .sha3_384
-    else if (std.mem.eql(u8, oid.value, &oid_sha3_512))
-        .sha3_512
-    else
-        return error.UnsupportedSignatureAlgorithm;
-    if (fields.next() catch return error.InvalidAlgorithmIdentifier) |parameters| {
-        if (parameters.tag != 0x05 or parameters.value.len != 0 or
-            !fields.done())
-        {
-            return error.InvalidAlgorithmIdentifier;
-        }
-    }
-    return hash;
-}
-
-fn parseExplicitSmallInteger(field: Element) Error!usize {
-    var explicit = Reader{ .bytes = field.value };
-    const integer = explicit.require(0x02) catch
-        return error.InvalidAlgorithmIdentifier;
-    if (!explicit.done() or integer.value.len == 0 or
-        (integer.value[0] & 0x80) != 0 or
-        (integer.value.len > 1 and integer.value[0] == 0 and
-            (integer.value[1] & 0x80) == 0) or
-        integer.value.len > @sizeOf(usize))
-    {
-        return error.InvalidAlgorithmIdentifier;
-    }
-    var result: usize = 0;
-    for (integer.value) |byte| {
-        result = std.math.mul(usize, result, 256) catch
-            return error.InvalidAlgorithmIdentifier;
-        result = std.math.add(usize, result, byte) catch
-            return error.InvalidAlgorithmIdentifier;
-    }
-    return result;
 }
 
 fn verifyEcdsa(
