@@ -1050,7 +1050,7 @@ pub fn build(b: *std.Build) void {
     const rsa_sha3_sign = b.addExecutable(.{
         .name = "vail-rsa-sha3-sign",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/rsa_sha3_sign.zig"),
+            .root_source_file = b.path("tools/interop/signatures/rsa_sha3_sign.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1079,7 +1079,7 @@ pub fn build(b: *std.Build) void {
         .name = "vail-rsa-sha512-truncated-sign",
         .root_module = b.createModule(.{
             .root_source_file = b.path(
-                "tools/interop/rsa_sha512_truncated_sign.zig",
+                "tools/interop/signatures/rsa_sha512_truncated_sign.zig",
             ),
             .target = target,
             .optimize = optimize,
@@ -1115,7 +1115,7 @@ pub fn build(b: *std.Build) void {
     const rsa_shake_sign = b.addExecutable(.{
         .name = "vail-rsa-shake-sign",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/rsa_shake_sign.zig"),
+            .root_source_file = b.path("tools/interop/signatures/rsa_shake_sign.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1144,7 +1144,7 @@ pub fn build(b: *std.Build) void {
     const p521_sign = b.addExecutable(.{
         .name = "vail-p521-sign",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/p521_sign.zig"),
+            .root_source_file = b.path("tools/interop/signatures/p521_sign.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1172,7 +1172,7 @@ pub fn build(b: *std.Build) void {
     const p256_sign = b.addExecutable(.{
         .name = "vail-p256-sign",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/p256_sign.zig"),
+            .root_source_file = b.path("tools/interop/signatures/p256_sign.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1197,7 +1197,7 @@ pub fn build(b: *std.Build) void {
     const p384_sign = b.addExecutable(.{
         .name = "vail-p384-sign",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/p384_sign.zig"),
+            .root_source_file = b.path("tools/interop/signatures/p384_sign.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1222,7 +1222,7 @@ pub fn build(b: *std.Build) void {
     const ed25519_sign = b.addExecutable(.{
         .name = "vail-ed25519-sign",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/ed25519_sign.zig"),
+            .root_source_file = b.path("tools/interop/signatures/ed25519_sign.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -1937,14 +1937,14 @@ pub fn build(b: *std.Build) void {
     const client_hello_check = b.addExecutable(.{
         .name = "vail-clienthello-check",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/client_hello_check.zig"),
+            .root_source_file = b.path("tools/interop/tls13/client_hello_check.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
         }),
     });
 
-    const openssl_ch = b.addSystemCommand(&.{"tools/interop/openssl_client_hello.sh"});
+    const openssl_ch = b.addSystemCommand(&.{"tools/interop/openssl/openssl_client_hello.sh"});
     openssl_ch.addArg("--status");
     const openssl_ch_hex = openssl_ch.addOutputFileArg("openssl-clienthello.hex");
     const check_openssl_ch = b.addRunArtifact(client_hello_check);
@@ -1982,7 +1982,7 @@ pub fn build(b: *std.Build) void {
     const min_tls13_server = b.addExecutable(.{
         .name = "vail-min-tls13-server",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_tls13_server.zig"),
+            .root_source_file = b.path("tools/interop/tls13/min_tls13_server.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -2415,7 +2415,7 @@ pub fn build(b: *std.Build) void {
     const min_quic_tls_server = b.addExecutable(.{
         .name = "vail-min-quic-tls-server",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_quic_tls_server.zig"),
+            .root_source_file = b.path("tools/interop/quic/min_quic_tls_server.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -2502,7 +2502,7 @@ pub fn build(b: *std.Build) void {
         .name = "vail-min-tls13-resume-server",
         .root_module = b.createModule(.{
             .root_source_file = b.path(
-                "tools/interop/min_tls13_resume_server.zig",
+                "tools/interop/tls13/min_tls13_resume_server.zig",
             ),
             .target = target,
             .optimize = optimize,
@@ -2532,7 +2532,7 @@ pub fn build(b: *std.Build) void {
     const min_tls13_client = b.addExecutable(.{
         .name = "vail-min-tls13-client",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_tls13_client.zig"),
+            .root_source_file = b.path("tools/interop/tls13/min_tls13_client.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -2860,7 +2860,7 @@ pub fn build(b: *std.Build) void {
     const min_quic_tls_client = b.addExecutable(.{
         .name = "vail-min-quic-tls-client",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_quic_tls_client.zig"),
+            .root_source_file = b.path("tools/interop/quic/min_quic_tls_client.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -2947,7 +2947,7 @@ pub fn build(b: *std.Build) void {
         .name = "vail-min-tls13-resume-client",
         .root_module = b.createModule(.{
             .root_source_file = b.path(
-                "tools/interop/min_tls13_resume_client.zig",
+                "tools/interop/tls13/min_tls13_resume_client.zig",
             ),
             .target = target,
             .optimize = optimize,
@@ -2979,7 +2979,7 @@ pub fn build(b: *std.Build) void {
     const min_tls12_server = b.addExecutable(.{
         .name = "vail-min-tls12-server",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_tls12_server.zig"),
+            .root_source_file = b.path("tools/interop/tls12/min_tls12_server.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -3189,7 +3189,7 @@ pub fn build(b: *std.Build) void {
     const min_tls12_client = b.addExecutable(.{
         .name = "vail-min-tls12-client",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_tls12_client.zig"),
+            .root_source_file = b.path("tools/interop/tls12/min_tls12_client.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -3475,7 +3475,7 @@ pub fn build(b: *std.Build) void {
     const min_tls12_resume_client = b.addExecutable(.{
         .name = "vail-min-tls12-resume-client",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_tls12_resume_client.zig"),
+            .root_source_file = b.path("tools/interop/tls12/min_tls12_resume_client.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -3505,7 +3505,7 @@ pub fn build(b: *std.Build) void {
     const min_tls12_resume_server = b.addExecutable(.{
         .name = "vail-min-tls12-resume-server",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_tls12_resume_server.zig"),
+            .root_source_file = b.path("tools/interop/tls12/min_tls12_resume_server.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -3580,7 +3580,7 @@ pub fn build(b: *std.Build) void {
     const min_tls12_ticket_server = b.addExecutable(.{
         .name = "vail-min-tls12-ticket-server",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_tls12_ticket_server.zig"),
+            .root_source_file = b.path("tools/interop/tls12/min_tls12_ticket_server.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -3631,7 +3631,7 @@ pub fn build(b: *std.Build) void {
     const min_tls12_ticket_client = b.addExecutable(.{
         .name = "vail-min-tls12-ticket-client",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_tls12_ticket_client.zig"),
+            .root_source_file = b.path("tools/interop/tls12/min_tls12_ticket_client.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -3679,7 +3679,7 @@ pub fn build(b: *std.Build) void {
     const min_versioned_server = b.addExecutable(.{
         .name = "vail-min-versioned-server",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_versioned_server.zig"),
+            .root_source_file = b.path("tools/interop/tls13/min_versioned_server.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -3718,7 +3718,7 @@ pub fn build(b: *std.Build) void {
     const min_versioned_client = b.addExecutable(.{
         .name = "vail-min-versioned-client",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_versioned_client.zig"),
+            .root_source_file = b.path("tools/interop/tls13/min_versioned_client.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -3765,7 +3765,7 @@ pub fn build(b: *std.Build) void {
     const min_rpk_server = b.addExecutable(.{
         .name = "vail-min-rpk-server",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_rpk_server.zig"),
+            .root_source_file = b.path("tools/interop/rpk/min_rpk_server.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},
@@ -3816,7 +3816,7 @@ pub fn build(b: *std.Build) void {
     const min_rpk_client = b.addExecutable(.{
         .name = "vail-min-rpk-client",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/interop/min_rpk_client.zig"),
+            .root_source_file = b.path("tools/interop/rpk/min_rpk_client.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "vail", .module = vail }},

@@ -26,11 +26,12 @@ and commands when adding one.
 `tools/interop/` contains minimal clients and servers used by the
 `interop-*` build steps:
 
-- TLS 1.2, TLS 1.3, and version-selecting clients/servers;
-- QUIC TLS clients/servers;
-- raw-public-key and ML-DSA variants;
-- signature helpers for OpenSSL verification;
-- `openssl_client_hello.sh` for OpenSSL ClientHello checks.
+- `tls12/` — TLS 1.2 clients, servers, tickets, and resumption;
+- `tls13/` — TLS 1.3 and version-selecting clients/servers;
+- `quic/` — QUIC TLS clients/servers;
+- `rpk/` — raw-public-key variants;
+- `signatures/` — signature helpers for OpenSSL verification;
+- `openssl/` — OpenSSL ClientHello checks.
 
 These tools are intentionally small and are not a general-purpose API example.
 See `examples/` for that.
