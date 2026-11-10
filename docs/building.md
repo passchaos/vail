@@ -88,6 +88,7 @@ zig run tools/generate_p384_tables.zig
 zig run tools/generate_ed25519_base_table.zig
 zig run tools/generate_ed25519_verify_table.zig
 zig run tools/generate_x25519_tables.zig
+zig run tools/generate_stringprep_data.zig
 zig build check-generated
 ```
 
@@ -95,8 +96,10 @@ zig build check-generated
 generated file. `zig build check-generated` fails if a file drifts without a
 manifest update.
 
-`src/x509/stringprep_data.zig` is generated from the Unicode 3.2 database and
-RFC 3454 tables; a checked-in generator is still pending.
+`src/x509/stringprep_data.zig` is generated from
+`tools/stringprep_input.txt`. The input table was extracted from the checked-in
+data; replacing it with vendored Unicode 3.2/RFC 3454 inputs remains a
+provenance follow-up.
 
 ## Continuous integration
 

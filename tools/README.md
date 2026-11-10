@@ -17,10 +17,17 @@ from `zig build fmt`/`check`. `tools/generated_manifest.txt` records their
 expected SHA-256 values; run `zig build check-generated` after regenerating or
 intentionally changing a checked-in generated file.
 
-`src/x509/stringprep_data.zig` is generated from Unicode 3.2 and RFC 3454
-tables. A checked-in generator is still pending because the exact case-folding
-and normalization inputs are not vendored. The file is protected by the SHA-256
-manifest and the generated-table sorting/bounds test.
+`src/x509/stringprep_data.zig` is generated from `tools/stringprep_input.txt`
+by `tools/generate_stringprep_data.zig`:
+
+```sh
+zig run tools/generate_stringprep_data.zig
+```
+
+The input table was extracted from the checked-in data. Replacing it with
+vendored Unicode 3.2 case-folding/normalization and RFC 3454 inputs remains a
+provenance follow-up; the file is protected by the SHA-256 manifest and the
+generated-table sorting/bounds test.
 
 ## Interoperability tools
 
