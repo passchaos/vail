@@ -71,6 +71,11 @@ connection and authentication APIs.
 QUIC-specific TLS adapters, Initial/Retry secrets, transport parameters, and
 traffic-key derivation. QUIC depends on `tls` and `crypto`.
 
+- `quic/handshake/common.zig` — shared handshake types and helpers;
+- `quic/handshake/client.zig` — client flight processing;
+- `quic/handshake/server.zig` — server flight processing;
+- `quic/tls_handshake.zig` — public re-exports and handshake tests.
+
 ### `archive_crypto`
 
 A standalone package for archive-specific password-based cryptography. It uses
