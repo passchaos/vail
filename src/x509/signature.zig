@@ -5,10 +5,10 @@
 //! natively as its MGF, salts are one digest long, and trailerField is 1.
 
 const std = @import("std");
-const ed25519 = @import("../crypto/ed25519.zig");
-const p256 = @import("../crypto/p256.zig");
-const p384 = @import("../crypto/p384.zig");
-const p521 = @import("../crypto/p521.zig");
+const ed25519 = @import("../crypto/sign/ed25519.zig");
+const p256 = @import("../crypto/ec/p256.zig");
+const p384 = @import("../crypto/ec/p384.zig");
+const p521 = @import("../crypto/ec/p521.zig");
 const rsa_pss = @import("../crypto/rsa_pss.zig");
 const signature_algorithm = @import("../crypto/signature_algorithm.zig");
 

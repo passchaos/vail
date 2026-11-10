@@ -5,8 +5,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const ccm = @import("aes_ccm.zig");
-const ghash_accelerated = @import("ghash.zig");
+const ccm = @import("../aead/aes_ccm.zig");
+const ghash_accelerated = @import("../aead/ghash.zig");
 
 pub const key_len = 16;
 pub const block_len = 16;

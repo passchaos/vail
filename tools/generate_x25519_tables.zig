@@ -1,4 +1,4 @@
-//! Regenerates the fixed-base comb tables used by `src/crypto/x25519.zig`.
+//! Regenerates the fixed-base comb tables used by `src/crypto/kex/x25519.zig`.
 
 const std = @import("std");
 
@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
     const tables = buildTables();
     const file = try std.Io.Dir.cwd().createFile(
         init.io,
-        "src/crypto/x25519_public_tables.zig",
+        "src/crypto/kex/x25519_public_tables.zig",
         .{},
     );
     defer file.close(init.io);

@@ -1493,7 +1493,7 @@ test "TLS 1.2 server flight is transcript-bound and signed" {
     const vector = @import("../crypto/testdata/rsa_signing.zig");
     const certificate = decodeHex(vector.certificate_hex);
     const private_der = decodeHex(vector.private_key_pkcs8_hex);
-    const private = try @import("../crypto/rsa.zig").PrivateKey.fromDer(
+    const private = try @import("../crypto/sign/rsa.zig").PrivateKey.fromDer(
         &private_der,
     );
     var prepared = try private.prepare();

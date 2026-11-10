@@ -5,8 +5,8 @@
 //! HKDF/HMAC without a runtime algorithm switch.
 
 const std = @import("std");
-const sha256 = @import("../../crypto/sha256.zig");
-const fast_sha2 = @import("../../crypto/sha512.zig");
+const sha256 = @import("../../crypto/hash/sha256.zig");
+const fast_sha2 = @import("../../crypto/hash/sha512.zig");
 
 pub fn Schedule(comptime Hash: type) type {
     const Hmac = std.crypto.auth.hmac.Hmac(Hash);

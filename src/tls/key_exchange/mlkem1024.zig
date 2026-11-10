@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const mlkem = @import("mlkem.zig");
-const crypto_mlkem = @import("../../crypto/mlkem.zig");
+const crypto_mlkem = @import("../../crypto/pq/mlkem.zig");
 
 pub const implementation = mlkem.Group(.{
     .named_group = 0x0202,

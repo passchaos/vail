@@ -2707,7 +2707,7 @@ test "client and server establish with an accepted RFC 9849 ECH offer" {
         signing_key.public_key.toBytes(),
     );
     const ech_secret = [_]u8{0xdb} ** 32;
-    var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
+    var ech_key_pair = try @import("../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&ech_secret);
     defer ech_key_pair.deinit();
     var encoded_config: std.ArrayList(u8) = .empty;
@@ -2907,7 +2907,7 @@ test "accepted RFC 9849 ECH survives HelloRetryRequest" {
         signing_key.public_key.toBytes(),
     );
     const ech_secret = [_]u8{0xe2} ** 32;
-    var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
+    var ech_key_pair = try @import("../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&ech_secret);
     defer ech_key_pair.deinit();
     var encoded_config: std.ArrayList(u8) = .empty;
@@ -3089,7 +3089,7 @@ test "ECH client switches to the outer transcript when not accepted" {
         signing_key.public_key.toBytes(),
     );
     const ech_secret = [_]u8{0xf2} ** 32;
-    var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
+    var ech_key_pair = try @import("../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&ech_secret);
     defer ech_key_pair.deinit();
     var encoded_config: std.ArrayList(u8) = .empty;
@@ -3161,7 +3161,7 @@ test "ECH rejection authenticates public name and returns retry configs" {
     const Client = ClientConnection(64 * 1024, 256);
     const ServerModule = @import("server_connection.zig");
     const Server = ServerModule.ServerConnection(64 * 1024, 256);
-    const rsa = @import("../crypto/rsa.zig");
+    const rsa = @import("../crypto/sign/rsa.zig");
     const vectors = @import("../crypto/testdata/rsa_signing.zig");
     var certificate: [vectors.certificate_hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&certificate, vectors.certificate_hex);
@@ -3175,7 +3175,7 @@ test "ECH rejection authenticates public name and returns retry configs" {
     defer prepared_key.deinit();
 
     const client_ech_secret = [_]u8{0x81} ** 32;
-    var client_ech_key = try @import("../crypto/hpke.zig").KeyPair
+    var client_ech_key = try @import("../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&client_ech_secret);
     defer client_ech_key.deinit();
     var client_config_bytes: std.ArrayList(u8) = .empty;
@@ -3188,7 +3188,7 @@ test "ECH rejection authenticates public name and returns retry configs" {
     const client_ech_config = try ech.parseConfig(client_config_bytes.items);
 
     const server_ech_secret = [_]u8{0x82} ** 32;
-    var server_ech_key = try @import("../crypto/hpke.zig").KeyPair
+    var server_ech_key = try @import("../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&server_ech_secret);
     defer server_ech_key.deinit();
     var server_config_bytes: std.ArrayList(u8) = .empty;
@@ -3427,7 +3427,7 @@ test "ECH PSK resumption survives P-256 HelloRetryRequest" {
     };
 
     const ech_secret = [_]u8{0xe8} ** 32;
-    var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
+    var ech_key_pair = try @import("../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&ech_secret);
     defer ech_key_pair.deinit();
     var encoded_ech_config: std.ArrayList(u8) = .empty;
@@ -4124,7 +4124,7 @@ test "ECH client and server accept bounded replay-guarded 0-RTT" {
     );
     defer allocator.free(identity);
     const ech_secret = [_]u8{0xd3} ** 32;
-    var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
+    var ech_key_pair = try @import("../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&ech_secret);
     defer ech_key_pair.deinit();
     var encoded_ech_config: std.ArrayList(u8) = .empty;

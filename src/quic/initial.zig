@@ -10,7 +10,7 @@ const std = @import("std");
 
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
-const sha256 = @import("../crypto/sha256.zig");
+const sha256 = @import("../crypto/hash/sha256.zig");
 const common = @import("traffic_crypto/common.zig");
 const traffic = @import("traffic_crypto.zig");
 const tls_secret = @import("../tls/secret.zig");

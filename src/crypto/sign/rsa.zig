@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const rsa_pss = @import("rsa_pss.zig");
+const rsa_pss = @import("../rsa_pss.zig");
 
 const Sha224 = std.crypto.hash.sha2.Sha224;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -3619,7 +3619,7 @@ test "RSA-2048 paired table selection covers every index" {
 }
 
 test "RSA-2048 Montgomery exponentiation matches the generic finite field" {
-    const vectors = @import("testdata/rsa_signing.zig");
+    const vectors = @import("../testdata/rsa_signing.zig");
     const pkcs8 = decodeHex(vectors.private_key_pkcs8_hex);
     const key = try PrivateKey.fromDer(&pkcs8);
     try testMontgomeryWideReduction(key);
@@ -3691,7 +3691,7 @@ test "RSA-2048 Montgomery exponentiation matches the generic finite field" {
 }
 
 test "RSA-2048 paired-prime fault check rejects a corrupted result" {
-    const vectors = @import("testdata/rsa_signing.zig");
+    const vectors = @import("../testdata/rsa_signing.zig");
     const pkcs8 = decodeHex(vectors.private_key_pkcs8_hex);
     const key = try PrivateKey.fromDer(&pkcs8);
     var prepared = try key.prepare();
@@ -3740,7 +3740,7 @@ test "RSA-2048 paired-prime fault check rejects a corrupted result" {
 }
 
 test "PKCS1 and PKCS8 RSA keys produce verifiable PSS signatures" {
-    const vectors = @import("testdata/rsa_signing.zig");
+    const vectors = @import("../testdata/rsa_signing.zig");
     const pkcs1 = decodeHex(vectors.private_key_pkcs1_hex);
     const pkcs8 = decodeHex(vectors.private_key_pkcs8_hex);
     const certificate_der = decodeHex(vectors.certificate_hex);
@@ -3937,8 +3937,8 @@ test "PKCS1 and PKCS8 RSA keys produce verifiable PSS signatures" {
 }
 
 test "RSA private keys sign SHA3 PSS and PKCS1 signatures" {
-    const x509_signature = @import("../x509/signature.zig");
-    const vectors = @import("testdata/rsa_signing.zig");
+    const x509_signature = @import("../../x509/signature.zig");
+    const vectors = @import("../testdata/rsa_signing.zig");
     const pkcs8 = decodeHex(vectors.private_key_pkcs8_hex);
     const certificate_der = decodeHex(vectors.certificate_hex);
     const key = try PrivateKey.fromDer(&pkcs8);
@@ -4023,8 +4023,8 @@ test "RSA private keys sign SHA3 PSS and PKCS1 signatures" {
 }
 
 test "RSA private keys sign SHA-512 truncated PSS and PKCS1 signatures" {
-    const x509_signature = @import("../x509/signature.zig");
-    const vectors = @import("testdata/rsa_signing.zig");
+    const x509_signature = @import("../../x509/signature.zig");
+    const vectors = @import("../testdata/rsa_signing.zig");
     const pkcs8 = decodeHex(vectors.private_key_pkcs8_hex);
     const certificate_der = decodeHex(vectors.certificate_hex);
     const key = try PrivateKey.fromDer(&pkcs8);
@@ -4100,8 +4100,8 @@ test "RSA private keys sign SHA-512 truncated PSS and PKCS1 signatures" {
 }
 
 test "RSA private keys sign RFC 8692 PSS-SHAKE signatures" {
-    const x509_signature = @import("../x509/signature.zig");
-    const vectors = @import("testdata/rsa_signing.zig");
+    const x509_signature = @import("../../x509/signature.zig");
+    const vectors = @import("../testdata/rsa_signing.zig");
     const pkcs8 = decodeHex(vectors.private_key_pkcs8_hex);
     const certificate_der = decodeHex(vectors.certificate_hex);
     const key = try PrivateKey.fromDer(&pkcs8);
@@ -4186,7 +4186,7 @@ test "RSA private keys sign RFC 8692 PSS-SHAKE signatures" {
 }
 
 test "RFC 8692 PSS-only PKCS8 keys enforce their SHAKE profile" {
-    const vectors = @import("testdata/rsa_signing.zig");
+    const vectors = @import("../testdata/rsa_signing.zig");
     const standard = decodeHex(vectors.private_key_pkcs8_hex);
     const rsa_algorithm = "\x30\x0d\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01\x05\x00";
     const shake_algorithm = "\x30\x0a\x06\x08\x2b\x06\x01\x05\x05\x07\x06\x1e";
@@ -4240,7 +4240,7 @@ test "RFC 8692 PSS-only PKCS8 keys enforce their SHAKE profile" {
 
 test "constrained RSA-PSS PKCS8 keys preserve signing restrictions" {
     const encoded = @embedFile(
-        "testdata/rsa-pss-constrained-private.pkcs8.der",
+        "../testdata/rsa-pss-constrained-private.pkcs8.der",
     );
     const key = try PrivateKey.fromDer(encoded);
     try std.testing.expect(key.pss_constraints != null);

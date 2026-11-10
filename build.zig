@@ -3900,12 +3900,12 @@ pub fn build(b: *std.Build) void {
         "bench/rustls_min_client/target",
         "bench/rustls_min_server/target",
         "archive_crypto/.zig-cache",
-        "src/crypto/p256_tables.zig",
-        "src/crypto/p384_tables.zig",
-        "src/crypto/ed25519_base_table.zig",
-        "src/crypto/ed25519_verify_table.zig",
-        "src/crypto/x25519_tables.zig",
-        "src/crypto/x25519_public_tables.zig",
+        "src/crypto/ec/p256_tables.zig",
+        "src/crypto/ec/p384_tables.zig",
+        "src/crypto/sign/ed25519_base_table.zig",
+        "src/crypto/sign/ed25519_verify_table.zig",
+        "src/crypto/sign/ed25519_tables.zig",
+        "src/crypto/kex/x25519_public_tables.zig",
         "src/x509/stringprep_data.zig",
     };
     const fmt = b.addFmt(.{

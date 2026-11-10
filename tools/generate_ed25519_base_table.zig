@@ -1,5 +1,5 @@
 //! Regenerates the signed fixed-base table used by
-//! `src/crypto/ed25519_base_adx.zig`.
+//! `src/crypto/sign/ed25519_base_adx.zig`.
 
 const std = @import("std");
 
@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     const table = buildTable();
     const file = try std.Io.Dir.cwd().createFile(
         init.io,
-        "src/crypto/ed25519_base_table.zig",
+        "src/crypto/sign/ed25519_base_table.zig",
         .{},
     );
     defer file.close(init.io);

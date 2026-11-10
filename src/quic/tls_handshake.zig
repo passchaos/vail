@@ -1985,7 +1985,7 @@ test "QUIC TLS client authenticates server CRYPTO and writes Finished" {
 
 test "QUIC TLS server sends a Vort Brotli compressed certificate" {
     const allocator = std.testing.allocator;
-    const rsa = @import("../crypto/rsa.zig");
+    const rsa = @import("../crypto/sign/rsa.zig");
     const vectors = @import("../crypto/testdata/rsa_signing.zig");
     var certificate_der: [vectors.certificate_hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&certificate_der, vectors.certificate_hex);
@@ -2129,7 +2129,7 @@ test "QUIC ECH rejection authenticates the outer public name and retry configs" 
         signing_key.public_key.toBytes(),
     );
     const ech_secret = [_]u8{0xb2} ** 32;
-    var ech_key_pair = try @import("../crypto/hpke.zig").KeyPair
+    var ech_key_pair = try @import("../crypto/kex/hpke.zig").KeyPair
         .fromSecretKey(&ech_secret);
     defer ech_key_pair.deinit();
     var encoded_config: std.ArrayList(u8) = .empty;

@@ -17,16 +17,21 @@ not import the main `crypto` module.
 Reusable cryptographic primitives and prepared contexts. This layer must not
 depend on X.509 or TLS.
 
-- AEAD: `aes_gcm`, `aes_ccm`, `chacha20_poly1305`, `xchacha20_poly1305`
-- Block/counter modes: `aes_cbc`, `aes_ctr`, `sm4`
-- Hashes and MACs: `sha256`, `sha512`, `sm3`, `blake2s`, `keccak*`, `mac`
-- Key exchange: `x25519`, `hpke`
-- Signatures: `ed25519`, `p256`, `p384`, `p521`, `rsa`, `sm2`, `mldsa`
-- PQ KEM: `mlkem`
-- Shared parsing: `src/der.zig`, `crypto/signature_algorithm.zig`, `crypto/rsa_pss.zig`
+- AEAD: `crypto/aead/` (`aes_gcm`, `aes_ccm`, `chacha20_poly1305`,
+  `xchacha20_poly1305`, `ghash`)
+- Block/counter modes: `crypto/block/` (`aes_cbc`, `aes_ctr`, `sm4`)
+- Hashes and MACs: `crypto/hash/` (`sha256`, `sha512`, `sm3`, `blake2s`,
+  `keccak*`) and `crypto/mac.zig`
+- Elliptic curves: `crypto/ec/` (`p256`, `p384`, `p521` and their platform
+  kernels/tables)
+- PQ KEM and signatures: `crypto/pq/` (`mlkem`, `mldsa`)
+- Signatures: `crypto/sign/` (`ed25519`, `rsa`, `sm2`)
+- Key exchange: `crypto/kex/` (`x25519`, `hpke`)
+- Shared parsing: `src/der.zig`, `crypto/signature_algorithm.zig`,
+  `crypto/rsa_pss.zig`
 - Secure memory: `crypto/memory.zig`
 
-`crypto/rsa.zig` parses RSA-PSS key constraints through
+`crypto/sign/rsa.zig` parses RSA-PSS key constraints through
 `crypto/rsa_pss.zig`; it does not import X.509.
 
 ### `src/x509`

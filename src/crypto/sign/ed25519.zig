@@ -4,14 +4,14 @@ const std = @import("std");
 const decode_adx = @import("ed25519_decode_adx.zig");
 const point_adx = @import("ed25519_point_ops_adx.zig");
 const scalar_adx = @import("ed25519_scalar_adx.zig");
-const x25519 = @import("x25519.zig");
-const table_values = @import("x25519_tables.zig");
+const x25519 = @import("../kex/x25519.zig");
+const table_values = @import("ed25519_tables.zig");
 const verify_table = @import("ed25519_verify_table.zig");
 
 const StdEd25519 = std.crypto.sign.Ed25519;
 const Curve = StdEd25519.Curve;
 const Fe = Curve.Fe;
-const sha512 = @import("sha512.zig");
+const sha512 = @import("../hash/sha512.zig");
 const Sha512 = sha512.Sha512;
 const IdentityElementError = std.crypto.errors.IdentityElementError;
 const NonCanonicalError = std.crypto.errors.NonCanonicalError;

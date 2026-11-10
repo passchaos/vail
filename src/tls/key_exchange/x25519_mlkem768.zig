@@ -13,8 +13,8 @@
 
 const std = @import("std");
 
-const MLKem768 = @import("../../crypto/mlkem.zig").nist.MLKem768;
-const X25519 = @import("../../crypto/x25519.zig").X25519;
+const MLKem768 = @import("../../crypto/pq/mlkem.zig").nist.MLKem768;
+const X25519 = @import("../../crypto/kex/x25519.zig").X25519;
 
 pub const named_group: u16 = 0x11ec;
 

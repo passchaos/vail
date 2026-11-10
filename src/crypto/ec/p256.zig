@@ -16,8 +16,8 @@ const field_inv_x86 = @import("p256_field_inv_x86.zig");
 const scalar_inv_arm64 = @import("p256_scalar_inv_arm64.zig");
 const scalar_inv_x86 = @import("p256_scalar_inv_x86.zig");
 const scalar_mul_x86 = @import("p256_scalar_mul_x86.zig");
-const sha256 = @import("sha256.zig");
-const FastSha512 = @import("sha512.zig").Sha512;
+const sha256 = @import("../hash/sha256.zig");
+const FastSha512 = @import("../hash/sha512.zig").Sha512;
 
 const P256 = std.crypto.ecc.P256;
 const Scalar = P256.scalar.Scalar;

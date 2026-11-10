@@ -6,7 +6,7 @@
 //! state once while retaining the standard library's constant-time primitives.
 
 const std = @import("std");
-const aes_ctr = @import("aes_ctr.zig");
+const aes_ctr = @import("../block/aes_ctr.zig");
 const ghash_accelerated = @import("ghash.zig");
 
 const Ghash = std.crypto.onetimeauth.Ghash;

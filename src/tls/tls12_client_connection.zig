@@ -16,7 +16,7 @@ const client_auth = @import("client_auth.zig");
 const client_hello = @import("client_hello.zig");
 const key_exchange = @import("key_exchange.zig");
 const key_log = @import("key_log.zig");
-const p521 = @import("../crypto/p521.zig");
+const p521 = @import("../crypto/ec/p521.zig");
 const record13 = @import("record.zig");
 const record_size_limit = @import("record_size_limit.zig");
 const stream = @import("stream.zig");
@@ -1885,7 +1885,7 @@ test "TLS 1.2 client and server authenticate and exchange application data" {
     var client_key_log: TestMasterSecretLog = .{};
     var server_key_log: TestMasterSecretLog = .{};
     const server_module = @import("tls12_server_connection.zig");
-    const rsa = @import("../crypto/rsa.zig");
+    const rsa = @import("../crypto/sign/rsa.zig");
     const vectors = @import("../crypto/testdata/rsa_signing.zig");
     const certificate = decodeHex(vectors.certificate_hex);
     const private_key_der = decodeHex(vectors.private_key_pkcs8_hex);
@@ -2615,7 +2615,7 @@ test "high-level TLS 1.2 client requests OCSP by default with opt-out" {
 
 test "TLS 1.2 client and server complete AEAD suites across groups" {
     const allocator = std.testing.allocator;
-    const rsa = @import("../crypto/rsa.zig");
+    const rsa = @import("../crypto/sign/rsa.zig");
     const vectors = @import("../crypto/testdata/rsa_signing.zig");
     const rsa_certificate = decodeHex(vectors.certificate_hex);
     const private_key_der = decodeHex(vectors.private_key_pkcs8_hex);
@@ -2805,7 +2805,7 @@ test "TLS 1.2 client authentication honors requested CA names" {
         [_]u8{0xc7} ** Ecdsa.KeyPair.seed_length,
     );
     const server_public = server_key.public_key.toUncompressedSec1();
-    const rsa = @import("../crypto/rsa.zig");
+    const rsa = @import("../crypto/sign/rsa.zig");
     const vectors = @import("../crypto/testdata/rsa_signing.zig");
     const client_certificate = decodeHex(vectors.certificate_hex);
     const client_private_key_der = decodeHex(vectors.private_key_pkcs8_hex);
@@ -3165,7 +3165,7 @@ test "TLS 1.2 OCSP negotiation rejects missing and unsolicited status" {
 test "TLS 1.2 RFC 6961 validates leaf and intermediate OCSP responses" {
     const allocator = std.testing.allocator;
     const server_module = @import("tls12_server_connection.zig");
-    const rsa = @import("../crypto/rsa.zig");
+    const rsa = @import("../crypto/sign/rsa.zig");
     const rsa_vectors = @import("../crypto/testdata/rsa_signing.zig");
     const path_vectors = @import("../x509/testdata/path_vectors.zig");
     const trust = @import("../x509/trust.zig");

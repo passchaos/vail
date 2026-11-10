@@ -1,4 +1,4 @@
-//! Regenerates the fixed-generator tables used by `src/crypto/p256.zig`.
+//! Regenerates the fixed-generator tables used by `src/crypto/ec/p256.zig`.
 
 const std = @import("std");
 
@@ -64,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
 
     const file = try std.Io.Dir.cwd().createFile(
         init.io,
-        "src/crypto/p256_tables.zig",
+        "src/crypto/ec/p256_tables.zig",
         .{},
     );
     defer file.close(init.io);

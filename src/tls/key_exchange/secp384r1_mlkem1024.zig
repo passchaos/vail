@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const ecdh_mlkem = @import("ecdh_mlkem.zig");
-const crypto_mlkem = @import("../../crypto/mlkem.zig");
+const crypto_mlkem = @import("../../crypto/pq/mlkem.zig");
 
 pub const implementation = ecdh_mlkem.Group(.{
     .named_group = 0x11ed,

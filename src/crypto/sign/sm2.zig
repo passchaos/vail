@@ -6,7 +6,7 @@
 //! constant-time/provider-backed slice.
 
 const std = @import("std");
-const sm3 = @import("sm3.zig");
+const sm3 = @import("../hash/sm3.zig");
 
 pub const scalar_len = 32;
 pub const public_key_len = 65;

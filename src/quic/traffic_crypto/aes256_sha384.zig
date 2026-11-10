@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const common = @import("common.zig");
-const fast_sha2 = @import("../../crypto/sha512.zig");
+const fast_sha2 = @import("../../crypto/hash/sha512.zig");
 
 const Sha384 = fast_sha2.Sha384;
 const HmacSha384 = std.crypto.auth.hmac.Hmac(Sha384);

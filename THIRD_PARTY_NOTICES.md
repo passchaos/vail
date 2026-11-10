@@ -38,7 +38,7 @@ SPDX headers are authoritative; this file is a summary.
 - License: ISC
 - Copyright: The BoringSSL Authors; Amazon.com, Inc. or its affiliates
 - Used for: P-256 public ECDSA scalar inverse.
-- Location: `src/crypto/p256_scalar_inv_arm64.S` and related wrappers.
+- Location: `src/crypto/ec/p256_scalar_inv_arm64.S` and related wrappers.
 - Pinned at BoringSSL `7eab8046` where noted.
 
 ## Unicode data

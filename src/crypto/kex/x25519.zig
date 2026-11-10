@@ -7,7 +7,7 @@
 //! ladder.
 
 const std = @import("std");
-const ed25519_base_adx = @import("ed25519_base_adx.zig");
+const ed25519_base_adx = @import("../sign/ed25519_base_adx.zig");
 const x25519_adx = @import("x25519_adx.zig");
 const x25519_arm64 = @import("x25519_arm64.zig");
 const x25519_base_adx = @import("x25519_base_adx.zig");

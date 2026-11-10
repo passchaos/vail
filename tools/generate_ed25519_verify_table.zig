@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
 
     const file = try std.Io.Dir.cwd().createFile(
         init.io,
-        "src/crypto/ed25519_verify_table.zig",
+        "src/crypto/sign/ed25519_verify_table.zig",
         .{},
     );
     defer file.close(init.io);

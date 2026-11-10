@@ -8,8 +8,8 @@ const key_exchange = @import("key_exchange.zig");
 const secret = @import("secret.zig");
 const ticket_keyring = @import("ticket_keyring.zig");
 const transcript = @import("transcript.zig");
-const p521 = @import("../crypto/p521.zig");
-const sm2 = @import("../crypto/sm2.zig");
+const p521 = @import("../crypto/ec/p521.zig");
+const sm2 = @import("../crypto/sign/sm2.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -1428,7 +1428,7 @@ test "pure Zig RSA-PSS signer emits TLS CertificateVerify" {
     );
     var certificate: [vector.certificate_hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&certificate, vector.certificate_hex);
-    const private_key = try @import("../crypto/rsa.zig").PrivateKey.fromDer(
+    const private_key = try @import("../crypto/sign/rsa.zig").PrivateKey.fromDer(
         &private_key_der,
     );
     var prepared_key = try private_key.prepare();

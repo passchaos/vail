@@ -16,7 +16,7 @@ const field_inv_x86 = @import("p384_field_inv_x86.zig");
 const scalar_inv_x86 = @import("p384_scalar_inv_x86.zig");
 const scalar_mul_x86 = @import("p384_scalar_mul_x86.zig");
 const table_data = @import("p384_tables.zig");
-const fast_sha2 = @import("sha512.zig");
+const fast_sha2 = @import("../hash/sha512.zig");
 const FastSha384 = fast_sha2.Sha384;
 const FastSha512 = fast_sha2.Sha512;
 

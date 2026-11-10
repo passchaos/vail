@@ -109,9 +109,9 @@ const errors = std.crypto.errors;
 const math = std.math;
 const mem = std.mem;
 const sha3 = crypto.hash.sha3;
-const keccak4 = @import("keccak4.zig");
-const keccak_avx2 = @import("keccak_avx2.zig");
-const crypto_memory = @import("memory.zig");
+const keccak4 = @import("../hash/keccak4.zig");
+const keccak_avx2 = @import("../hash/keccak_avx2.zig");
+const crypto_memory = @import("../memory.zig");
 const mlkem_avx2 = @import("mlkem_avx2.zig");
 
 const Shake128 = if (keccak_avx2.enabled)

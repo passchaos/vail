@@ -5,7 +5,7 @@
 //! key material, use the full 96-bit sequence space, and allocate no memory.
 
 const std = @import("std");
-const aes_gcm = @import("aes_gcm.zig");
+const aes_gcm = @import("../aead/aes_gcm.zig");
 const X25519 = @import("x25519.zig").X25519;
 
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;

@@ -1,10 +1,10 @@
 //! TLS 1.3 classical and post-quantum hybrid key-exchange primitives.
 
 const std = @import("std");
-const crypto_p256 = @import("../crypto/p256.zig");
-const crypto_p384 = @import("../crypto/p384.zig");
-const crypto_p521 = @import("../crypto/p521.zig");
-const X25519 = @import("../crypto/x25519.zig").X25519;
+const crypto_p256 = @import("../crypto/ec/p256.zig");
+const crypto_p384 = @import("../crypto/ec/p384.zig");
+const crypto_p521 = @import("../crypto/ec/p521.zig");
+const X25519 = @import("../crypto/kex/x25519.zig").X25519;
 
 pub const x25519_mlkem768 =
     @import("key_exchange/x25519_mlkem768.zig");

@@ -1,8 +1,8 @@
 //! Pure-Zig ML-DSA helpers layered over Zig std's FIPS 204 implementation.
 
 const std = @import("std");
-const keccak4 = @import("keccak4.zig");
-const keccak_avx2 = @import("keccak_avx2.zig");
+const keccak4 = @import("../hash/keccak4.zig");
+const keccak_avx2 = @import("../hash/keccak_avx2.zig");
 const mldsa_avx2 = @import("mldsa_avx2.zig");
 
 pub const MlDsa44 = std.crypto.sign.mldsa.MLDSA44;

@@ -5,9 +5,9 @@
 //! stateful AEAD records needed by both client and server implementations.
 
 const std = @import("std");
-const fast_sha2 = @import("../crypto/sha512.zig");
-const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
-const prepared_chacha = @import("../crypto/chacha20_poly1305.zig");
+const fast_sha2 = @import("../crypto/hash/sha512.zig");
+const prepared_aes_gcm = @import("../crypto/aead/aes_gcm.zig");
+const prepared_chacha = @import("../crypto/aead/chacha20_poly1305.zig");
 const record_fragment = @import("record_fragment.zig");
 const record_size_limit = @import("record_size_limit.zig");
 const tls_secret = @import("secret.zig");

@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const FastSha512 = @import("sha512.zig").Sha512;
+const FastSha512 = @import("../hash/sha512.zig").Sha512;
 const field_inv_x86 = @import("p521_field_inv_x86.zig");
 const field_mul_x86 = @import("p521_field_mul_x86.zig");
 const scalar_inv_x86 = @import("p384_scalar_inv_x86.zig");
@@ -3635,7 +3635,7 @@ test "P-521 constant-time scalar arithmetic matches public oracle" {
 }
 
 test "P-521 cached odd-multiple table matches full Jacobian recurrence" {
-    const vectors = @import("../x509/testdata/path_vectors.zig");
+    const vectors = @import("../../x509/testdata/path_vectors.zig");
     const root = decodeHex(vectors.p521_root_hex);
     const certificate = try std.crypto.Certificate.parse(.{
         .buffer = &root,
@@ -4617,7 +4617,7 @@ test "P-521 verifies independent OpenSSL SHA-2 signatures" {
 }
 
 test "P-521 verifies independent OpenSSL RFC 8692 SHAKE signatures" {
-    const vectors = @import("../x509/testdata/path_vectors.zig");
+    const vectors = @import("../../x509/testdata/path_vectors.zig");
     const public_key = decodeHex(vectors.p521_shake_public_key_hex);
     const shake128_signature = decodeHex(
         vectors.p521_shake128_signature_hex,

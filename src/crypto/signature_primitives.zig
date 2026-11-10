@@ -4,9 +4,9 @@
 //! implementations. Consumers that only validate signatures do not need to
 //! import Vail's TLS, X.509 path, record, or protocol graph.
 
-pub const p521 = @import("p521.zig");
-pub const sm2 = @import("sm2.zig");
-pub const sm3 = @import("sm3.zig");
+pub const p521 = @import("ec/p521.zig");
+pub const sm2 = @import("sign/sm2.zig");
+pub const sm3 = @import("hash/sm3.zig");
 
 test "signature primitives expose compressed and uncompressed P-521 keys" {
     const generator_x = comptime decodeHex(

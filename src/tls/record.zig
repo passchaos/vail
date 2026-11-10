@@ -6,12 +6,12 @@
 
 const std = @import("std");
 
-const aes_ccm = @import("../crypto/aes_ccm.zig");
-const prepared_aes_gcm = @import("../crypto/aes_gcm.zig");
-const prepared_chacha = @import("../crypto/chacha20_poly1305.zig");
-const sha256 = @import("../crypto/sha256.zig");
-const fast_sha2 = @import("../crypto/sha512.zig");
-const sm4 = @import("../crypto/sm4.zig");
+const aes_ccm = @import("../crypto/aead/aes_ccm.zig");
+const prepared_aes_gcm = @import("../crypto/aead/aes_gcm.zig");
+const prepared_chacha = @import("../crypto/aead/chacha20_poly1305.zig");
+const sha256 = @import("../crypto/hash/sha256.zig");
+const fast_sha2 = @import("../crypto/hash/sha512.zig");
+const sm4 = @import("../crypto/block/sm4.zig");
 const cipher_suite = @import("cipher_suite.zig");
 const secret = @import("secret.zig");
 
@@ -19,7 +19,7 @@ const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 const HmacSha384 = std.crypto.auth.hmac.Hmac(fast_sha2.Sha384);
 const HkdfSha384 = std.crypto.kdf.hkdf.Hkdf(HmacSha384);
-const HmacSm3 = std.crypto.auth.hmac.Hmac(@import("../crypto/sm3.zig").Hash);
+const HmacSm3 = std.crypto.auth.hmac.Hmac(@import("../crypto/hash/sm3.zig").Hash);
 const HkdfSm3 = std.crypto.kdf.hkdf.Hkdf(HmacSm3);
 
 pub const content_type_application_data: u8 = 23;

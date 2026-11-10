@@ -1,7 +1,7 @@
 const std = @import("std");
 const mac = @import("mac.zig");
 const memory = @import("memory.zig");
-const sha256 = @import("sha256.zig");
+const sha256 = @import("hash/sha256.zig");
 
 test "domain-separated MAC binds part boundaries" {
     const key = [_]u8{0x42} ** mac.key_len;

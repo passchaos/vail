@@ -10,13 +10,13 @@
 
 const std = @import("std");
 
-const crypto_ed25519 = @import("../crypto/ed25519.zig");
-const crypto_mldsa = @import("../crypto/mldsa.zig");
-const p521 = @import("../crypto/p521.zig");
-const p256 = @import("../crypto/p256.zig");
-const p384 = @import("../crypto/p384.zig");
-const rsa = @import("../crypto/rsa.zig");
-const sm2 = @import("../crypto/sm2.zig");
+const crypto_ed25519 = @import("../crypto/sign/ed25519.zig");
+const crypto_mldsa = @import("../crypto/pq/mldsa.zig");
+const p521 = @import("../crypto/ec/p521.zig");
+const p256 = @import("../crypto/ec/p256.zig");
+const p384 = @import("../crypto/ec/p384.zig");
+const rsa = @import("../crypto/sign/rsa.zig");
+const sm2 = @import("../crypto/sign/sm2.zig");
 const x509 = @import("../x509/mod.zig");
 const x509_certificate = x509.certificate;
 const x509_signature = x509.signature;
@@ -3324,7 +3324,7 @@ fn x509PssAlgorithmForScheme(
 }
 
 fn sm3DigestLen() usize {
-    return @import("../crypto/sm3.zig").digest_len;
+    return @import("../crypto/hash/sm3.zig").digest_len;
 }
 
 fn rsaCertificatePublicKeyForAlgorithm(
