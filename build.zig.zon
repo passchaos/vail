@@ -4,6 +4,8 @@
     .fingerprint = 0xd63e_7cd6_31a7_8dd7,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
+        // Development path dependency. CI checks out passchaos/vort at the
+        // commit documented in docs/building.md.
         .vort = .{
             .path = "../vort",
         },

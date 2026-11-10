@@ -4,7 +4,10 @@
 
 - Zig `0.16.x`.
 - The sibling `vort` package checked out next to this repository. The current
-  `build.zig.zon` uses a path dependency at `../vort`.
+  `build.zig.zon` uses a path dependency at `../vort`. CI pins
+  `passchaos/vort` to commit
+  `b661c887e21fb1965db358bc6d12ea379d20178d`; keep the local sibling in sync
+  with that commit when reproducing CI results.
 - Cargo, a C toolchain, and OpenSSL only when building the optional AWS-LC,
   rustls, or OpenSSL interoperability/benchmark harnesses.
 

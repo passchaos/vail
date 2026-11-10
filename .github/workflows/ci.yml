@@ -28,6 +28,7 @@ jobs:
         with:
           repository: passchaos/vort
           path: vort
+          ref: b661c887e21fb1965db358bc6d12ea379d20178d
           token: ${{ secrets.VORT_TOKEN || github.token }}
 
       - name: Set up Zig
