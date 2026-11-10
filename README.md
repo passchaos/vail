@@ -9,6 +9,9 @@ The current foundation provides:
 - domain-separated HMAC-SHA256 and constant-time tag verification;
 - fixed-size SHA-256 and SM3 digests, portable SM2 signing/verification,
   SM4 block/SM4-GCM primitives, and explicit secure-memory wiping;
+- `crypto.memory.zeroAlignedSlice32` for variable-length aligned scratch:
+  volatile 32-byte stores clear complete blocks and the existing byte helper
+  clears a partial tail, with canary checks covering the exact supplied span;
 - the dependency-free `archive_crypto` subpackage, including resumable
   Traditional PKZIP/ZipCrypto byte-stream state with explicit
   caller-supplied header entropy, password verification, allocation-safe

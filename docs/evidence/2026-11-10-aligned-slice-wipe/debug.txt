@@ -1,0 +1,4 @@
+1/3 memory.test.aligned vector zero clears the complete value...OK
+2/3 memory.test.aligned slice zero preserves canaries for empty slices and every short boundary...OK
+3/3 memory.test.aligned slice zero preserves canaries for large blocks and partial tails...OK
+All 3 tests passed.
