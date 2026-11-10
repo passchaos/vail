@@ -1,0 +1,4 @@
+Compiler stack limit (bytes): (67108864, -1)
+Replay command: /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig test -OReleaseSafe --dep vort -Mroot=/home/passchaos/project-z/vail/src/root.zig .zig-cache/o/f34eee7cc8afb8ba36fc43c31b78a506/vort-br-record-optimal.o .zig-cache/o/061705682a6035d46df0fd94c243653d/vort-zstd-huffman-x2.o -OReleaseSafe -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/home/passchaos/project-z/vort/src/root.zig -OReleaseSafe -Mvail_archive_crypto=/home/passchaos/project-z/vail/archive_crypto/src/root.zig --cache-dir .zig-cache --global-cache-dir /home/passchaos/.cache/zig --name test --zig-lib-dir /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/ -fllvm
+
+Replay exit code: -11

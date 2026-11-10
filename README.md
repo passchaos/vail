@@ -1185,6 +1185,12 @@ comparison, `zig build -Doptimize=ReleaseFast bench-ed25519-verify` and
 `zig build bench-aws-lc-ed25519-verify` for the isolated comparison, or
 `bench-ed25519` and `bench-aws-lc-ed25519` for the component matrix.
 
+`ed25519.PreparedVerifier.initInto` builds the public-key table directly in
+caller-owned storage, including a heap cache entry. It validates encoding,
+identity, and low-order keys before modifying that storage, so rejected keys
+leave an existing verifier intact. `init` retains its value-returning API and
+uses the same constructor; the table math and verification rules are shared.
+
 P-256 ECDSA verification uses a variable-time public-input path with a
 width-10 fixed-generator wNAF table, a width-6 cached-Jacobian public-key
 table, bounded sparse recoding that reads four scalar limbs directly and

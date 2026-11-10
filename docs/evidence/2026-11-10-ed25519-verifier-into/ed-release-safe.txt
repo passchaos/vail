@@ -1,0 +1,15 @@
+1/14 ed25519.test.Ed25519 sparse wNAF matches dense recoding...OK
+2/14 ed25519.test.Ed25519 RFC 8032 empty-message vector...OK
+3/14 ed25519.test.Ed25519 public-key recovery and signing match Zig std...OK
+4/14 ed25519.test.Ed25519 signing preserves noise and key mismatch behavior...OK
+5/14 ed25519.test.Ed25519 prepared verifier has a bounded caller-owned footprint...OK
+6/14 ed25519.test.Ed25519 prepared verifier initInto matches init verification...OK
+7/14 ed25519.test.Ed25519 prepared verifier initInto preserves destination on key rejection...OK
+8/14 ed25519.test.Ed25519 prepared verifier classifies non-identity low-order keys...OK
+9/14 ed25519.test.Ed25519 ADX projective-only doubling matches full doubling...OK
+10/14 ed25519.test.Ed25519 ADX fixed-base verification table matches Zig std...OK
+11/14 ed25519.test.Ed25519 one-shot verifier preserves scalar and point rejection...OK
+12/14 ed25519.test.Ed25519 one-shot verifier preserves cofactored mixed-torsion semantics...OK
+13/14 ed25519_base_adx.test.Ed25519 fixed-base table matches Zig std...OK
+14/14 ed25519_scalar_adx.test.Ed25519 ADX scalar operations match Zig std...OK
+All 14 tests passed.

@@ -1,0 +1,27 @@
+test
++- run test
+   +- compile test ReleaseSafe native failure
+error: process terminated with signal SEGV
+failed command: /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig test -OReleaseSafe --dep vort -Mroot=/home/passchaos/project-z/vail/src/root.zig .zig-cache/o/f34eee7cc8afb8ba36fc43c31b78a506/vort-br-record-optimal.o .zig-cache/o/061705682a6035d46df0fd94c243653d/vort-zstd-huffman-x2.o -OReleaseSafe -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/home/passchaos/project-z/vort/src/root.zig -OReleaseSafe -Mvail_archive_crypto=/home/passchaos/project-z/vail/archive_crypto/src/root.zig --cache-dir .zig-cache --global-cache-dir /home/passchaos/.cache/zig --name test --zig-lib-dir /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/ --listen=-
+
+Build Summary: 6/9 steps succeeded (1 failed); 1/1 tests passed
+test transitive failure
++- run test transitive failure
+|  +- compile test ReleaseSafe native failure
+|     +- WriteFile cached
+|     +- compile obj vort-br-record-optimal ReleaseSafe native success 12s MaxRSS:489M
+|     +- WriteFile success
+|     +- compile obj vort-zstd-huffman-x2 ReleaseSafe native success 12s MaxRSS:520M
+|     +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+|     +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
++- run test 1 pass (1 total) 2ms MaxRSS:11M
+   +- compile test ReleaseSafe native success 15s MaxRSS:660M
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/2b9e48557368e3524616f393571c71ca/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/vail .zig-cache /home/passchaos/.cache/zig --seed 0x4f39d31 -Z99cdcdf312b8c606 test -Doptimize=ReleaseSafe -j2 --summary all

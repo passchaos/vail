@@ -151,15 +151,23 @@ pub const PreparedVerifier = struct {
         WeakPublicKeyError;
 
     pub fn init(public_key: StdEd25519.PublicKey) InitError!PreparedVerifier {
+        var verifier: PreparedVerifier = undefined;
+        try verifier.initInto(public_key);
+        return verifier;
+    }
+
+    /// Build directly in caller-owned storage, leaving it unchanged on error.
+    pub fn initInto(
+        self: *PreparedVerifier,
+        public_key: StdEd25519.PublicKey,
+    ) InitError!void {
         const public_key_bytes = public_key.toBytes();
         const public_point = try Curve.fromBytes(public_key_bytes);
         if (curveIdentity(public_point)) return error.IdentityElement;
         const verification_point = public_point.clearCofactor().neg();
         if (curveIdentity(verification_point)) return error.WeakPublicKey;
-        return .{
-            .public_key_bytes = public_key_bytes,
-            .public_table = buildPublicComb(verification_point),
-        };
+        self.public_key_bytes = public_key_bytes;
+        buildPublicComb(&self.public_table, verification_point);
     }
 
     pub fn matchesPublicKey(
@@ -411,8 +419,9 @@ pub const testing = struct {
 };
 
 fn buildPublicComb(
+    table: *[verify_comb_groups][verify_comb_entries]CachedPoint,
     point: Curve,
-) [verify_comb_groups][verify_comb_entries]CachedPoint {
+) void {
     const column_count = verify_comb_groups * verify_comb_width;
     const point_count = verify_comb_groups * verify_comb_entries;
     var columns: [column_count]Curve = undefined;
@@ -444,7 +453,6 @@ fn buildPublicComb(
         product = product.mul(points[group][index].z);
     }
 
-    var table: [verify_comb_groups][verify_comb_entries]CachedPoint = undefined;
     var inverse_product = product.invert();
     var flat_index: usize = point_count;
     while (flat_index != 0) {
@@ -463,7 +471,6 @@ fn buildPublicComb(
             .xy2d = t.mul(Fe.edwards25519d2),
         };
     }
-    return table;
 }
 
 fn doubleScalarMulComb(
@@ -970,6 +977,69 @@ test "Ed25519 prepared verifier has a bounded caller-owned footprint" {
         @as(usize, 15_392),
         @sizeOf(PreparedVerifier),
     );
+}
+
+test "Ed25519 prepared verifier initInto matches init verification" {
+    const messages = [_][]const u8{
+        "",
+        "Vail caller-owned Ed25519 verifier",
+        "a message spanning more than one SHA-512 compression block" ** 3,
+    };
+    var state: u64 = 0x082e_fa98_ec4e_6c89;
+    for (0..4) |_| {
+        var seed: [StdEd25519.KeyPair.seed_length]u8 = undefined;
+        fillDeterministic(&seed, &state);
+        const key_pair = try generateKeyPairDeterministic(seed);
+        const expected = try PreparedVerifier.init(key_pair.public_key);
+        var actual: PreparedVerifier = undefined;
+        try actual.initInto(key_pair.public_key);
+        try std.testing.expectEqualDeep(expected, actual);
+        try std.testing.expect(actual.matchesPublicKey(key_pair.public_key));
+        for (messages) |message| {
+            const signature = try key_pair.sign(message, null);
+            try expected.verify(signature, message);
+            try actual.verify(signature, message);
+            try std.testing.expectError(
+                error.SignatureVerificationFailed,
+                actual.verify(signature, "altered message"),
+            );
+        }
+    }
+}
+
+test "Ed25519 prepared verifier initInto preserves destination on key rejection" {
+    const key_pair = try generateKeyPairDeterministic(
+        [_]u8{0x38} ** StdEd25519.KeyPair.seed_length,
+    );
+    var actual: PreparedVerifier = undefined;
+    try actual.initInto(key_pair.public_key);
+    const original_bytes = std.mem.asBytes(&actual).*;
+
+    var invalid_bytes = [_]u8{0} ** StdEd25519.PublicKey.encoded_length;
+    invalid_bytes[0] = 2;
+    var identity_bytes = [_]u8{0} ** StdEd25519.PublicKey.encoded_length;
+    identity_bytes[0] = 1;
+    var order_two = [_]u8{0xff} ** StdEd25519.PublicKey.encoded_length;
+    order_two[0] = 0xec;
+    order_two[31] = 0x7f;
+    const rejected_keys = .{
+        .{ invalid_bytes, error.InvalidEncoding },
+        .{ identity_bytes, error.IdentityElement },
+        .{ order_two, error.WeakPublicKey },
+    };
+    inline for (rejected_keys) |rejected| {
+        const public_key = try StdEd25519.PublicKey.fromBytes(rejected[0]);
+        try std.testing.expectError(rejected[1], PreparedVerifier.init(public_key));
+        try std.testing.expectError(rejected[1], actual.initInto(public_key));
+        try std.testing.expectEqualSlices(
+            u8,
+            &original_bytes,
+            std.mem.asBytes(&actual),
+        );
+    }
+    const message = "original verifier still verifies after rejected keys";
+    const signature = try key_pair.sign(message, null);
+    try actual.verify(signature, message);
 }
 
 test "Ed25519 prepared verifier classifies non-identity low-order keys" {
