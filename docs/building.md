@@ -68,7 +68,12 @@ zig run tools/generate_p384_tables.zig
 zig run tools/generate_ed25519_base_table.zig
 zig run tools/generate_ed25519_verify_table.zig
 zig run tools/generate_x25519_tables.zig
+zig build check-generated
 ```
+
+`tools/generated_manifest.txt` records the expected SHA-256 of each checked-in
+generated file. `zig build check-generated` fails if a file drifts without a
+manifest update.
 
 `src/x509/stringprep_data.zig` is generated from the Unicode 3.2 database and
 RFC 3454 tables; a checked-in generator is still pending.

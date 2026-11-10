@@ -78,6 +78,7 @@ zig build test            # Vail + package API tests
 zig build test-all        # Vail, package, signature-primitive, and archive tests
 zig build test-compile    # compile tests without running them
 zig build check           # zig fmt --check + test-all
+zig build check-generated # verify generated tables against their manifest
 zig build fmt             # format Zig sources
 ```
 

@@ -3926,6 +3926,23 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&fmt_check.step);
     check_step.dependOn(test_all_step);
 
+    const check_generated = b.addExecutable(.{
+        .name = "vail-check-generated",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_generated_tables.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_check_generated = b.addRunArtifact(check_generated);
+    run_check_generated.setCwd(b.path("."));
+    const check_generated_step = b.step(
+        "check-generated",
+        "Verify checked-in generated files against their manifest",
+    );
+    check_generated_step.dependOn(&run_check_generated.step);
+    check_step.dependOn(check_generated_step);
+
     const example_names = [_][]const u8{ "sha256", "aes_gcm", "mac" };
     const examples_step = b.step("examples", "Build example programs");
     for (example_names) |name| {

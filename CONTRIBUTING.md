@@ -45,6 +45,8 @@ See [`docs/architecture.md`](docs/architecture.md) for details.
 - `zig build check` runs `zig fmt --check` and `test-all`.
 - Generated tables are excluded from formatting. Do not hand-edit them; update
   the generator in `tools/` and regenerate.
+- Update `tools/generated_manifest.txt` when a generated file intentionally
+  changes, then run `zig build check-generated`.
 
 ## Generated code and assembly
 
