@@ -3,17 +3,17 @@ const builtin = @import("builtin");
 const mldsa_benchmarks = @import("build/mldsa_benchmarks.zig");
 const mlkem_benchmarks = @import("build/mlkem_benchmarks.zig");
 
-const required_zig_version = "0.16.0";
+const required_zig_version = "0.16";
 
 pub fn build(b: *std.Build) void {
     comptime {
-        if (!std.mem.eql(
+        if (!std.mem.startsWith(
             u8,
             builtin.zig_version_string,
-            required_zig_version,
+            required_zig_version ++ ".",
         )) {
             @compileError(
-                "vail requires Zig " ++ required_zig_version ++ "; found " ++
+                "vail requires Zig " ++ required_zig_version ++ ".x; found " ++
                     builtin.zig_version_string,
             );
         }
@@ -83,6 +83,23 @@ pub fn build(b: *std.Build) void {
     signature_primitives_test_step.dependOn(
         &run_signature_primitives_tests.step,
     );
+
+    const archive_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("archive_crypto/src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_archive_tests = b.addRunArtifact(archive_tests);
+    const test_all_step = b.step(
+        "test-all",
+        "Run Vail, signature-primitive, package, and archive test suites",
+    );
+    test_all_step.dependOn(&run_tests.step);
+    test_all_step.dependOn(&run_package_tests.step);
+    test_all_step.dependOn(&run_signature_primitives_tests.step);
+    test_all_step.dependOn(&run_archive_tests.step);
 
     const traffic_bench = b.addExecutable(.{
         .name = "vail-bench-quic-traffic-crypto",
@@ -3846,4 +3863,65 @@ pub fn build(b: *std.Build) void {
     interop_rustls_mldsa_rpk_client_step.dependOn(
         &check_rustls_mldsa_rpk_server.step,
     );
+
+    var bench_deps: std.ArrayList(*std.Build.Step) = .empty;
+    var interop_deps: std.ArrayList(*std.Build.Step) = .empty;
+    var top_level_it = b.top_level_steps.iterator();
+    while (top_level_it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (std.mem.startsWith(u8, name, "bench-")) {
+            bench_deps.append(b.allocator, &entry.value_ptr.*.step) catch
+                @panic("OOM");
+        } else if (std.mem.startsWith(u8, name, "interop-")) {
+            interop_deps.append(b.allocator, &entry.value_ptr.*.step) catch
+                @panic("OOM");
+        }
+    }
+    const bench_all_step = b.step("bench", "Run all Vail benchmarks");
+    for (bench_deps.items) |dep| bench_all_step.dependOn(dep);
+    const interop_all_step = b.step(
+        "interop",
+        "Run all Vail interoperability checks",
+    );
+    for (interop_deps.items) |dep| interop_all_step.dependOn(dep);
+
+    const fmt_paths = &.{
+        "build.zig",
+        "src",
+        "bench",
+        "build",
+        "test",
+        "tools",
+        "archive_crypto",
+    };
+    const fmt_excludes = &.{
+        "bench/rustls_client_hello/target",
+        "bench/rustls_min_client/target",
+        "bench/rustls_min_server/target",
+        "archive_crypto/.zig-cache",
+        "src/crypto/p256_tables.zig",
+        "src/crypto/p384_tables.zig",
+        "src/crypto/ed25519_base_table.zig",
+        "src/crypto/ed25519_verify_table.zig",
+        "src/crypto/x25519_tables.zig",
+        "src/crypto/x25519_public_tables.zig",
+        "src/x509/stringprep_data.zig",
+    };
+    const fmt = b.addFmt(.{
+        .paths = fmt_paths,
+        .exclude_paths = fmt_excludes,
+    });
+    const fmt_step = b.step("fmt", "Format Zig sources");
+    fmt_step.dependOn(&fmt.step);
+    const fmt_check = b.addFmt(.{
+        .paths = fmt_paths,
+        .exclude_paths = fmt_excludes,
+        .check = true,
+    });
+    const check_step = b.step(
+        "check",
+        "Check formatting and run all test suites",
+    );
+    check_step.dependOn(&fmt_check.step);
+    check_step.dependOn(test_all_step);
 }

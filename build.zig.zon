@@ -11,9 +11,13 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "build",
         "src",
         "bench",
         "test",
+        "tools",
+        "archive_crypto",
+        "docs",
         "README.md",
         "LICENSE",
         ".gitignore",
