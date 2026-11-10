@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out Vail
+        uses: actions/checkout@v4
+        with:
+          path: vail
+
+      - name: Check out Vort
+        uses: actions/checkout@v4
+        with:
+          repository: passchaos/vort
+          path: vort
+          token: ${{ secrets.VORT_TOKEN || github.token }}
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Format, generated-file, and test gates
+        working-directory: vail
+        run: zig build check
+
+      - name: Build examples
+        working-directory: vail
+        run: zig build examples
+
+      - name: OpenSSL interoperability smoke test
+        working-directory: vail
+        run: zig build interop-openssl-p256-sign

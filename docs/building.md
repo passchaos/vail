@@ -78,6 +78,18 @@ manifest update.
 `src/x509/stringprep_data.zig` is generated from the Unicode 3.2 database and
 RFC 3454 tables; a checked-in generator is still pending.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on Linux x86_64 and AArch64 and covers:
+
+- `zig build check` (formatting, generated-file drift, and all test suites);
+- `zig build examples`;
+- an OpenSSL P-256 signature interoperability smoke test.
+
+The workflow checks out `passchaos/vort` as a sibling `vort` directory. If that
+repository is private, add a `VORT_TOKEN` secret with read access; otherwise the
+default `github.token` is used.
+
 ## Troubleshooting
 
 - **Missing `vort`**: clone it as a sibling directory or update the path
