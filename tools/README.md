@@ -18,8 +18,9 @@ expected SHA-256 values; run `zig build check-generated` after regenerating or
 intentionally changing a checked-in generated file.
 
 `src/x509/stringprep_data.zig` is generated from Unicode 3.2 and RFC 3454
-tables. A checked-in generator is still pending; document the exact input files
-and commands when adding one.
+tables. A checked-in generator is still pending because the exact case-folding
+and normalization inputs are not vendored. The file is protected by the SHA-256
+manifest and the generated-table sorting/bounds test.
 
 ## Interoperability tools
 

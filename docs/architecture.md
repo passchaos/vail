@@ -99,6 +99,20 @@ The build graph is currently one Zig module, so these rules are conventions
 rather than compiler-enforced boundaries. Splitting the graph into explicit
 submodules is a planned follow-up.
 
+## Module layout
+
+A module may be either a single file or a `foo.zig` entry point plus a `foo/`
+directory for private submodules. The entry point owns the public surface and
+re-exports what callers need; new modules should not mix the two patterns.
+Existing examples:
+
+- `tls/handshake/client_hello.zig` + `client_hello/`
+- `tls/crypto/key_schedule.zig` + `key_schedule/`
+- `tls/key_exchange.zig` + `key_exchange/`
+- `crypto/pq/mlkem.zig` + `mlkem/`
+- `crypto/hash/sha512.zig` + `sha512/`
+- `quic/traffic_crypto.zig` + `traffic_crypto/`
+
 ## Build graph
 
 `build.zig` contains the library, test, example, formatting, and umbrella

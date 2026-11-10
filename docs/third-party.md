@@ -22,6 +22,19 @@ SPDX header; this page summarizes the major components.
 - Generated tables are checked in and must be regenerated with the scripts in
   `tools/`.
 
+## Stringprep data provenance
+
+`src/x509/stringprep_data.zig` is generated from Unicode 3.2 and RFC 3454
+inputs. Those exact case-folding and normalization inputs are not currently
+vendored. The checked-in table is protected by:
+
+- a SHA-256 entry in `tools/generated_manifest.txt` and
+  `zig build check-generated`;
+- the generated-table sorting and bounds test in `src/x509/stringprep.zig`.
+
+A future generator must pin the exact Unicode/RFC input files before it can
+claim to regenerate the table reproducibly.
+
 ## Updating third-party code
 
 1. Record the upstream repository, commit, and license in the file header.
