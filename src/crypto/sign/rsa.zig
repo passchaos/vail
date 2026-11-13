@@ -111,6 +111,43 @@ pub const PreparedPublicKey = struct {
         return self.verifyPss(std.crypto.hash.sha2.Sha512, message_parts, signature);
     }
 
+    /// RSASSA-PSS verification with the salt length encoded in the signature
+    /// (RFC 8017 EME-PSS-VERIFY step 9: any salt length is valid). This
+    /// accepts signatures produced with OpenSSL's default maximum salt, which
+    /// DDS-Security peers such as CycloneDDS emit. The strict `verifyPss*`
+    /// variants above require a digest-length salt.
+    pub fn verifyPssSha224AutoSalt(
+        self: *const PreparedPublicKey,
+        message_parts: []const []const u8,
+        signature: []const u8,
+    ) Error!void {
+        return self.verifyPssImpl(Sha224, message_parts, signature, true);
+    }
+
+    pub fn verifyPssSha256AutoSalt(
+        self: *const PreparedPublicKey,
+        message_parts: []const []const u8,
+        signature: []const u8,
+    ) Error!void {
+        return self.verifyPssImpl(Sha256, message_parts, signature, true);
+    }
+
+    pub fn verifyPssSha384AutoSalt(
+        self: *const PreparedPublicKey,
+        message_parts: []const []const u8,
+        signature: []const u8,
+    ) Error!void {
+        return self.verifyPssImpl(Sha384, message_parts, signature, true);
+    }
+
+    pub fn verifyPssSha512AutoSalt(
+        self: *const PreparedPublicKey,
+        message_parts: []const []const u8,
+        signature: []const u8,
+    ) Error!void {
+        return self.verifyPssImpl(Sha512, message_parts, signature, true);
+    }
+
     pub fn verifyPkcs1v15Sha224(
         self: *const PreparedPublicKey,
         message_parts: []const []const u8,
@@ -149,6 +186,16 @@ pub const PreparedPublicKey = struct {
         message_parts: []const []const u8,
         signature: []const u8,
     ) Error!void {
+        return self.verifyPssImpl(Hash, message_parts, signature, false);
+    }
+
+    fn verifyPssImpl(
+        self: *const PreparedPublicKey,
+        comptime Hash: type,
+        message_parts: []const []const u8,
+        signature: []const u8,
+        comptime auto_salt: bool,
+    ) Error!void {
         if (signature.len != Montgomery2048.encoded_length) {
             return error.InvalidSignature;
         }
@@ -166,6 +213,7 @@ pub const PreparedPublicKey = struct {
             message_parts,
             &encoded_message,
             self.modulus_bits - 1,
+            auto_salt,
         );
     }
 
@@ -245,10 +293,15 @@ fn verifyPssEncoding(
     message_parts: []const []const u8,
     encoded_message: []u8,
     encoded_bits: usize,
+    comptime auto_salt: bool,
 ) Error!void {
     const encoded_len = (encoded_bits + 7) / 8;
+    const min_encoded_len = if (auto_salt)
+        Hash.digest_length + 2
+    else
+        2 * Hash.digest_length + 2;
     if (encoded_len != encoded_message.len or
-        encoded_len < 2 * Hash.digest_length + 2 or
+        encoded_len < min_encoded_len or
         encoded_message[encoded_message.len - 1] != 0xbc)
     {
         return error.InvalidSignature;
@@ -278,23 +331,36 @@ fn verifyPssEncoding(
     }
     encoded_message[0] &= @as(u8, 0xff) >> @intCast(unused_bits);
 
-    const delimiter_index = database_len - Hash.digest_length - 1;
-    var nonzero: u8 = 0;
-    for (encoded_message[0..delimiter_index]) |byte| nonzero |= byte;
-    if (nonzero != 0 or encoded_message[delimiter_index] != 1) {
-        return error.InvalidSignature;
-    }
-    const salt = encoded_message[database_len - Hash.digest_length .. database_len];
+    const delimiter_index = if (auto_salt) blk: {
+        // RFC 8017: DB = PS || 0x01 || salt with PS a (possibly empty) run of
+        // zero bytes, so the salt length is whatever remains after the first
+        // nonzero byte, which must be the 0x01 separator.
+        var index: usize = 0;
+        while (index < database_len and encoded_message[index] == 0) : (index += 1) {}
+        if (index == database_len or encoded_message[index] != 1) {
+            return error.InvalidSignature;
+        }
+        break :blk index;
+    } else blk: {
+        const index = database_len - Hash.digest_length - 1;
+        var nonzero: u8 = 0;
+        for (encoded_message[0..index]) |byte| nonzero |= byte;
+        if (nonzero != 0 or encoded_message[index] != 1) {
+            return error.InvalidSignature;
+        }
+        break :blk index;
+    };
+    const salt = encoded_message[delimiter_index + 1 .. database_len];
     var message_hash: [Hash.digest_length]u8 = undefined;
     var message_hasher = Hash.init(.{});
     for (message_parts) |part| message_hasher.update(part);
     message_hasher.final(&message_hash);
-    var final_input: [8 + 2 * Hash.digest_length]u8 =
-        [_]u8{0} ** (8 + 2 * Hash.digest_length);
-    @memcpy(final_input[8..][0..Hash.digest_length], &message_hash);
-    @memcpy(final_input[8 + Hash.digest_length ..], salt);
+    var expected_hasher = Hash.init(.{});
+    expected_hasher.update(&[_]u8{0} ** 8);
+    expected_hasher.update(&message_hash);
+    expected_hasher.update(salt);
     var expected: [Hash.digest_length]u8 = undefined;
-    Hash.hash(&final_input, &expected, .{});
+    expected_hasher.final(&expected);
     if (!std.crypto.timing_safe.eql(
         [Hash.digest_length]u8,
         digest[0..Hash.digest_length].*,
@@ -2263,6 +2329,41 @@ test "PKCS1 and PKCS8 RSA keys produce verifiable PSS signatures" {
     try std.testing.expectError(
         error.InvalidSaltLength,
         key1.signPssSha256(message, &.{}, &unused_signature),
+    );
+}
+
+test "RSA-PSS verification accepts OpenSSL's maximum salt length" {
+    const vectors = @import("../testdata/rsa_signing.zig");
+    const certificate_der = decodeHex(vectors.certificate_hex);
+    const certificate = try std.crypto.Certificate.parse(.{
+        .buffer = &certificate_der,
+        .index = 0,
+    });
+    const public_parts = try std.crypto.Certificate.rsa.PublicKey.parseDer(
+        certificate.pubKey(),
+    );
+    const prepared_public = try PreparedPublicKey.init(
+        public_parts.exponent,
+        public_parts.modulus,
+    );
+    const message = "vail RSA-PSS maximum-salt vector";
+    const signature = decodeHex(vectors.pss_sha256_max_salt_signature_hex);
+    const parts = [_][]const u8{message};
+
+    // OpenSSL's default PSS salt length is the maximum permissible (222
+    // bytes for RSA-2048/SHA-256). The strict verifier expects a
+    // digest-length salt and rejects it; auto-salt verification accepts it.
+    try std.testing.expectError(
+        error.InvalidSignature,
+        prepared_public.verifyPssSha256(&parts, &signature),
+    );
+    try prepared_public.verifyPssSha256AutoSalt(&parts, &signature);
+
+    var tampered = signature;
+    tampered[tampered.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.InvalidSignature,
+        prepared_public.verifyPssSha256AutoSalt(&parts, &tampered),
     );
 }
 
