@@ -17,6 +17,10 @@ pub fn transform(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
         if (isDirective(trimmed, ".type") or
             isDirective(trimmed, ".size") or
             isDirective(trimmed, ".hidden") or
+            isDirective(trimmed, ".arch") or
+            isDirective(trimmed, ".fpu") or
+            isDirective(trimmed, ".popsection") or
+            isDirective(trimmed, ".pushsection") or
             std.mem.startsWith(u8, trimmed, ".cfi_") or
             std.mem.startsWith(u8, trimmed, ".section .note.GNU-stack"))
         {

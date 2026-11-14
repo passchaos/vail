@@ -74,6 +74,25 @@ pub fn create(
     }
 }
 
+/// Absorb `input` into a running accumulator, zero-padding the final partial
+/// block. Whole-block input is absorbed without an extra padded block, so this
+/// composes with stitched kernels that already consumed the full ciphertext
+/// blocks.
+pub fn absorbPadded(
+    precomputed: *const Ghash,
+    accumulator: u128,
+    input: []const u8,
+) u128 {
+    if (comptime has_vpclmul or has_pmull) {
+        return absorb(accumulator, &precomputed.hx, input);
+    }
+    var mac = precomputed.*;
+    mac.acc = accumulator;
+    mac.update(input);
+    mac.pad();
+    return mac.acc;
+}
+
 fn absorb(
     initial_accumulator: u128,
     powers: *const [16]u128,

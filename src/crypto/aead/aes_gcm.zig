@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const aes_ctr = @import("../block/aes_ctr.zig");
+const aes_gcm_arm64 = @import("aes_gcm_arm64.zig");
 const ghash_accelerated = @import("ghash.zig");
 
 const Ghash = std.crypto.onetimeauth.Ghash;
@@ -100,16 +101,31 @@ fn AesGcm(comptime Aes: type) type {
 
         aes: AesContext,
         ghash: Ghash,
+        stitched: aes_gcm_arm64.Stitched,
 
         pub fn init(key: [key_length]u8) Self {
             const aes = Aes.initEnc(key);
             var hash_key: [Ghash.key_length]u8 = undefined;
             defer std.crypto.secureZero(u8, &hash_key);
             aes.encrypt(&hash_key, &([_]u8{0} ** Aes.block.block_length));
-            return .{
+            var self: Self = .{
                 .aes = aes,
                 .ghash = Ghash.init(&hash_key),
+                .stitched = undefined,
             };
+            if (comptime aes_gcm_arm64.enabled) {
+                self.stitched.key = aes_gcm_arm64.initKeySchedule(
+                    std.mem.sliceAsBytes(&aes.key_schedule.round_keys),
+                );
+                const hash_key_halves = [2]u64{
+                    std.mem.readInt(u64, hash_key[0..8], .big),
+                    std.mem.readInt(u64, hash_key[8..16], .big),
+                };
+                self.stitched.htable = aes_gcm_arm64.initHtable(
+                    &hash_key_halves,
+                );
+            }
+            return self;
         }
 
         pub fn deinit(self: *Self) void {
@@ -132,6 +148,25 @@ fn AesGcm(comptime Aes: type) type {
             std.mem.writeInt(u32, counter[nonce_length..][0..4], 1, .big);
 
             var tag_mask: [tag_length]u8 = undefined;
+            if (comptime aes_gcm_arm64.enabled) {
+                self.aes.encrypt(&tag_mask, &counter);
+                // The kernels consume the counter of the first data block.
+                std.mem.writeInt(
+                    u32,
+                    counter[nonce_length..][0..4],
+                    2,
+                    .big,
+                );
+                self.encryptStitched(
+                    ciphertext,
+                    tag,
+                    plaintext,
+                    associated_data,
+                    counter,
+                    tag_mask,
+                );
+                return;
+            }
             aes_ctr.xorWithTagMask(
                 Aes,
                 self.aes,
@@ -168,6 +203,25 @@ fn AesGcm(comptime Aes: type) type {
             var tag_mask: [tag_length]u8 = undefined;
             self.aes.encrypt(&tag_mask, &counter);
 
+            if (comptime aes_gcm_arm64.enabled) {
+                // The kernels consume the counter of the first data block.
+                std.mem.writeInt(
+                    u32,
+                    counter[nonce_length..][0..4],
+                    2,
+                    .big,
+                );
+                try self.decryptStitched(
+                    plaintext,
+                    ciphertext,
+                    tag,
+                    associated_data,
+                    counter,
+                    tag_mask,
+                );
+                return;
+            }
+
             var computed_tag: [tag_length]u8 = undefined;
             ghash_accelerated.create(
                 &self.ghash,
@@ -201,6 +255,164 @@ fn AesGcm(comptime Aes: type) type {
             tag_mask: [tag_length]u8,
         ) void {
             for (tag_mask, 0..) |byte, index| tag[index] ^= byte;
+        }
+
+        /// Stitched ARM64 path: the kernel handles the AES-CTR keystream and
+        /// the GHASH of whole ciphertext blocks in one pass. The associated
+        /// data, the final partial block, and the length block stay here.
+        fn encryptStitched(
+            self: *const Self,
+            ciphertext: []u8,
+            tag: *[tag_length]u8,
+            plaintext: []const u8,
+            associated_data: []const u8,
+            initial_counter: [Aes.block.block_length]u8,
+            tag_mask: [tag_length]u8,
+        ) void {
+            var accumulator = ghash_accelerated.absorbPadded(
+                &self.ghash,
+                0,
+                associated_data,
+            );
+
+            const full_len = plaintext.len & ~(Aes.block.block_length - 1);
+            var counter = initial_counter;
+            if (full_len > 0) {
+                var xi: [Ghash.block_length]u8 = undefined;
+                std.mem.writeInt(u128, &xi, accumulator, .big);
+                aes_gcm_arm64.encrypt(
+                    &self.stitched.key,
+                    &self.stitched.htable,
+                    &xi,
+                    &counter,
+                    ciphertext[0..full_len],
+                    plaintext[0..full_len],
+                );
+                accumulator = std.mem.readInt(u128, &xi, .big);
+            }
+
+            const remainder = plaintext[full_len..];
+            if (remainder.len > 0) {
+                aes_ctr.xor(
+                    Aes,
+                    self.aes,
+                    ciphertext[full_len..],
+                    remainder,
+                    counter,
+                );
+                accumulator = ghash_accelerated.absorbPadded(
+                    &self.ghash,
+                    accumulator,
+                    ciphertext[full_len..],
+                );
+            }
+
+            var lengths: [Ghash.block_length]u8 = undefined;
+            std.mem.writeInt(
+                u64,
+                lengths[0..8],
+                @as(u64, @intCast(associated_data.len)) * 8,
+                .big,
+            );
+            std.mem.writeInt(
+                u64,
+                lengths[8..16],
+                @as(u64, @intCast(ciphertext.len)) * 8,
+                .big,
+            );
+            accumulator = ghash_accelerated.absorbPadded(
+                &self.ghash,
+                accumulator,
+                &lengths,
+            );
+            std.mem.writeInt(u128, tag, accumulator, .big);
+            xorTag(tag, tag_mask);
+        }
+
+        /// Stitched ARM64 path for decryption. Whole blocks are decrypted by
+        /// the kernel before the tag is known, matching the contract that the
+        /// plaintext buffer is undefined when authentication fails.
+        fn decryptStitched(
+            self: *const Self,
+            plaintext: []u8,
+            ciphertext: []const u8,
+            tag: [tag_length]u8,
+            associated_data: []const u8,
+            initial_counter: [Aes.block.block_length]u8,
+            tag_mask: [tag_length]u8,
+        ) !void {
+            var accumulator = ghash_accelerated.absorbPadded(
+                &self.ghash,
+                0,
+                associated_data,
+            );
+
+            const full_len = ciphertext.len & ~(Aes.block.block_length - 1);
+            var counter = initial_counter;
+            if (full_len > 0) {
+                var xi: [Ghash.block_length]u8 = undefined;
+                std.mem.writeInt(u128, &xi, accumulator, .big);
+                aes_gcm_arm64.decrypt(
+                    &self.stitched.key,
+                    &self.stitched.htable,
+                    &xi,
+                    &counter,
+                    plaintext[0..full_len],
+                    ciphertext[0..full_len],
+                );
+                accumulator = std.mem.readInt(u128, &xi, .big);
+            }
+
+            const remainder = ciphertext[full_len..];
+            if (remainder.len > 0) {
+                accumulator = ghash_accelerated.absorbPadded(
+                    &self.ghash,
+                    accumulator,
+                    remainder,
+                );
+            }
+
+            var lengths: [Ghash.block_length]u8 = undefined;
+            std.mem.writeInt(
+                u64,
+                lengths[0..8],
+                @as(u64, @intCast(associated_data.len)) * 8,
+                .big,
+            );
+            std.mem.writeInt(
+                u64,
+                lengths[8..16],
+                @as(u64, @intCast(ciphertext.len)) * 8,
+                .big,
+            );
+            accumulator = ghash_accelerated.absorbPadded(
+                &self.ghash,
+                accumulator,
+                &lengths,
+            );
+
+            var computed_tag: [tag_length]u8 = undefined;
+            std.mem.writeInt(u128, &computed_tag, accumulator, .big);
+            xorTag(&computed_tag, tag_mask);
+            if (!std.crypto.timing_safe.eql(
+                [tag_length]u8,
+                computed_tag,
+                tag,
+            )) {
+                std.crypto.secureZero(u8, &computed_tag);
+                @memset(plaintext, undefined);
+                return error.AuthenticationFailed;
+            }
+
+            if (remainder.len > 0) {
+                aes_ctr.xor(
+                    Aes,
+                    self.aes,
+                    plaintext[full_len..],
+                    remainder,
+                    counter,
+                );
+            }
         }
     };
 }
