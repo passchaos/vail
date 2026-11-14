@@ -18,7 +18,7 @@ pub fn scalarMultBase(output: *[8]u64, scalar: *const [4]u64) void {
     if (comptime !enabled) {
         @compileError("ARM64 P-256 fixed-base scalar multiplication is unavailable");
     }
-    vailP256ScalarMulBaseArm64(
+    vailP256ScalarMulBaseAltArm64(
         output,
         scalar,
         4,
@@ -26,7 +26,7 @@ pub fn scalarMultBase(output: *[8]u64, scalar: *const [4]u64) void {
     );
 }
 
-extern fn vailP256ScalarMulBaseArm64(
+extern fn vailP256ScalarMulBaseAltArm64(
     result: *[8]u64,
     scalar: *const [4]u64,
     blocksize: u64,

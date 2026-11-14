@@ -15,10 +15,10 @@ pub fn scalarMult(
     scalar: *const [4]u64,
     point: *const [12]u64,
 ) void {
-    vailP256MontJacobianScalarMulArm64(output, scalar, point);
+    vailP256MontJacobianScalarMulAltArm64(output, scalar, point);
 }
 
-extern fn vailP256MontJacobianScalarMulArm64(
+extern fn vailP256MontJacobianScalarMulAltArm64(
     output: *[12]u64,
     scalar: *const [4]u64,
     point: *const [12]u64,
