@@ -24,14 +24,19 @@ SPDX headers are authoritative; this file is a summary.
 - Locations: `src/crypto/mlkem/*.S`.
 - These files are vendored and preprocessed for the ELF x86_64 SysV ABI.
 
-## OpenSSL SHA-512 assembly
+## OpenSSL SHA-2 assembly
 
 - License: Apache-2.0
 - Copyright: The OpenSSL Project Authors
-- Used for: SHA-512/SHA-384 AVX compressor.
-- Location: `src/crypto/sha512/avx.S`.
-- Derived from OpenSSL `sha512-x86_64.pl` and preprocessed for the ELF x86_64
-  SysV ABI.
+- Used for: SHA-512/SHA-384 compressors.
+- Locations:
+  - `src/crypto/hash/sha512/avx.S` — x86_64, derived from
+    `sha512-x86_64.pl`;
+  - `src/crypto/hash/sha512/arm64.S` — AArch64, derived from
+    `sha512-armv8.pl`.
+- Preprocessed for the ELF x86_64 or AArch64 SysV ABI. The AArch64 hardware
+  path is runtime-gated on `HWCAP_SHA512` and falls back to a portable
+  compressor when the extension is unavailable.
 
 ## BoringSSL / AWS-LC BEEU
 

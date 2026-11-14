@@ -1,8 +1,10 @@
-//! SHA-384 and SHA-512 with an in-tree x86_64 AVX compression backend.
+//! SHA-384 and SHA-512 with in-tree x86_64 AVX and AArch64 SHA-512
+//! compression backends.
 //!
-//! The compression schedule is derived from OpenSSL's Apache-2.0-licensed
-//! `sha512-x86_64.pl`. Other targets use Zig's standard-library SHA-2.
-// Copyright 2005-2016 The OpenSSL Project Authors. All Rights Reserved.
+//! The x86_64 schedule is derived from OpenSSL's Apache-2.0-licensed
+//! `sha512-x86_64.pl`; the AArch64 hardware path is derived from the matching
+//! `sha512-armv8.pl`. Other targets use Zig's standard-library SHA-2.
+// Copyright 2005-2020 The OpenSSL Project Authors. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 const std = @import("std");
@@ -10,13 +12,60 @@ const builtin = @import("builtin");
 
 const StdSha384 = std.crypto.hash.sha2.Sha384;
 const StdSha512 = std.crypto.hash.sha2.Sha512;
+const arm64 = @import("sha512/arm64.zig");
 
-pub const accelerated = builtin.cpu.arch == .x86_64 and
+const use_avx = builtin.cpu.arch == .x86_64 and
     builtin.os.tag == .linux and
     builtin.mode != .Debug and
     builtin.zig_backend != .stage2_c and
     std.Target.x86.featureSetHas(builtin.cpu.features, .ssse3) and
     std.Target.x86.featureSetHas(builtin.cpu.features, .avx);
+
+pub const accelerated = use_avx or arm64.enabled;
+
+const AvxBackend = struct {
+    fn compress(
+        state: *[8]u64,
+        blocks: *const [128]u8,
+        block_count: usize,
+    ) void {
+        vailSha512BlockAvx(state, blocks, block_count);
+    }
+
+    fn blocksAndFinal(
+        state: *[8]u64,
+        blocks: *const [128]u8,
+        block_count: usize,
+        final_block: *const [128]u8,
+    ) void {
+        vailSha512BlocksAndFinalAvx(
+            state,
+            blocks,
+            block_count,
+            final_block,
+        );
+    }
+};
+
+const Arm64Backend = struct {
+    fn compress(
+        state: *[8]u64,
+        blocks: *const [128]u8,
+        block_count: usize,
+    ) void {
+        arm64.compress(state, blocks, block_count);
+    }
+
+    fn blocksAndFinal(
+        state: *[8]u64,
+        blocks: *const [128]u8,
+        block_count: usize,
+        final_block: *const [128]u8,
+    ) void {
+        arm64.compress(state, blocks, block_count);
+        arm64.compress(state, final_block, 1);
+    }
+};
 
 const sha384_iv = [8]u64{
     0xcbbb9d5dc1059ed8,
@@ -39,8 +88,18 @@ const sha512_iv = [8]u64{
     0x5be0cd19137e2179,
 };
 
-const AcceleratedSha384 = AcceleratedSha2x64(sha384_iv, 48);
-const AcceleratedSha512 = AcceleratedSha2x64(sha512_iv, 64);
+const AcceleratedSha384 = if (use_avx)
+    AcceleratedSha2(AvxBackend, sha384_iv, 48)
+else if (arm64.enabled)
+    AcceleratedSha2(Arm64Backend, sha384_iv, 48)
+else
+    void;
+const AcceleratedSha512 = if (use_avx)
+    AcceleratedSha2(AvxBackend, sha512_iv, 64)
+else if (arm64.enabled)
+    AcceleratedSha2(Arm64Backend, sha512_iv, 64)
+else
+    void;
 
 pub const Sha384 = if (accelerated) AcceleratedSha384 else StdSha384;
 pub const Sha512 = if (accelerated) AcceleratedSha512 else StdSha512;
@@ -78,20 +137,25 @@ pub fn initWithPrefix64(
 /// seed expansion. The dedicated path avoids streaming bookkeeping while
 /// retaining the portable standard-library fallback.
 pub fn hash32(input: *const [32]u8, output: *[64]u8) void {
-    if (comptime !accelerated) {
+    if (comptime accelerated) {
+        var state = AcceleratedSha512.iv;
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&state));
+        var block = [_]u8{0} ** AcceleratedSha512.block_length;
+        defer std.crypto.secureZero(u8, &block);
+        block[0..input.len].* = input.*;
+        block[input.len] = 0x80;
+        std.mem.writeInt(u128, block[112..128], input.len * 8, .big);
+        AcceleratedSha512.compressBlocks(&state, &block, 1);
+        for (state, 0..) |word, word_index| {
+            std.mem.writeInt(
+                u64,
+                output[word_index * 8 ..][0..8],
+                word,
+                .big,
+            );
+        }
+    } else {
         StdSha512.hash(input, output, .{});
-        return;
-    }
-    var state = AcceleratedSha512.iv;
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&state));
-    var block = [_]u8{0} ** AcceleratedSha512.block_length;
-    defer std.crypto.secureZero(u8, &block);
-    block[0..input.len].* = input.*;
-    block[input.len] = 0x80;
-    std.mem.writeInt(u128, block[112..128], input.len * 8, .big);
-    vailSha512BlockAvx(&state, &block, 1);
-    for (state, 0..) |word, word_index| {
-        std.mem.writeInt(u64, output[word_index * 8 ..][0..8], word, .big);
     }
 }
 
@@ -241,7 +305,8 @@ pub fn PreparedHmac(comptime Hash: type) type {
     };
 }
 
-fn AcceleratedSha2x64(
+fn AcceleratedSha2(
+    comptime Backend: type,
     comptime initial_state: [8]u64,
     comptime output_length: usize,
 ) type {
@@ -285,7 +350,7 @@ fn AcceleratedSha2x64(
                     .big,
                 );
                 const blocks: *const [block_length]u8 = @ptrCast(input.ptr);
-                vailSha512BlocksAndFinalAvx(
+                Backend.blocksAndFinal(
                     &state,
                     blocks,
                     full_blocks,
@@ -293,7 +358,7 @@ fn AcceleratedSha2x64(
                 );
             } else if (full_blocks != 0) {
                 const blocks: *const [block_length]u8 = @ptrCast(input.ptr);
-                vailSha512BlockAvx(&state, blocks, full_blocks);
+                Backend.compress(&state, blocks, full_blocks);
             }
 
             if (remainder.len != 0 or full_blocks == 0) {
@@ -302,7 +367,7 @@ fn AcceleratedSha2x64(
                 @memcpy(block[0..remainder.len], remainder);
                 block[remainder.len] = 0x80;
                 if (remainder.len > block_length - 17) {
-                    vailSha512BlockAvx(&state, &block, 1);
+                    AcceleratedSha512.compressBlocks(&state, &block, 1);
                     @memset(&block, 0);
                 }
                 std.mem.writeInt(
@@ -311,7 +376,7 @@ fn AcceleratedSha2x64(
                     @as(u128, input.len) * 8,
                     .big,
                 );
-                vailSha512BlockAvx(&state, &block, 1);
+                AcceleratedSha512.compressBlocks(&state, &block, 1);
             }
 
             writeDigest(&state, output);
@@ -406,7 +471,7 @@ fn AcceleratedSha2x64(
                 .big,
             );
             const blocks: *const [block_length]u8 = @ptrCast(input.ptr);
-            vailSha512BlocksAndFinalAvx(
+            Backend.blocksAndFinal(
                 &state.s,
                 blocks,
                 input.len / block_length,
@@ -430,27 +495,35 @@ fn AcceleratedSha2x64(
             }
         }
 
+        pub fn compressBlocks(
+            state: *[8]u64,
+            blocks: *const [block_length]u8,
+            block_count: usize,
+        ) void {
+            Backend.compress(state, blocks, block_count);
+        }
+
         fn compress(
             state: *Self,
             blocks: *const [block_length]u8,
             block_count: usize,
         ) void {
-            vailSha512BlockAvx(&state.s, blocks, block_count);
+            Backend.compress(&state.s, blocks, block_count);
         }
     };
 }
 
 extern fn vailSha512BlockAvx(
     state: *[8]u64,
-    blocks: *const [AcceleratedSha512.block_length]u8,
+    blocks: *const [128]u8,
     block_count: usize,
 ) callconv(.c) void;
 
 extern fn vailSha512BlocksAndFinalAvx(
     state: *[8]u64,
-    blocks: *const [AcceleratedSha512.block_length]u8,
+    blocks: *const [128]u8,
     block_count: usize,
-    final_block: *const [AcceleratedSha512.block_length]u8,
+    final_block: *const [128]u8,
 ) callconv(.c) void;
 
 test "accelerated SHA-512 matches Zig std across block boundaries" {
@@ -560,5 +633,5 @@ test "accelerated HMAC-SHA-512 matches Zig std" {
 }
 
 comptime {
-    if (accelerated) asm (@embedFile("sha512/avx.S"));
+    if (use_avx) asm (@embedFile("sha512/avx.S"));
 }

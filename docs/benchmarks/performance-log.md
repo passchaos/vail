@@ -1171,6 +1171,23 @@ per operation so sub-nanosecond differences are not hidden by integer
 rounding. Use `bench-sha512-primitives` and `bench-aws-lc-sha512-primitives` to
 reproduce the independent binaries.
 
+On the 2026-11-14 Jetson AGX Thor ARM64 host, the in-tree ARMv8 SHA-512
+compressor was added behind a runtime `HWCAP_SHA512` check with a portable
+fallback. Three repeated `bench-sha512-primitives` /
+`bench-aws-lc-sha512-primitives` runs produced these medians (single-run
+samples, not ABBA quartets):
+
+| ARM64 SHA-2 primitive | Vail | AWS-LC | Result |
+| --- | ---: | ---: | --- |
+| SHA-384 digest, 1 KiB | 1,186 ns | 1,190 ns | Vail 0.3% lower |
+| SHA-512 digest, 1 KiB | 1,186 ns | 1,221 ns | Vail 2.9% lower |
+| HMAC-SHA-512, prepared 1 KiB | 1,326 ns | 1,313 ns | Vail 1.0% higher |
+
+The hardware path reduced Vail's previous portable medians from about 2,784 ns
+to 1,186 ns for both 1 KiB SHA-384 and SHA-512 digests (2.35x), and prepared
+HMAC-SHA-512 from 3,133 ns to 1,326 ns (2.36x). The portable compressor remains
+the fallback when the kernel does not advertise SHA-512.
+
 Sixteen fixed-CPU-14, order-balanced A-B-B-A samples of independent
 ReleaseFast binaries measured:
 

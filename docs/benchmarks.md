@@ -43,6 +43,7 @@ representative medians, not a complete matrix.
 | TLS 1.2 full handshake (PKCS#1) | 579,649 ns | rustls/AWS-LC 619,935 ns | 6.50% lower latency |
 | AES-128-GCM seal (x86_64) | 187.5 ns | AWS-LC 241 ns | 1.29x |
 | SHA-256 1 KiB | 573.7 ns | AWS-LC 581.8 ns | 1.4% lower latency |
+| ARM64 SHA-512 1 KiB | 1,186 ns | AWS-LC 1,221 ns | 2.9% lower latency |
 | ARM64 X25519 fixed-base | 7,829 ns | AWS-LC 9,915 ns | 21.0% lower latency |
 | ARM64 P-256 prepared verify | 15,520.5 ns | AWS-LC 49,135 ns | 68.4% lower latency |
 | ML-DSA-44 prepared-key verify | 7,696.5 ns | AWS-LC 22,480.6 ns | 2.92x |

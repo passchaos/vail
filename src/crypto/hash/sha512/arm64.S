@@ -1,0 +1,576 @@
+# Copyright 2014-2020 The OpenSSL Project Authors. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Derived from OpenSSL/BoringSSL sha512-armv8.pl and preprocessed for
+# the ELF AArch64 SysV ABI. The hardware path uses ARMv8.2 SHA-512
+# instructions via .inst encodings so the assembler does not need the
+# sha512 feature enabled globally.
+
+.section .rodata
+.align 6
+.type .LvailSha512K512,%object
+.LvailSha512K512:
+.quad 0x428a2f98d728ae22,0x7137449123ef65cd
+.quad 0xb5c0fbcfec4d3b2f,0xe9b5dba58189dbbc
+.quad 0x3956c25bf348b538,0x59f111f1b605d019
+.quad 0x923f82a4af194f9b,0xab1c5ed5da6d8118
+.quad 0xd807aa98a3030242,0x12835b0145706fbe
+.quad 0x243185be4ee4b28c,0x550c7dc3d5ffb4e2
+.quad 0x72be5d74f27b896f,0x80deb1fe3b1696b1
+.quad 0x9bdc06a725c71235,0xc19bf174cf692694
+.quad 0xe49b69c19ef14ad2,0xefbe4786384f25e3
+.quad 0x0fc19dc68b8cd5b5,0x240ca1cc77ac9c65
+.quad 0x2de92c6f592b0275,0x4a7484aa6ea6e483
+.quad 0x5cb0a9dcbd41fbd4,0x76f988da831153b5
+.quad 0x983e5152ee66dfab,0xa831c66d2db43210
+.quad 0xb00327c898fb213f,0xbf597fc7beef0ee4
+.quad 0xc6e00bf33da88fc2,0xd5a79147930aa725
+.quad 0x06ca6351e003826f,0x142929670a0e6e70
+.quad 0x27b70a8546d22ffc,0x2e1b21385c26c926
+.quad 0x4d2c6dfc5ac42aed,0x53380d139d95b3df
+.quad 0x650a73548baf63de,0x766a0abb3c77b2a8
+.quad 0x81c2c92e47edaee6,0x92722c851482353b
+.quad 0xa2bfe8a14cf10364,0xa81a664bbc423001
+.quad 0xc24b8b70d0f89791,0xc76c51a30654be30
+.quad 0xd192e819d6ef5218,0xd69906245565a910
+.quad 0xf40e35855771202a,0x106aa07032bbd1b8
+.quad 0x19a4c116b8d2d0c8,0x1e376c085141ab53
+.quad 0x2748774cdf8eeb99,0x34b0bcb5e19b48a8
+.quad 0x391c0cb3c5c95a63,0x4ed8aa4ae3418acb
+.quad 0x5b9cca4f7763e373,0x682e6ff3d6b2b8a3
+.quad 0x748f82ee5defb2fc,0x78a5636f43172f60
+.quad 0x84c87814a1f0ab72,0x8cc702081a6439ec
+.quad 0x90befffa23631e28,0xa4506cebde82bde9
+.quad 0xbef9a3f7b2c67915,0xc67178f2e372532b
+.quad 0xca273eceea26619c,0xd186b8c721c0c207
+.quad 0xeada7dd6cde0eb1e,0xf57d4f7fee6ed178
+.quad 0x06f067aa72176fba,0x0a637dc5a2c898a6
+.quad 0x113f9804bef90dae,0x1b710b35131c471b
+.quad 0x28db77f523047d84,0x32caab7b40c72493
+.quad 0x3c9ebe0a15c9bebc,0x431d67c49c100d4c
+.quad 0x4cc5d4becb3e42b6,0x597f299cfc657e2a
+.quad 0x5fcb6fab3ad6faec,0x6c44198c4a475817
+.quad 0
+.size .LvailSha512K512,.-.LvailSha512K512
+.align 2
+
+.text
+
+.globl vailSha512BlockDataOrderArm64
+.type vailSha512BlockDataOrderArm64,%function
+.align 6
+vailSha512BlockDataOrderArm64:
+
+ stp x29,x30,[sp,#-16]!
+ add x29,sp,#0
+
+ ld1 {v16.16b,v17.16b,v18.16b,v19.16b},[x1],#64
+ ld1 {v20.16b,v21.16b,v22.16b,v23.16b},[x1],#64
+
+ ld1 {v0.2d,v1.2d,v2.2d,v3.2d},[x0]
+ adrp x3,.LvailSha512K512
+ add x3,x3,:lo12:.LvailSha512K512
+
+ rev64 v16.16b,v16.16b
+ rev64 v17.16b,v17.16b
+ rev64 v18.16b,v18.16b
+ rev64 v19.16b,v19.16b
+ rev64 v20.16b,v20.16b
+ rev64 v21.16b,v21.16b
+ rev64 v22.16b,v22.16b
+ rev64 v23.16b,v23.16b
+ b .Loop_hw
+
+.align 4
+.Loop_hw:
+ ld1 {v24.2d},[x3],#16
+ subs x2,x2,#1
+ sub x4,x1,#128
+ orr v26.16b,v0.16b,v0.16b
+ orr v27.16b,v1.16b,v1.16b
+ orr v28.16b,v2.16b,v2.16b
+ orr v29.16b,v3.16b,v3.16b
+ csel x1,x1,x4,ne
+ add v24.2d,v24.2d,v16.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v2.16b,v3.16b,#8
+ ext v6.16b,v1.16b,v2.16b,#8
+ add v3.2d,v3.2d,v24.2d
+.inst 0xcec08230
+ ext v7.16b,v20.16b,v21.16b,#8
+.inst 0xce6680a3
+.inst 0xce678af0
+ add v4.2d,v1.2d,v3.2d
+.inst 0xce608423
+ add v25.2d,v25.2d,v17.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v4.16b,v2.16b,#8
+ ext v6.16b,v0.16b,v4.16b,#8
+ add v2.2d,v2.2d,v25.2d
+.inst 0xcec08251
+ ext v7.16b,v21.16b,v22.16b,#8
+.inst 0xce6680a2
+.inst 0xce678a11
+ add v1.2d,v0.2d,v2.2d
+.inst 0xce638402
+ add v24.2d,v24.2d,v18.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v1.16b,v4.16b,#8
+ ext v6.16b,v3.16b,v1.16b,#8
+ add v4.2d,v4.2d,v24.2d
+.inst 0xcec08272
+ ext v7.16b,v22.16b,v23.16b,#8
+.inst 0xce6680a4
+.inst 0xce678a32
+ add v0.2d,v3.2d,v4.2d
+.inst 0xce628464
+ add v25.2d,v25.2d,v19.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v0.16b,v1.16b,#8
+ ext v6.16b,v2.16b,v0.16b,#8
+ add v1.2d,v1.2d,v25.2d
+.inst 0xcec08293
+ ext v7.16b,v23.16b,v16.16b,#8
+.inst 0xce6680a1
+.inst 0xce678a53
+ add v3.2d,v2.2d,v1.2d
+.inst 0xce648441
+ add v24.2d,v24.2d,v20.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v3.16b,v0.16b,#8
+ ext v6.16b,v4.16b,v3.16b,#8
+ add v0.2d,v0.2d,v24.2d
+.inst 0xcec082b4
+ ext v7.16b,v16.16b,v17.16b,#8
+.inst 0xce6680a0
+.inst 0xce678a74
+ add v2.2d,v4.2d,v0.2d
+.inst 0xce618480
+ add v25.2d,v25.2d,v21.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v2.16b,v3.16b,#8
+ ext v6.16b,v1.16b,v2.16b,#8
+ add v3.2d,v3.2d,v25.2d
+.inst 0xcec082d5
+ ext v7.16b,v17.16b,v18.16b,#8
+.inst 0xce6680a3
+.inst 0xce678a95
+ add v4.2d,v1.2d,v3.2d
+.inst 0xce608423
+ add v24.2d,v24.2d,v22.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v4.16b,v2.16b,#8
+ ext v6.16b,v0.16b,v4.16b,#8
+ add v2.2d,v2.2d,v24.2d
+.inst 0xcec082f6
+ ext v7.16b,v18.16b,v19.16b,#8
+.inst 0xce6680a2
+.inst 0xce678ab6
+ add v1.2d,v0.2d,v2.2d
+.inst 0xce638402
+ add v25.2d,v25.2d,v23.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v1.16b,v4.16b,#8
+ ext v6.16b,v3.16b,v1.16b,#8
+ add v4.2d,v4.2d,v25.2d
+.inst 0xcec08217
+ ext v7.16b,v19.16b,v20.16b,#8
+.inst 0xce6680a4
+.inst 0xce678ad7
+ add v0.2d,v3.2d,v4.2d
+.inst 0xce628464
+ add v24.2d,v24.2d,v16.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v0.16b,v1.16b,#8
+ ext v6.16b,v2.16b,v0.16b,#8
+ add v1.2d,v1.2d,v24.2d
+.inst 0xcec08230
+ ext v7.16b,v20.16b,v21.16b,#8
+.inst 0xce6680a1
+.inst 0xce678af0
+ add v3.2d,v2.2d,v1.2d
+.inst 0xce648441
+ add v25.2d,v25.2d,v17.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v3.16b,v0.16b,#8
+ ext v6.16b,v4.16b,v3.16b,#8
+ add v0.2d,v0.2d,v25.2d
+.inst 0xcec08251
+ ext v7.16b,v21.16b,v22.16b,#8
+.inst 0xce6680a0
+.inst 0xce678a11
+ add v2.2d,v4.2d,v0.2d
+.inst 0xce618480
+ add v24.2d,v24.2d,v18.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v2.16b,v3.16b,#8
+ ext v6.16b,v1.16b,v2.16b,#8
+ add v3.2d,v3.2d,v24.2d
+.inst 0xcec08272
+ ext v7.16b,v22.16b,v23.16b,#8
+.inst 0xce6680a3
+.inst 0xce678a32
+ add v4.2d,v1.2d,v3.2d
+.inst 0xce608423
+ add v25.2d,v25.2d,v19.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v4.16b,v2.16b,#8
+ ext v6.16b,v0.16b,v4.16b,#8
+ add v2.2d,v2.2d,v25.2d
+.inst 0xcec08293
+ ext v7.16b,v23.16b,v16.16b,#8
+.inst 0xce6680a2
+.inst 0xce678a53
+ add v1.2d,v0.2d,v2.2d
+.inst 0xce638402
+ add v24.2d,v24.2d,v20.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v1.16b,v4.16b,#8
+ ext v6.16b,v3.16b,v1.16b,#8
+ add v4.2d,v4.2d,v24.2d
+.inst 0xcec082b4
+ ext v7.16b,v16.16b,v17.16b,#8
+.inst 0xce6680a4
+.inst 0xce678a74
+ add v0.2d,v3.2d,v4.2d
+.inst 0xce628464
+ add v25.2d,v25.2d,v21.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v0.16b,v1.16b,#8
+ ext v6.16b,v2.16b,v0.16b,#8
+ add v1.2d,v1.2d,v25.2d
+.inst 0xcec082d5
+ ext v7.16b,v17.16b,v18.16b,#8
+.inst 0xce6680a1
+.inst 0xce678a95
+ add v3.2d,v2.2d,v1.2d
+.inst 0xce648441
+ add v24.2d,v24.2d,v22.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v3.16b,v0.16b,#8
+ ext v6.16b,v4.16b,v3.16b,#8
+ add v0.2d,v0.2d,v24.2d
+.inst 0xcec082f6
+ ext v7.16b,v18.16b,v19.16b,#8
+.inst 0xce6680a0
+.inst 0xce678ab6
+ add v2.2d,v4.2d,v0.2d
+.inst 0xce618480
+ add v25.2d,v25.2d,v23.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v2.16b,v3.16b,#8
+ ext v6.16b,v1.16b,v2.16b,#8
+ add v3.2d,v3.2d,v25.2d
+.inst 0xcec08217
+ ext v7.16b,v19.16b,v20.16b,#8
+.inst 0xce6680a3
+.inst 0xce678ad7
+ add v4.2d,v1.2d,v3.2d
+.inst 0xce608423
+ add v24.2d,v24.2d,v16.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v4.16b,v2.16b,#8
+ ext v6.16b,v0.16b,v4.16b,#8
+ add v2.2d,v2.2d,v24.2d
+.inst 0xcec08230
+ ext v7.16b,v20.16b,v21.16b,#8
+.inst 0xce6680a2
+.inst 0xce678af0
+ add v1.2d,v0.2d,v2.2d
+.inst 0xce638402
+ add v25.2d,v25.2d,v17.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v1.16b,v4.16b,#8
+ ext v6.16b,v3.16b,v1.16b,#8
+ add v4.2d,v4.2d,v25.2d
+.inst 0xcec08251
+ ext v7.16b,v21.16b,v22.16b,#8
+.inst 0xce6680a4
+.inst 0xce678a11
+ add v0.2d,v3.2d,v4.2d
+.inst 0xce628464
+ add v24.2d,v24.2d,v18.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v0.16b,v1.16b,#8
+ ext v6.16b,v2.16b,v0.16b,#8
+ add v1.2d,v1.2d,v24.2d
+.inst 0xcec08272
+ ext v7.16b,v22.16b,v23.16b,#8
+.inst 0xce6680a1
+.inst 0xce678a32
+ add v3.2d,v2.2d,v1.2d
+.inst 0xce648441
+ add v25.2d,v25.2d,v19.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v3.16b,v0.16b,#8
+ ext v6.16b,v4.16b,v3.16b,#8
+ add v0.2d,v0.2d,v25.2d
+.inst 0xcec08293
+ ext v7.16b,v23.16b,v16.16b,#8
+.inst 0xce6680a0
+.inst 0xce678a53
+ add v2.2d,v4.2d,v0.2d
+.inst 0xce618480
+ add v24.2d,v24.2d,v20.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v2.16b,v3.16b,#8
+ ext v6.16b,v1.16b,v2.16b,#8
+ add v3.2d,v3.2d,v24.2d
+.inst 0xcec082b4
+ ext v7.16b,v16.16b,v17.16b,#8
+.inst 0xce6680a3
+.inst 0xce678a74
+ add v4.2d,v1.2d,v3.2d
+.inst 0xce608423
+ add v25.2d,v25.2d,v21.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v4.16b,v2.16b,#8
+ ext v6.16b,v0.16b,v4.16b,#8
+ add v2.2d,v2.2d,v25.2d
+.inst 0xcec082d5
+ ext v7.16b,v17.16b,v18.16b,#8
+.inst 0xce6680a2
+.inst 0xce678a95
+ add v1.2d,v0.2d,v2.2d
+.inst 0xce638402
+ add v24.2d,v24.2d,v22.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v1.16b,v4.16b,#8
+ ext v6.16b,v3.16b,v1.16b,#8
+ add v4.2d,v4.2d,v24.2d
+.inst 0xcec082f6
+ ext v7.16b,v18.16b,v19.16b,#8
+.inst 0xce6680a4
+.inst 0xce678ab6
+ add v0.2d,v3.2d,v4.2d
+.inst 0xce628464
+ add v25.2d,v25.2d,v23.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v0.16b,v1.16b,#8
+ ext v6.16b,v2.16b,v0.16b,#8
+ add v1.2d,v1.2d,v25.2d
+.inst 0xcec08217
+ ext v7.16b,v19.16b,v20.16b,#8
+.inst 0xce6680a1
+.inst 0xce678ad7
+ add v3.2d,v2.2d,v1.2d
+.inst 0xce648441
+ add v24.2d,v24.2d,v16.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v3.16b,v0.16b,#8
+ ext v6.16b,v4.16b,v3.16b,#8
+ add v0.2d,v0.2d,v24.2d
+.inst 0xcec08230
+ ext v7.16b,v20.16b,v21.16b,#8
+.inst 0xce6680a0
+.inst 0xce678af0
+ add v2.2d,v4.2d,v0.2d
+.inst 0xce618480
+ add v25.2d,v25.2d,v17.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v2.16b,v3.16b,#8
+ ext v6.16b,v1.16b,v2.16b,#8
+ add v3.2d,v3.2d,v25.2d
+.inst 0xcec08251
+ ext v7.16b,v21.16b,v22.16b,#8
+.inst 0xce6680a3
+.inst 0xce678a11
+ add v4.2d,v1.2d,v3.2d
+.inst 0xce608423
+ add v24.2d,v24.2d,v18.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v4.16b,v2.16b,#8
+ ext v6.16b,v0.16b,v4.16b,#8
+ add v2.2d,v2.2d,v24.2d
+.inst 0xcec08272
+ ext v7.16b,v22.16b,v23.16b,#8
+.inst 0xce6680a2
+.inst 0xce678a32
+ add v1.2d,v0.2d,v2.2d
+.inst 0xce638402
+ add v25.2d,v25.2d,v19.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v1.16b,v4.16b,#8
+ ext v6.16b,v3.16b,v1.16b,#8
+ add v4.2d,v4.2d,v25.2d
+.inst 0xcec08293
+ ext v7.16b,v23.16b,v16.16b,#8
+.inst 0xce6680a4
+.inst 0xce678a53
+ add v0.2d,v3.2d,v4.2d
+.inst 0xce628464
+ add v24.2d,v24.2d,v20.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v0.16b,v1.16b,#8
+ ext v6.16b,v2.16b,v0.16b,#8
+ add v1.2d,v1.2d,v24.2d
+.inst 0xcec082b4
+ ext v7.16b,v16.16b,v17.16b,#8
+.inst 0xce6680a1
+.inst 0xce678a74
+ add v3.2d,v2.2d,v1.2d
+.inst 0xce648441
+ add v25.2d,v25.2d,v21.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v3.16b,v0.16b,#8
+ ext v6.16b,v4.16b,v3.16b,#8
+ add v0.2d,v0.2d,v25.2d
+.inst 0xcec082d5
+ ext v7.16b,v17.16b,v18.16b,#8
+.inst 0xce6680a0
+.inst 0xce678a95
+ add v2.2d,v4.2d,v0.2d
+.inst 0xce618480
+ add v24.2d,v24.2d,v22.2d
+ ld1 {v25.2d},[x3],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v2.16b,v3.16b,#8
+ ext v6.16b,v1.16b,v2.16b,#8
+ add v3.2d,v3.2d,v24.2d
+.inst 0xcec082f6
+ ext v7.16b,v18.16b,v19.16b,#8
+.inst 0xce6680a3
+.inst 0xce678ab6
+ add v4.2d,v1.2d,v3.2d
+.inst 0xce608423
+ add v25.2d,v25.2d,v23.2d
+ ld1 {v24.2d},[x3],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v4.16b,v2.16b,#8
+ ext v6.16b,v0.16b,v4.16b,#8
+ add v2.2d,v2.2d,v25.2d
+.inst 0xcec08217
+ ext v7.16b,v19.16b,v20.16b,#8
+.inst 0xce6680a2
+.inst 0xce678ad7
+ add v1.2d,v0.2d,v2.2d
+.inst 0xce638402
+ ld1 {v25.2d},[x3],#16
+ add v24.2d,v24.2d,v16.2d
+ ld1 {v16.16b},[x1],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v1.16b,v4.16b,#8
+ ext v6.16b,v3.16b,v1.16b,#8
+ add v4.2d,v4.2d,v24.2d
+.inst 0xce6680a4
+ rev64 v16.16b,v16.16b
+ add v0.2d,v3.2d,v4.2d
+.inst 0xce628464
+ ld1 {v24.2d},[x3],#16
+ add v25.2d,v25.2d,v17.2d
+ ld1 {v17.16b},[x1],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v0.16b,v1.16b,#8
+ ext v6.16b,v2.16b,v0.16b,#8
+ add v1.2d,v1.2d,v25.2d
+.inst 0xce6680a1
+ rev64 v17.16b,v17.16b
+ add v3.2d,v2.2d,v1.2d
+.inst 0xce648441
+ ld1 {v25.2d},[x3],#16
+ add v24.2d,v24.2d,v18.2d
+ ld1 {v18.16b},[x1],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v3.16b,v0.16b,#8
+ ext v6.16b,v4.16b,v3.16b,#8
+ add v0.2d,v0.2d,v24.2d
+.inst 0xce6680a0
+ rev64 v18.16b,v18.16b
+ add v2.2d,v4.2d,v0.2d
+.inst 0xce618480
+ ld1 {v24.2d},[x3],#16
+ add v25.2d,v25.2d,v19.2d
+ ld1 {v19.16b},[x1],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v2.16b,v3.16b,#8
+ ext v6.16b,v1.16b,v2.16b,#8
+ add v3.2d,v3.2d,v25.2d
+.inst 0xce6680a3
+ rev64 v19.16b,v19.16b
+ add v4.2d,v1.2d,v3.2d
+.inst 0xce608423
+ ld1 {v25.2d},[x3],#16
+ add v24.2d,v24.2d,v20.2d
+ ld1 {v20.16b},[x1],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v4.16b,v2.16b,#8
+ ext v6.16b,v0.16b,v4.16b,#8
+ add v2.2d,v2.2d,v24.2d
+.inst 0xce6680a2
+ rev64 v20.16b,v20.16b
+ add v1.2d,v0.2d,v2.2d
+.inst 0xce638402
+ ld1 {v24.2d},[x3],#16
+ add v25.2d,v25.2d,v21.2d
+ ld1 {v21.16b},[x1],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v1.16b,v4.16b,#8
+ ext v6.16b,v3.16b,v1.16b,#8
+ add v4.2d,v4.2d,v25.2d
+.inst 0xce6680a4
+ rev64 v21.16b,v21.16b
+ add v0.2d,v3.2d,v4.2d
+.inst 0xce628464
+ ld1 {v25.2d},[x3],#16
+ add v24.2d,v24.2d,v22.2d
+ ld1 {v22.16b},[x1],#16
+ ext v24.16b,v24.16b,v24.16b,#8
+ ext v5.16b,v0.16b,v1.16b,#8
+ ext v6.16b,v2.16b,v0.16b,#8
+ add v1.2d,v1.2d,v24.2d
+.inst 0xce6680a1
+ rev64 v22.16b,v22.16b
+ add v3.2d,v2.2d,v1.2d
+.inst 0xce648441
+ sub x3,x3,#80*8
+ add v25.2d,v25.2d,v23.2d
+ ld1 {v23.16b},[x1],#16
+ ext v25.16b,v25.16b,v25.16b,#8
+ ext v5.16b,v3.16b,v0.16b,#8
+ ext v6.16b,v4.16b,v3.16b,#8
+ add v0.2d,v0.2d,v25.2d
+.inst 0xce6680a0
+ rev64 v23.16b,v23.16b
+ add v2.2d,v4.2d,v0.2d
+.inst 0xce618480
+ add v0.2d,v0.2d,v26.2d
+ add v1.2d,v1.2d,v27.2d
+ add v2.2d,v2.2d,v28.2d
+ add v3.2d,v3.2d,v29.2d
+
+ cbnz x2,.Loop_hw
+
+ st1 {v0.2d,v1.2d,v2.2d,v3.2d},[x0]
+
+ ldr x29,[sp],#16
+ ret
+.size vailSha512BlockDataOrderArm64,.-vailSha512BlockDataOrderArm64

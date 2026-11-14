@@ -8,7 +8,7 @@ SPDX header; this page summarizes the major components.
 | --- | --- | --- |
 | s2n-bignum | Apache-2.0 OR ISC OR MIT-0 | P-256/P-384/P-521, X25519, Ed25519, Keccak, and ML-DSA assembly schedules under `src/crypto/ec/`, `src/crypto/sign/`, `src/crypto/hash/`, and `src/crypto/pq/`; per-file headers record the pinned revision |
 | mlkem-native / s2n-bignum | Apache-2.0 OR ISC OR MIT | ML-KEM AVX2 kernels under `src/crypto/pq/mlkem/` |
-| OpenSSL SHA-512 x86_64 assembly | Apache-2.0 | `src/crypto/hash/sha512/avx.S`, derived from OpenSSL `sha512-x86_64.pl` |
+| OpenSSL SHA-2 assembly | Apache-2.0 | `src/crypto/hash/sha512/avx.S` (x86_64, derived from `sha512-x86_64.pl`) and `src/crypto/hash/sha512/arm64.S` (AArch64, derived from `sha512-armv8.pl`); the ARM64 hardware path is runtime-gated on `HWCAP_SHA512` with a portable fallback |
 | BoringSSL / AWS-LC BEEU | ISC | P-256 public scalar inverse under `src/crypto/ec/`, pinned at BoringSSL `7eab8046` |
 | Unicode 3.2 data | Unicode Data Files and Software License | `src/x509/stringprep_data.zig`, generated from Unicode 3.2 and RFC 3454 tables |
 | Zig standard library | MIT | SHA-256 and other primitives used directly where no in-tree accelerated path exists |

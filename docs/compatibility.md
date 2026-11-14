@@ -76,7 +76,7 @@ This is a concise summary. The exhaustive feature inventory is in
 | Platform | Status |
 | --- | --- |
 | Linux x86_64 | Primary optimized target |
-| Linux AArch64 | Optimized AES/PMULL and s2n-bignum paths |
+| Linux AArch64 | Optimized AES/PMULL, s2n-bignum P-256/X25519, and runtime-gated SHA-512 paths (portable fallback without `HWCAP_SHA512`) |
 | Other Zig targets | Portable implementations; acceleration is currently Linux-targeted |
 | Windows/macOS | Portable paths; target-specific accelerated kernels are not currently provided |
 
