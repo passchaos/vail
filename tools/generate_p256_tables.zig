@@ -75,6 +75,33 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
+    var scalarmul: [520][8]u64 = undefined;
+    for (0..64) |block| {
+        for (1..9) |multiple| {
+            const value: u256 = @as(u256, multiple) << @intCast(4 * block);
+            var scalar = [_]u8{0} ** 32;
+            std.mem.writeInt(u256, &scalar, value, .little);
+            const point = try P256.basePoint.mulPublic(scalar, .little);
+            const affine = point.affineCoordinates();
+            const entry = 8 * block + (multiple - 1);
+            scalarmul[entry][0..4].* = affine.x.limbs;
+            scalarmul[entry][4..8].* = affine.y.limbs;
+        }
+    }
+    // The kernel's loop covers blocksize * block <= 256, so the 65th block
+    // holds 2^256 * multiple * P. Its scalar digits are always zero, but the
+    // table entries are still read by the constant-time scan.
+    var base256 = P256.basePoint;
+    for (0..256) |_| base256 = base256.dbl();
+    for (1..9) |multiple| {
+        var scalar = [_]u8{0} ** 32;
+        scalar[0] = @intCast(multiple);
+        const point = try base256.mulPublic(scalar, .little);
+        const affine = point.affineCoordinates();
+        const entry = 512 + (multiple - 1);
+        scalarmul[entry][0..4].* = affine.x.limbs;
+        scalarmul[entry][4..8].* = affine.y.limbs;
+    }
     var ecdh: [ecdh_entries][8]u64 = undefined;
     var block_point = P256.basePoint;
     for (0..ecdh_blocks) |block| {
@@ -146,6 +173,14 @@ pub fn main(init: std.process.Init) !void {
             }
             try writer.writeAll("        },\n");
         }
+        try writer.writeAll("    },\n");
+    }
+    try writer.writeAll("};\n");
+    try writer.writeByte('\n');
+    try writer.writeAll("pub const base_scalarmul_4: [520][8]u64 = .{\n");
+    for (scalarmul) |entry| {
+        try writer.writeAll("    .{\n");
+        for (entry) |limb| try writer.print("        {d},\n", .{limb});
         try writer.writeAll("    },\n");
     }
     try writer.writeAll("};\n");

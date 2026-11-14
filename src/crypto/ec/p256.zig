@@ -14,6 +14,7 @@ const base_mul_x86 = @import("p256_base_mul_x86.zig");
 const scalar_inv_arm64 = @import("p256_scalar_inv_arm64.zig");
 const scalar_inv_x86 = @import("p256_scalar_inv_x86.zig");
 const scalar_mul_x86 = @import("p256_scalar_mul_x86.zig");
+const scalarmulbase_arm64 = @import("p256_scalarmulbase_arm64.zig");
 const sha256 = @import("../hash/sha256.zig");
 const FastSha512 = @import("../hash/sha512.zig").Sha512;
 
@@ -712,6 +713,15 @@ noinline fn secretBaseMulXCanonicalAssign(
             scalar,
             &table_values.base_ecdh_block6,
         );
+        return;
+    }
+    if (comptime scalarmulbase_arm64.enabled) {
+        var coordinates: [8]u64 = undefined;
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&coordinates));
+        scalarmulbase_arm64.scalarMultBase(&coordinates, scalar);
+        var x_bytes: [32]u8 = undefined;
+        @memcpy(&x_bytes, std.mem.asBytes(&coordinates)[0..32]);
+        output.* = decodeScalar(x_bytes);
         return;
     }
     var affine: AffinePoint = undefined;

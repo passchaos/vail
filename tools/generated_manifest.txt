@@ -1,7 +1,7 @@
 # Generated-file drift manifest.
 # Format: <sha256>  <path>
 # Regenerate with: sha256sum <files>
-02b7249bbb24e8021d63f777506106f7afad16468da294c5be59b790700913f0  src/crypto/ec/p256_tables.zig
+0e796bcc5ebda74b20b935a3c0f29af006c32039c29ec4002047316cbfe4dc65  src/crypto/ec/p256_tables.zig
 51d0329cee215ce7cd661af405d6d756072cd9d9019d574eafce4c6e59dae986  src/crypto/ec/p384_tables.zig
 faf9d750ac3bc5214fe5c6172bbb0cf7724ca07b24f85c90cdaf36f7dfac88ae  src/crypto/sign/ed25519_base_table.zig
 284c808e61815ccd24588405efc98a6c1bd0b04c4b348522c9ff4951d506a9e1  src/crypto/sign/ed25519_verify_table.zig
