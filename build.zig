@@ -149,6 +149,24 @@ pub fn build(b: *std.Build) void {
     );
     for (interop_deps.items) |dep| interop_all_step.dependOn(dep);
 
+    // Compile every local benchmark executable without running it. This keeps
+    // benchmark source paths and imports covered by a fast gate; the `bench`
+    // aggregate step above also runs reference-implementation system commands
+    // that may not be available in every environment.
+    const bench_compile_step = b.step(
+        "bench-compile",
+        "Compile local benchmark executables without running them",
+    );
+    for (bench_deps.items) |top| {
+        for (top.dependencies.items) |dependency| {
+            for (dependency.dependencies.items) |inner| {
+                if (inner.cast(std.Build.Step.Compile)) |compile| {
+                    bench_compile_step.dependOn(&compile.step);
+                }
+            }
+        }
+    }
+
     const fmt_paths = &.{
         "build.zig",
         "src",

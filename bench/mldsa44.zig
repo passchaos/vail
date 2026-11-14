@@ -257,7 +257,7 @@ fn decodeHex(comptime encoded: []const u8) [encoded.len / 2]u8 {
 }
 
 fn fixedSignature() [MlDsa.Signature.encoded_length]u8 {
-    const encoded = @embedFile("../testdata/mldsa44_signature.hex");
+    const encoded = @embedFile("testdata/mldsa44_signature.hex");
     var result: [MlDsa.Signature.encoded_length]u8 = undefined;
     var high: ?u8 = null;
     var output_index: usize = 0;
