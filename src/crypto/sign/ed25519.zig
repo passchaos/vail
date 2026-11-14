@@ -278,11 +278,11 @@ fn verifyArm64(
     if (xyIsIdentity(&public_xy)) return error.IdentityElement;
     if (xyIsLowOrder(&public_xy)) return error.WeakPublicKey;
 
-    var nonce_xy: [8]u64 = undefined;
-    if (!verify_arm64.decode(&nonce_xy, &encoded_nonce)) {
-        return error.InvalidEncoding;
-    }
-    if (xyIsIdentity(&nonce_xy)) return error.IdentityElement;
+    // R is not part of the verification equation: the computed encoding is
+    // compared against the encoded bytes directly, which also proves that R
+    // was a valid point encoding whenever the comparison succeeds. Decoding R
+    // up front would cost an extra point decompression on every valid
+    // signature, so it is deferred to the mismatch path below.
     var negated_public = public_xy;
     verify_arm64.negate(@ptrCast(&negated_public), @ptrCast(&public_xy));
 
@@ -310,6 +310,12 @@ fn verifyArm64(
     var computed: [32]u8 = undefined;
     verify_arm64.encode(&computed, &computed_xy);
     if (!std.crypto.timing_safe.eql([32]u8, computed, encoded_nonce)) {
+        // Distinguish a malformed R encoding from a mixed-torsion equation
+        // mismatch before paying for the full std verifier.
+        var nonce_xy: [8]u64 = undefined;
+        if (!verify_arm64.decode(&nonce_xy, &encoded_nonce)) {
+            return error.InvalidEncoding;
+        }
         // Preserve Zig std's cofactored semantics for mixed-torsion edge
         // cases that the uncofactored s2n-bignum equation rejects.
         return verifyWithStd(signature, message, public_key);

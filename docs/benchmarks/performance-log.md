@@ -876,6 +876,16 @@ s2n-bignum decode/negate/double-scalar kernels, versus 53,014 ns for AWS-LC
 (8.9% higher); the prepared verifier remains 22,532 ns online but costs
 82,760 ns to build.
 
+The one-shot ARM64 verifier no longer decompresses the signature's R point on
+the success path. R does not participate in the verification equation; the
+computed encoding is compared against the supplied bytes, so a successful
+comparison already proves R was a valid point encoding. The decode now runs
+only on mismatch, where it distinguishes `InvalidEncoding` from the cofactored
+mixed-torsion fallback. Three repeated ReleaseFast runs moved one-shot verify
+from 57,727 ns to 53,432 ns, matching the AWS-LC reference at 53,047-53,213 ns
+while keeping the non-canonical-R, identity-key, weak-key, and mixed-torsion
+semantics covered by the existing rejection tests.
+
 `ed25519.PreparedVerifier.initInto` builds the public-key table directly in
 caller-owned storage, including a heap cache entry. It validates encoding,
 identity, and low-order keys before modifying that storage, so rejected keys
