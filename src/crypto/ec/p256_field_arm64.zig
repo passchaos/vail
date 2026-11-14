@@ -21,23 +21,23 @@ pub inline fn mul(
     if (comptime !enabled) {
         @compileError("ARM64 P-256 Montgomery multiplication is unavailable");
     }
-    vailP256MontgomeryMulArm64(output, left, right);
+    vailP256MontgomeryMulAltArm64(output, left, right);
 }
 
 pub inline fn square(output: *[4]u64, value: *const [4]u64) void {
     if (comptime !enabled) {
         @compileError("ARM64 P-256 Montgomery squaring is unavailable");
     }
-    vailP256MontgomerySquareArm64(output, value);
+    vailP256MontgomerySquareAltArm64(output, value);
 }
 
-extern fn vailP256MontgomeryMulArm64(
+extern fn vailP256MontgomeryMulAltArm64(
     output: *[4]u64,
     left: *const [4]u64,
     right: *const [4]u64,
 ) callconv(.c) void;
 
-extern fn vailP256MontgomerySquareArm64(
+extern fn vailP256MontgomerySquareAltArm64(
     output: *[4]u64,
     value: *const [4]u64,
 ) callconv(.c) void;

@@ -20,7 +20,7 @@ pub inline fn pointDouble(
     if (comptime !enabled) {
         @compileError("ARM64 P-256 point doubling is unavailable");
     }
-    vailP256MontgomeryJacobianDoubleArm64(output, point);
+    vailP256MontgomeryJacobianDoubleAltArm64(output, point);
 }
 
 pub inline fn pointMixedAdd(
@@ -31,15 +31,15 @@ pub inline fn pointMixedAdd(
     if (comptime !enabled) {
         @compileError("ARM64 P-256 mixed point addition is unavailable");
     }
-    vailP256MontgomeryJacobianMixedAddArm64(output, point, affine);
+    vailP256MontgomeryJacobianMixedAddAltArm64(output, point, affine);
 }
 
-extern fn vailP256MontgomeryJacobianDoubleArm64(
+extern fn vailP256MontgomeryJacobianDoubleAltArm64(
     output: *[12]u64,
     point: *const [12]u64,
 ) callconv(.c) void;
 
-extern fn vailP256MontgomeryJacobianMixedAddArm64(
+extern fn vailP256MontgomeryJacobianMixedAddAltArm64(
     output: *[12]u64,
     point: *const [12]u64,
     affine: *const [8]u64,

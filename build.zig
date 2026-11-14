@@ -337,8 +337,12 @@ pub fn build(b: *std.Build) void {
 /// ARM64 assembly snapshots assembled as Mach-O objects on macOS.
 const arm64_asm_paths = [_][]const u8{
     "src/crypto/ec/p256_field_arm64.S",
+    "src/crypto/ec/p256_field_mul_alt_arm64.S",
+    "src/crypto/ec/p256_field_square_alt_arm64.S",
     "src/crypto/ec/p256_point_double_arm64.S",
+    "src/crypto/ec/p256_point_double_alt_arm64.S",
     "src/crypto/ec/p256_point_mixed_add_arm64.S",
+    "src/crypto/ec/p256_point_mixed_add_alt_arm64.S",
     "src/crypto/ec/p256_scalar_inv_arm64.S",
     "src/crypto/ec/p256_scalarmulbase_arm64.S",
     "src/crypto/ec/p256_scalarmulbase_alt_arm64.S",
