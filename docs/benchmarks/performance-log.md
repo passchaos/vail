@@ -1931,6 +1931,8 @@ differences are noise; the TLS pairs used eight samples per side.
 | P-256 sign | 15,664 ns | 11,702.5 ns | Vail 1.34x slower |
 | P-256 prepared verify | 8,421.5 ns | 26,346.5 ns | Vail 3.13x faster |
 | P-256 one-shot verify | 35,623 ns | 26,736.5 ns | Vail 1.33x slower |
+| P-256 ECDH public | 7,747 ns | 10,240 ns | Vail 1.32x faster |
+| P-256 ECDH shared | 37,848 ns | 30,786 ns | Vail 1.23x slower |
 | P-384 verify | 94,083 ns | 103,035.5 ns | Vail 8.7% lower |
 | P-384 sign | 39,932.5 ns | 44,443.5 ns | Vail 10.2% lower |
 | Ed25519 prepared verify | 9,152.5 ns | 17,637.5 ns | Vail 1.93x faster |
@@ -1957,5 +1959,7 @@ Notes:
 - The P-256 signer uses the s2n-bignum `p256_scalarmulbase` kernel with a
   520-entry precomputed table. Its remaining gap is dominated by the 6.1 us
   constant-time secret scalar inversion.
+- P-256 ECDH uses the same `p256_scalarmulbase` kernel for public-key recovery
+  and the constant-time `p256_montjscalarmul` kernel for the shared secret.
 - Ed25519 one-shot verification is dominated by the s2n-bignum
   `edwards25519_scalarmuldouble` kernel; the prepared path uses a table.
