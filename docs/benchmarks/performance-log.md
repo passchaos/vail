@@ -1913,7 +1913,7 @@ into the consumer.
 Measured on a MacBook Pro (Mac17,8, Apple M5 Pro, 18 cores: 6 Super + 12
 Performance, 48 GB) running macOS 26.6.2 (25G83), against aws-lc-rs 1.18.1 /
 aws-lc-sys 0.45.0 (rustls 0.23.45). Vail was built with Zig 0.16.0,
-`-Doptimize=ReleaseFast -Dcpu=native`, at commit `8922df3`.
+`-Doptimize=ReleaseFast -Dcpu=native`, at commit `4ff9804`.
 
 The ARM64 kernels are enabled on macOS through a build-time ELF-to-Mach-O
 adaptation of the checked-in assembly snapshots; the build graph assembles them
@@ -1945,9 +1945,9 @@ differences are noise; the TLS pairs used eight samples per side.
 | SHA-512 32 B / 1 KiB | 51.5 / 607.5 ns | 75 / 609.5 ns | 1.46x faster / equal |
 | HKDF-SHA256 3 labels | 197.5 ns | 449.5 ns | Vail 2.28x faster |
 | HKDF-SHA384 3 labels | 964 ns | 1,390 ns | Vail 1.44x faster |
-| AES-128-GCM record seal / open+seal | 171 / 309 ns | 150 / 318 ns | 1.14x slower / 1.03x faster |
-| AES-256-GCM record seal / open+seal | 192 / 363 ns | 171 / 347 ns | 1.12x / 1.05x slower |
-| ChaCha20-Poly1305 record seal / open+seal | 944 / 1,896 ns | 678 / 1,394 ns | 1.39x / 1.36x slower |
+| AES-128-GCM record seal / open+seal | 169 / 318 ns | 151 / 313 ns | 1.12x / 1.02x slower |
+| AES-256-GCM record seal / open+seal | 192 / 355 ns | 172 / 345 ns | 1.12x / 1.03x slower |
+| ChaCha20-Poly1305 record seal / open+seal | 646 / 1,374 ns | 664 / 1,389 ns | 1.03x / 1.01x faster |
 | ML-KEM-768 encaps / decaps | 3,688.5 / 6,466.5 ns | 8,697.5 / 7,390 ns | 2.36x / 1.14x faster |
 | ML-DSA-44 sign | 36,254.5 ns | 41,569.5 ns | Vail 1.15x faster |
 | ML-DSA-44 prepared verify | 4,851 ns | 11,771 ns | Vail 2.43x faster |
@@ -1960,12 +1960,14 @@ Notes:
   P-256, and ML-DSA paths are the ones TLS uses when a peer key is reused.
 - The AEAD comparison crosses boundaries: Vail's numbers include TLS record
   framing and stateful nonces, while the AWS-LC harness measures raw AEAD. With
-  a 1,200-byte payload, Vail's AES-128-GCM record seal is within 1.14x of
-  AWS-LC's raw AEAD and its open+seal is slightly lower; AES-256-GCM is within
-  1.12x, and ChaCha20-Poly1305 remains about 1.4x slower.
+  a 1,200-byte payload, Vail's AES-GCM record seal is within 1.12x of
+  AWS-LC's raw AEAD while its open+seal is within 1.03x; ChaCha20-Poly1305 is
+  slightly faster on both.
 - AES-GCM uses the AWS-LC stitched 4x/8x ARM64 kernels for whole ciphertext
   blocks: the context absorbs the associated data, the final partial block, and
   the length block around the kernel.
+- ChaCha20-Poly1305 uses the AWS-LC stitched ARM64 kernel for disjoint
+  seal/open buffers; in-place opening keeps the authenticate-first path.
 - The P-256 signer uses the s2n-bignum `p256_scalarmulbase_alt` kernel with a
   520-entry precomputed table. Its remaining gap is dominated by the 6.1 us
   constant-time secret scalar inversion.
