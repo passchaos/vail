@@ -12,6 +12,9 @@ const distinguished_name = @import("distinguished_name.zig");
 const issuer_fetch = @import("issuer_fetch.zig");
 const ocsp = @import("ocsp.zig");
 const certificate_policy = @import("policy.zig");
+const trust_der = @import("trust/der.zig");
+const Tlv = trust_der.Tlv;
+const DerReader = trust_der.DerReader;
 
 const Certificate = std.crypto.Certificate;
 
@@ -3224,70 +3227,12 @@ fn validateOid(value: []const u8) !void {
     if (!at_subidentifier_start) return error.InvalidCertificateExtension;
 }
 
-const Tlv = struct {
-    tag: u8,
-    value: []const u8,
-};
-
 fn singleInner(encoded: []const u8, tag: u8) !Tlv {
     var reader = DerReader{ .bytes = encoded };
     const value = try reader.require(tag);
     if (try reader.next() != null) return error.InvalidCertificateExtension;
     return value;
 }
-
-const DerReader = struct {
-    bytes: []const u8,
-    pos: usize = 0,
-
-    fn next(self: *DerReader) !?Tlv {
-        if (self.pos == self.bytes.len) return null;
-        if (self.pos > self.bytes.len) return error.InvalidCertificateExtension;
-        const tag = self.bytes[self.pos];
-        self.pos += 1;
-        if ((tag & 0x1f) == 0x1f) return error.InvalidCertificateExtension;
-        const len = try self.readLength();
-        const end = std.math.add(usize, self.pos, len) catch
-            return error.InvalidCertificateExtension;
-        if (end > self.bytes.len) return error.InvalidCertificateExtension;
-        const value = self.bytes[self.pos..end];
-        self.pos = end;
-        return .{ .tag = tag, .value = value };
-    }
-
-    fn require(self: *DerReader, tag: u8) !Tlv {
-        const value = (try self.next()) orelse
-            return error.InvalidCertificateExtension;
-        if (value.tag != tag) return error.InvalidCertificateExtension;
-        return value;
-    }
-
-    fn readLength(self: *DerReader) !usize {
-        if (self.pos >= self.bytes.len) return error.InvalidCertificateExtension;
-        const first = self.bytes[self.pos];
-        self.pos += 1;
-        if ((first & 0x80) == 0) return first;
-        const count: usize = first & 0x7f;
-        if (count == 0 or count > @sizeOf(usize)) {
-            return error.InvalidCertificateExtension;
-        }
-        const end = std.math.add(usize, self.pos, count) catch
-            return error.InvalidCertificateExtension;
-        if (end > self.bytes.len or self.bytes[self.pos] == 0) {
-            return error.InvalidCertificateExtension;
-        }
-        var len: usize = 0;
-        for (self.bytes[self.pos..end]) |byte| {
-            len = std.math.mul(usize, len, 256) catch
-                return error.InvalidCertificateExtension;
-            len = std.math.add(usize, len, byte) catch
-                return error.InvalidCertificateExtension;
-        }
-        self.pos = end;
-        if (len < 128) return error.InvalidCertificateExtension;
-        return len;
-    }
-};
 
 pub const testing = struct {
     pub const Usage = CertificateUsage;
