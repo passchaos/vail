@@ -1928,18 +1928,19 @@ differences are noise; the TLS pairs used eight samples per side.
 | --- | ---: | ---: | --- |
 | TLS 1.3 server first flight | 22,714.5 ns | 35,476.5 ns | Vail 36.0% lower |
 | TLS 1.3 client through Finished | 28,628.5 ns | 43,175.5 ns | Vail 33.7% lower |
-| P-256 sign | 15,664 ns | 11,702.5 ns | Vail 1.34x slower |
+| P-256 sign | 12,902 ns | 11,702.5 ns | Vail 1.10x slower |
 | P-256 prepared verify | 8,421.5 ns | 26,346.5 ns | Vail 3.13x faster |
 | P-256 one-shot verify | 35,623 ns | 26,736.5 ns | Vail 1.33x slower |
-| P-256 ECDH public | 7,747 ns | 10,240 ns | Vail 1.32x faster |
-| P-256 ECDH shared | 37,848 ns | 30,786 ns | Vail 1.23x slower |
+| P-256 ECDH public | 5,559 ns | 10,240 ns | Vail 1.84x faster |
+| P-256 ECDH shared | 29,434 ns | 30,786 ns | Vail 1.05x faster |
 | P-384 verify | 94,083 ns | 103,035.5 ns | Vail 8.7% lower |
 | P-384 sign | 39,932.5 ns | 44,443.5 ns | Vail 10.2% lower |
 | P-384 ECDH public / shared | 22,286 / 93,000 ns | 52,400 / 123,900 ns | 2.36x / 1.33x faster |
 | P-521 ECDH public / shared | 54,344 / 185,326 ns | 73,400 / 184,000 ns | 1.35x faster / equal |
 | Ed25519 prepared verify | 9,152.5 ns | 17,637.5 ns | Vail 1.93x faster |
-| Ed25519 one-shot verify | 27,093.5 ns | 17,637.5 ns | Vail 1.54x slower |
-| Ed25519 sign | 5,258.5 ns | 3,886 ns | Vail 1.35x slower |
+| Ed25519 one-shot verify | 18,920 ns | 17,637.5 ns | Vail 1.07x slower |
+| Ed25519 sign | 4,237 ns | 3,886 ns | Vail 1.09x slower |
+| Ed25519 keygen | 4,053 ns | 3,646 ns | Vail 1.11x slower |
 | X25519 public / shared | 3,545.5 / 11,938.5 ns | 3,581 / 11,923.5 ns | ~equal |
 | SHA-512 32 B / 1 KiB | 51.5 / 607.5 ns | 75 / 609.5 ns | 1.46x faster / equal |
 | HKDF-SHA256 3 labels | 197.5 ns | 449.5 ns | Vail 2.28x faster |
@@ -1958,10 +1959,11 @@ Notes:
   framing and stateful nonces, while the AWS-LC harness measures raw AEAD. With
   a 1,200-byte payload, Vail's AES-128-GCM record seal is about 1.6x slower and
   ChaCha20-Poly1305 about 1.5x slower at that boundary.
-- The P-256 signer uses the s2n-bignum `p256_scalarmulbase` kernel with a
+- The P-256 signer uses the s2n-bignum `p256_scalarmulbase_alt` kernel with a
   520-entry precomputed table. Its remaining gap is dominated by the 6.1 us
   constant-time secret scalar inversion.
-- P-256 ECDH uses the same `p256_scalarmulbase` kernel for public-key recovery
-  and the constant-time `p256_montjscalarmul` kernel for the shared secret.
-- Ed25519 one-shot verification is dominated by the s2n-bignum
-  `edwards25519_scalarmuldouble` kernel; the prepared path uses a table.
+- P-256 ECDH uses `p256_scalarmulbase_alt` for public-key recovery and the
+  constant-time `p256_montjscalarmul_alt` kernel for the shared secret.
+- Ed25519 signing and key generation use `edwards25519_scalarmulbase_alt`;
+  one-shot verification uses `edwards25519_scalarmuldouble_alt`. The prepared
+  path uses a table.
