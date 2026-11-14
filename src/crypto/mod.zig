@@ -6,6 +6,7 @@ pub const aes_ccm = @import("aead/aes_ccm.zig");
 pub const aes_cbc = @import("block/aes_cbc.zig");
 pub const aes_ctr = @import("block/aes_ctr.zig");
 pub const key_wrap = @import("key_wrap.zig");
+pub const srtp_kdf = @import("kdf/srtp.zig");
 pub const blake2s = @import("hash/blake2s.zig");
 pub const chacha20_poly1305 = @import("aead/chacha20_poly1305.zig");
 pub const ed25519 = @import("sign/ed25519.zig");
@@ -33,6 +34,7 @@ test {
     _ = aes_gcm;
     _ = aes_ccm;
     _ = key_wrap;
+    _ = srtp_kdf;
     _ = aes_cbc;
     _ = aes_ctr;
     _ = blake2s;
