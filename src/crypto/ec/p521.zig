@@ -759,16 +759,28 @@ pub const ThroughputPreparedVerifier = struct {
 /// certificate plus its stapled OCSP response.
 pub const CompactPreparedVerifier = struct {
     key_multiples: [one_shot_wnaf_table_entries]CachedPoint,
+    public_key_sec1: [uncompressed_sec1_encoded_length]u8,
 
     pub fn init(public_key_sec1: []const u8) Error!CompactPreparedVerifier {
         const public_key = Point.fromSec1(public_key_sec1) catch
             return error.InvalidPublicKey;
+        const encoded = (PublicKey{ .point = public_key }).toUncompressedSec1();
         return .{
             .key_multiples = Point.precomputeOddCached(
                 one_shot_wnaf_table_entries,
                 public_key,
             ),
+            .public_key_sec1 = encoded,
         };
+    }
+
+    /// Check that this prepared table was built for the supplied uncompressed
+    /// SEC1 public key.
+    pub fn matchesPublicKey(
+        self: *const CompactPreparedVerifier,
+        public_key_sec1: []const u8,
+    ) bool {
+        return std.mem.eql(u8, &self.public_key_sec1, public_key_sec1);
     }
 
     pub fn verify(
@@ -2975,7 +2987,7 @@ test "P-521 compares the final x coordinate without inversion" {
 
 test "P-521 field and group constants are valid" {
     try std.testing.expectEqual(
-        @as(usize, 5888),
+        @as(usize, 6_024),
         @sizeOf(CompactPreparedVerifier),
     );
     try std.testing.expectEqual(@as(usize, 38_912), @sizeOf(PreparedVerifier));
@@ -3664,6 +3676,10 @@ test "P-521 verifies independent OpenSSL SHA-2 signatures" {
     const prepared = try PreparedVerifier.init(&public_key);
     const throughput = try ThroughputPreparedVerifier.init(&public_key);
     const compact = try CompactPreparedVerifier.init(&public_key);
+    try std.testing.expect(compact.matchesPublicKey(&public_key));
+    var other_public_key = public_key;
+    other_public_key[0] ^= 1;
+    try std.testing.expect(!compact.matchesPublicKey(&other_public_key));
     try prepared.verify(
         std.crypto.hash.sha2.Sha512,
         message,

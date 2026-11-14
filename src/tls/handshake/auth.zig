@@ -1232,6 +1232,12 @@ pub const ClientVerifier = struct {
     prepared_ed25519_verifier: ?*const crypto_ed25519.PreparedVerifier = null,
     /// Optional reusable P-256 table for repeated CertificateVerify checks.
     prepared_p256_verifier: ?*const p256.PreparedVerifier = null,
+    /// Optional compact P-521 table for repeated CertificateVerify checks.
+    prepared_p521_verifier: ?*const p521.CompactPreparedVerifier = null,
+    /// Optional ML-DSA tables for repeated CertificateVerify checks.
+    prepared_mldsa44_verifier: ?*const crypto_mldsa.PreparedVerifier44 = null,
+    prepared_mldsa65_verifier: ?*const crypto_mldsa.PreparedVerifier65 = null,
+    prepared_mldsa87_verifier: ?*const crypto_mldsa.PreparedVerifier87 = null,
     /// Optional reusable RSA-2048/65537 Montgomery context for TLS 1.3
     /// CertificateVerify or TLS 1.2 signed-handshake verification.
     prepared_rsa_verifier: ?*const PreparedRsaVerifier = null,
@@ -1407,6 +1413,62 @@ pub const ClientVerifier = struct {
                 );
             }
         }
+        if (self.prepared_p521_verifier) |prepared| {
+            if (parsed.scheme == signature_scheme_ecdsa_secp521r1_sha512) {
+                return verifyCertificateVerifyForRoleWithP521(
+                    certificate,
+                    parsed,
+                    transcript_hash,
+                    role,
+                    prepared,
+                );
+            }
+        }
+        if (self.prepared_mldsa44_verifier) |prepared| {
+            if (parsed.scheme == signature_scheme_ml_dsa_44) {
+                return verifyMlDsaCertificateVerifyWithPrepared(
+                    MlDsa44,
+                    crypto_mldsa.PreparedVerifier44,
+                    crypto_mldsa.PreparedSignature44,
+                    .ml_dsa_44,
+                    certificate,
+                    parsed,
+                    transcript_hash,
+                    role,
+                    prepared,
+                );
+            }
+        }
+        if (self.prepared_mldsa65_verifier) |prepared| {
+            if (parsed.scheme == signature_scheme_ml_dsa_65) {
+                return verifyMlDsaCertificateVerifyWithPrepared(
+                    MlDsa65,
+                    crypto_mldsa.PreparedVerifier65,
+                    crypto_mldsa.PreparedSignature65,
+                    .ml_dsa_65,
+                    certificate,
+                    parsed,
+                    transcript_hash,
+                    role,
+                    prepared,
+                );
+            }
+        }
+        if (self.prepared_mldsa87_verifier) |prepared| {
+            if (parsed.scheme == signature_scheme_ml_dsa_87) {
+                return verifyMlDsaCertificateVerifyWithPrepared(
+                    MlDsa87,
+                    crypto_mldsa.PreparedVerifier87,
+                    crypto_mldsa.PreparedSignature87,
+                    .ml_dsa_87,
+                    certificate,
+                    parsed,
+                    transcript_hash,
+                    role,
+                    prepared,
+                );
+            }
+        }
         if (self.prepared_rsa_verifier) |prepared| {
             if (parsed.scheme == prepared.signature_scheme) {
                 return prepared.verify(
@@ -1437,6 +1499,16 @@ pub const ClientVerifier = struct {
                     certificate,
                     parsed,
                     content,
+                );
+            }
+        }
+        if (self.prepared_p521_verifier) |prepared| {
+            if (parsed.scheme == signature_scheme_ecdsa_secp521r1_sha512) {
+                return verifyTls12WithP521(
+                    certificate,
+                    parsed,
+                    content,
+                    prepared,
                 );
             }
         }
@@ -2483,6 +2555,48 @@ fn verifyMlDsaCertificateVerify(
     verifier.verify() catch return error.BadCertificateVerify;
 }
 
+fn verifyMlDsaCertificateVerifyWithPrepared(
+    comptime MlDsa: type,
+    comptime PreparedVerifier: type,
+    comptime PreparedSignature: type,
+    comptime expected_kind: RawSpkiKind,
+    certificate: []const u8,
+    parsed: ParsedCertificateVerify,
+    transcript_hash: []const u8,
+    role: EndpointRole,
+    prepared: *const PreparedVerifier,
+) Error!void {
+    if (parsed.signature.len != MlDsa.Signature.encoded_length) {
+        return error.InvalidCertificateVerify;
+    }
+    const encoded = try mlDsaCertificatePublicKey(
+        MlDsa,
+        expected_kind,
+        certificate,
+    );
+    if (!prepared.matchesPublicKey(encoded)) {
+        return error.InvalidCertificate;
+    }
+    const signature = PreparedSignature.fromBytes(
+        parsed.signature[0..MlDsa.Signature.encoded_length],
+    ) catch return error.InvalidCertificateVerify;
+
+    var content: [64 + server_certificate_verify_context.len + 1 + 64]u8 =
+        undefined;
+    @memset(content[0..64], ' ');
+    const context = certificateVerifyContext(role);
+    @memcpy(content[64..][0..context.len], context);
+    content[64 + context.len] = 0;
+    @memcpy(
+        content[64 + context.len + 1 ..][0..transcript_hash.len],
+        transcript_hash,
+    );
+    prepared.verifyPrepared(
+        &signature,
+        content[0 .. 64 + context.len + 1 + transcript_hash.len],
+    ) catch return error.BadCertificateVerify;
+}
+
 fn parseMlDsaPublicKey(
     comptime MlDsa: type,
     encoded: [MlDsa.PublicKey.encoded_length]u8,
@@ -2754,6 +2868,68 @@ pub fn verifyCertificateVerifyForRoleWithP256(
         signed_content[0 .. separator + 1 + transcript_hash.len],
         signature,
     ) catch return error.BadCertificateVerify;
+}
+
+/// Verify P-521 CertificateVerify with a caller-retained compact table.
+/// The prepared key is checked against the certificate before it is used.
+pub fn verifyCertificateVerifyForRoleWithP521(
+    certificate: []const u8,
+    parsed: ParsedCertificateVerify,
+    transcript_hash: []const u8,
+    role: EndpointRole,
+    prepared: *const p521.CompactPreparedVerifier,
+) Error!void {
+    if (parsed.scheme != signature_scheme_ecdsa_secp521r1_sha512) {
+        return error.UnsupportedSignatureScheme;
+    }
+    if (transcript_hash.len != Sha512.digest_length) {
+        return error.InvalidCertificateVerify;
+    }
+    const public_key = try p521CertificatePublicKey(certificate);
+    if (!prepared.matchesPublicKey(public_key)) {
+        return error.InvalidCertificate;
+    }
+
+    const context = certificateVerifyContext(role);
+    var signed_content: [
+        64 + client_certificate_verify_context.len + 1 +
+            Sha512.digest_length
+    ]u8 = undefined;
+    @memset(signed_content[0..64], 0x20);
+    @memcpy(signed_content[64 .. 64 + context.len], context);
+    const separator = 64 + context.len;
+    signed_content[separator] = 0;
+    @memcpy(
+        signed_content[separator + 1 ..][0..transcript_hash.len],
+        transcript_hash,
+    );
+    prepared.verify(
+        Sha512,
+        signed_content[0 .. separator + 1 + transcript_hash.len],
+        parsed.signature,
+    ) catch |err| switch (err) {
+        error.InvalidPublicKey => return error.InvalidCertificate,
+        error.InvalidSignature => return error.BadCertificateVerify,
+    };
+}
+
+fn verifyTls12WithP521(
+    certificate: []const u8,
+    parsed: ParsedCertificateVerify,
+    content: []const u8,
+    prepared: *const p521.CompactPreparedVerifier,
+) Error!void {
+    if (parsed.scheme != signature_scheme_ecdsa_secp521r1_sha512) {
+        return error.UnsupportedSignatureScheme;
+    }
+    const public_key = try p521CertificatePublicKey(certificate);
+    if (!prepared.matchesPublicKey(public_key)) {
+        return error.InvalidCertificate;
+    }
+    prepared.verify(Sha512, content, parsed.signature) catch |err| switch (err) {
+        error.InvalidPublicKey => return error.InvalidCertificate,
+        error.InvalidSignature => return error.BadCertificateVerify,
+    };
 }
 
 fn verifySm2(
@@ -3556,6 +3732,57 @@ test "P-521 verifies TLS 1.2 and TLS 1.3 signatures" {
         .client,
     );
 
+    const public_key = try p521CertificatePublicKey(&root);
+    const prepared_p521 = try p521.CompactPreparedVerifier.init(public_key);
+    try verifyCertificateVerifyForRoleWithP521(
+        &root,
+        .{
+            .scheme = signature_scheme_ecdsa_secp521r1_sha512,
+            .signature = &server_signature,
+        },
+        &transcript_hash,
+        .server,
+        &prepared_p521,
+    );
+    try verifyCertificateVerifyForRoleWithP521(
+        &root,
+        .{
+            .scheme = signature_scheme_ecdsa_secp521r1_sha512,
+            .signature = &client_signature,
+        },
+        &transcript_hash,
+        .client,
+        &prepared_p521,
+    );
+    try verifyTls12WithP521(
+        &root,
+        .{
+            .scheme = signature_scheme_ecdsa_secp521r1_sha512,
+            .signature = &content_signature,
+        },
+        "Vail pure Zig P-521 oracle",
+        &prepared_p521,
+    );
+
+    const other_root = decodeHex(vectors.p521_sha3_root_hex);
+    const other_public_key = try p521CertificatePublicKey(&other_root);
+    const wrong_prepared = try p521.CompactPreparedVerifier.init(
+        other_public_key,
+    );
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        verifyCertificateVerifyForRoleWithP521(
+            &root,
+            .{
+                .scheme = signature_scheme_ecdsa_secp521r1_sha512,
+                .signature = &server_signature,
+            },
+            &transcript_hash,
+            .server,
+            &wrong_prepared,
+        ),
+    );
+
     var altered = server_signature;
     altered[altered.len - 1] ^= 1;
     try std.testing.expectError(
@@ -3983,6 +4210,62 @@ fn testMlDsaCertificateVerify(
         parsed.signature.len,
     );
     try verifyCertificateVerify(&spki, parsed, &transcript_hash);
+
+    const PreparedVerifier = if (MlDsa == MlDsa44)
+        crypto_mldsa.PreparedVerifier44
+    else if (MlDsa == MlDsa65)
+        crypto_mldsa.PreparedVerifier65
+    else
+        crypto_mldsa.PreparedVerifier87;
+    const PreparedSignature = if (MlDsa == MlDsa44)
+        crypto_mldsa.PreparedSignature44
+    else if (MlDsa == MlDsa65)
+        crypto_mldsa.PreparedSignature65
+    else
+        crypto_mldsa.PreparedSignature87;
+    const expected_kind: RawSpkiKind = if (scheme == signature_scheme_ml_dsa_44)
+        .ml_dsa_44
+    else if (scheme == signature_scheme_ml_dsa_65)
+        .ml_dsa_65
+    else
+        .ml_dsa_87;
+    const prepared = try PreparedVerifier.fromBytes(
+        key_pair.public_key.toBytes(),
+    );
+    try verifyMlDsaCertificateVerifyWithPrepared(
+        MlDsa,
+        PreparedVerifier,
+        PreparedSignature,
+        expected_kind,
+        &spki,
+        parsed,
+        &transcript_hash,
+        .server,
+        &prepared,
+    );
+
+    var other_key_pair = try MlDsa.KeyPair.generateDeterministic(
+        [_]u8{seed_byte +% 0x40} ** MlDsa.KeyPair.seed_length,
+    );
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&other_key_pair));
+    const wrong_prepared = try PreparedVerifier.fromBytes(
+        other_key_pair.public_key.toBytes(),
+    );
+    try std.testing.expectError(
+        error.InvalidCertificate,
+        verifyMlDsaCertificateVerifyWithPrepared(
+            MlDsa,
+            PreparedVerifier,
+            PreparedSignature,
+            expected_kind,
+            &spki,
+            parsed,
+            &transcript_hash,
+            .server,
+            &wrong_prepared,
+        ),
+    );
+
     try std.testing.expectError(
         error.UnsupportedSignatureScheme,
         verifyTls12SignedContent(&spki, parsed, "tls12"),

@@ -16,6 +16,11 @@ Prefer the connection-level APIs (`tls.client_connection`,
 `tls.server_connection`, version-selecting variants) and the documented
 `Config`/`ClientVerifier` types over lower-level codecs.
 
+`tls.auth.ClientVerifier` can retain prepared Ed25519, P-256, compact P-521,
+RSA-2048/65537, and ML-DSA-44/65/87 verification state for repeated certificate
+checks. Every prepared path re-checks the certificate's public key against the
+prepared key before using the cached table.
+
 ## Advanced API
 
 Some lower-level modules are exported because transports and specialized

@@ -103,6 +103,20 @@ pub const PreparedVerifier44 = struct {
         return prepared;
     }
 
+    /// Check that this prepared table was built for the supplied encoded
+    /// public key. This hashes only the public key and does not expand the
+    /// matrix.
+    pub fn matchesPublicKey(
+        self: *const PreparedVerifier44,
+        bytes: [MlDsa44.PublicKey.encoded_length]u8,
+    ) bool {
+        var tr: [64]u8 = undefined;
+        var hash = initShake256();
+        hash.update(&bytes);
+        hash.squeeze(&tr);
+        return std.crypto.timing_safe.eql([64]u8, tr, self.tr);
+    }
+
     pub fn verify(
         self: *const PreparedVerifier44,
         signature: MlDsa44.Signature,
@@ -424,6 +438,20 @@ fn PreparedVerifierWideImpl(
             hash.squeeze(&prepared.tr);
             prepared.fallback_public_key = {};
             return prepared;
+        }
+
+        /// Check that this prepared table was built for the supplied encoded
+        /// public key. This hashes only the public key and does not expand the
+        /// matrix.
+        pub fn matchesPublicKey(
+            self: *const Self,
+            bytes: [PublicKey.encoded_length]u8,
+        ) bool {
+            var tr: [64]u8 = undefined;
+            var hash = initShake256();
+            hash.update(&bytes);
+            hash.squeeze(&tr);
+            return std.crypto.timing_safe.eql([64]u8, tr, self.tr);
         }
 
         pub fn verifyPrepared(
