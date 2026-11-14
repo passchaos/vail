@@ -1907,3 +1907,55 @@ cryptography and TLS state belong here.
 Consumers that only need ShangMi primitives can import the lightweight
 `vail_sm` build module. It exposes `sm2` and `sm3` without pulling the TLS graph
 into the consumer.
+
+## macOS Apple M5 Pro (aarch64) comparison
+
+Measured on a MacBook Pro (Mac17,8, Apple M5 Pro, 18 cores: 6 Super + 12
+Performance, 48 GB) running macOS 26.6.2 (25G83), against aws-lc-rs 1.18.1 /
+aws-lc-sys 0.45.0 (rustls 0.23.45). Vail was built with Zig 0.16.0,
+`-Doptimize=ReleaseFast -Dcpu=native`, at commit `1d1c67f`.
+
+The ARM64 kernels are enabled on macOS through a build-time ELF-to-Mach-O
+adaptation of the checked-in assembly snapshots; the build graph assembles them
+as separate objects. Scoped tests and the full ReleaseFast suite pass
+(593 passed, 12 skipped, 0 failed).
+
+Primitive pairs were run in A-B-B-A order with four samples per side and
+reported as medians. The host was shared with other builds, so small
+differences are noise; the TLS pairs used eight samples per side.
+
+| Boundary | Vail | AWS-LC | Result |
+| --- | ---: | ---: | --- |
+| TLS 1.3 server first flight | 22,714.5 ns | 35,476.5 ns | Vail 36.0% lower |
+| TLS 1.3 client through Finished | 28,628.5 ns | 43,175.5 ns | Vail 33.7% lower |
+| P-256 sign | 15,664 ns | 11,702.5 ns | Vail 1.34x slower |
+| P-256 prepared verify | 8,421.5 ns | 26,346.5 ns | Vail 3.13x faster |
+| P-256 one-shot verify | 35,623 ns | 26,736.5 ns | Vail 1.33x slower |
+| P-384 verify | 94,083 ns | 103,035.5 ns | Vail 8.7% lower |
+| P-384 sign | 39,932.5 ns | 44,443.5 ns | Vail 10.2% lower |
+| Ed25519 prepared verify | 9,152.5 ns | 17,637.5 ns | Vail 1.93x faster |
+| Ed25519 one-shot verify | 27,093.5 ns | 17,637.5 ns | Vail 1.54x slower |
+| Ed25519 sign | 5,258.5 ns | 3,886 ns | Vail 1.35x slower |
+| X25519 public / shared | 3,545.5 / 11,938.5 ns | 3,581 / 11,923.5 ns | ~equal |
+| SHA-512 32 B / 1 KiB | 51.5 / 607.5 ns | 75 / 609.5 ns | 1.46x faster / equal |
+| HKDF-SHA256 3 labels | 197.5 ns | 449.5 ns | Vail 2.28x faster |
+| HKDF-SHA384 3 labels | 964 ns | 1,390 ns | Vail 1.44x faster |
+| ML-KEM-768 encaps / decaps | 3,688.5 / 6,466.5 ns | 8,697.5 / 7,390 ns | 2.36x / 1.14x faster |
+| ML-DSA-44 sign | 36,254.5 ns | 41,569.5 ns | Vail 1.15x faster |
+| ML-DSA-44 prepared verify | 4,851 ns | 11,771 ns | Vail 2.43x faster |
+| ML-DSA-44 raw verify | 17,059.5 ns | 11,968 ns | Vail 1.43x slower |
+| ML-DSA-44 keygen | 16,732 ns | 12,224.5 ns | Vail 1.37x slower |
+
+Notes:
+
+- Prepared-verifier rows exclude preparation time. The prepared Ed25519,
+  P-256, and ML-DSA paths are the ones TLS uses when a peer key is reused.
+- The AEAD comparison crosses boundaries: Vail's numbers include TLS record
+  framing and stateful nonces, while the AWS-LC harness measures raw AEAD. With
+  a 1,200-byte payload, Vail's AES-128-GCM record seal is about 1.6x slower and
+  ChaCha20-Poly1305 about 1.5x slower at that boundary.
+- The P-256 signer uses the s2n-bignum `p256_scalarmulbase` kernel with a
+  520-entry precomputed table. Its remaining gap is dominated by the 6.1 us
+  constant-time secret scalar inversion.
+- Ed25519 one-shot verification is dominated by the s2n-bignum
+  `edwards25519_scalarmuldouble` kernel; the prepared path uses a table.
