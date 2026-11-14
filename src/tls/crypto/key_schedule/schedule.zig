@@ -8,7 +8,55 @@ const std = @import("std");
 const sha256 = @import("../../../crypto/hash/sha256.zig");
 const fast_sha2 = @import("../../../crypto/hash/sha512.zig");
 
+/// HKDF-Expand-Label (RFC 8446 section 7.1) with a caller-selected prefix.
+/// The fixed-size schedule below and DTLS 1.3 adapters share this encoding.
+pub fn expandLabelWithPrefix(
+    comptime Hash: type,
+    comptime label_prefix: []const u8,
+    secret: []const u8,
+    label: []const u8,
+    context: []const u8,
+    out: []u8,
+) error{ InvalidLabel, InvalidContext, InvalidLength, InvalidSecretLength }!void {
+    if (secret.len != Hash.digest_length) return error.InvalidSecretLength;
+    if (label.len == 0 or label_prefix.len + label.len > 255) {
+        return error.InvalidLabel;
+    }
+    if (context.len > 255) return error.InvalidContext;
+    if (out.len == 0 or out.len > Hash.digest_length * 255) {
+        return error.InvalidLength;
+    }
+    const Hmac = std.crypto.auth.hmac.Hmac(Hash);
+    const Hkdf = std.crypto.kdf.hkdf.Hkdf(Hmac);
+    var info: [2 + 1 + 255 + 1 + 255]u8 = undefined;
+    std.mem.writeInt(u16, info[0..2], @intCast(out.len), .big);
+    info[2] = @intCast(label_prefix.len + label.len);
+    @memcpy(info[3..][0..label_prefix.len], label_prefix);
+    var offset: usize = 3 + label_prefix.len;
+    @memcpy(info[offset..][0..label.len], label);
+    offset += label.len;
+    info[offset] = @intCast(context.len);
+    offset += 1;
+    @memcpy(info[offset..][0..context.len], context);
+    offset += context.len;
+    const prk: [Hash.digest_length]u8 = secret[0..Hash.digest_length].*;
+    Hkdf.expand(out, info[0..offset], prk);
+}
+
+/// RFC 8446 label prefix. RFC 9147 (DTLS 1.3) uses `dtls13` instead.
+pub const default_label_prefix = "tls13 ";
+
+/// TLS 1.3 key schedule with the standard `tls13 ` label prefix.
 pub fn Schedule(comptime Hash: type) type {
+    return ScheduleWithPrefix(Hash, default_label_prefix);
+}
+
+/// Key schedule specialized to a hash and an HKDF-Expand-Label prefix.
+/// DTLS 1.3 passes `dtls13` here; everything else is identical to TLS 1.3.
+pub fn ScheduleWithPrefix(
+    comptime Hash: type,
+    comptime label_prefix: []const u8,
+) type {
     const Hmac = std.crypto.auth.hmac.Hmac(Hash);
     const Hkdf = std.crypto.kdf.hkdf.Hkdf(Hmac);
 
@@ -50,6 +98,24 @@ pub fn Schedule(comptime Hash: type) type {
                 Hash;
             break :blk std.crypto.tls.emptyHash(ComptimeHash);
         };
+
+        fn expandLabel(
+            secret: [secret_len]u8,
+            label: []const u8,
+            context: []const u8,
+            comptime len: usize,
+        ) [len]u8 {
+            var out: [len]u8 = undefined;
+            expandLabelWithPrefix(
+                Hash,
+                label_prefix,
+                &secret,
+                label,
+                context,
+                &out,
+            ) catch unreachable;
+            return out;
+        }
 
         pub fn earlySecret(psk: ?[secret_len]u8) [secret_len]u8 {
             const zero = [_]u8{0} ** secret_len;
@@ -142,13 +208,7 @@ pub fn Schedule(comptime Hash: type) type {
             base_key: [secret_len]u8,
             transcript_hash: [secret_len]u8,
         ) [secret_len]u8 {
-            const finished_key = std.crypto.tls.hkdfExpandLabel(
-                Hkdf,
-                base_key,
-                "finished",
-                "",
-                secret_len,
-            );
+            const finished_key = expandLabel(base_key, "finished", "", secret_len);
             var output: [secret_len]u8 = undefined;
             Hmac.create(&output, &transcript_hash, &finished_key);
             return output;
@@ -217,29 +277,22 @@ pub fn Schedule(comptime Hash: type) type {
                 &empty_transcript_hash,
             );
             defer std.crypto.secureZero(u8, &derived_secret);
-            // The standard helper requires a comptime output length. Build its
-            // RFC 8446 HkdfLabel here for caller-sized output without allocation.
-            var info: [2 + 1 + 6 + 249 + 1 + 255]u8 = undefined;
-            std.mem.writeInt(u16, info[0..2], @intCast(out.len), .big);
-            info[2] = 14;
-            @memcpy(info[3..9], "tls13 ");
-            @memcpy(info[9..17], "exporter");
-            var offset: usize = 17;
-            info[offset] = @intCast(context_hash.len);
-            offset += 1;
-            @memcpy(info[offset..][0..context_hash.len], &context_hash);
-            offset += context_hash.len;
-            Hkdf.expand(out, info[0..offset], derived_secret);
+            expandLabelWithPrefix(
+                Hash,
+                label_prefix,
+                &derived_secret,
+                "exporter",
+                &context_hash,
+                out,
+            ) catch return error.InvalidExporterInput;
             std.crypto.secureZero(u8, &context_hash);
-            std.crypto.secureZero(u8, &info);
         }
 
         pub fn deriveResumptionPsk(
             resumption_master_secret: [secret_len]u8,
             ticket_nonce: []const u8,
         ) [secret_len]u8 {
-            return std.crypto.tls.hkdfExpandLabel(
-                Hkdf,
+            return expandLabel(
                 resumption_master_secret,
                 "resumption",
                 ticket_nonce,
@@ -250,13 +303,7 @@ pub fn Schedule(comptime Hash: type) type {
         pub fn nextTrafficSecret(
             traffic_secret: [secret_len]u8,
         ) [secret_len]u8 {
-            return std.crypto.tls.hkdfExpandLabel(
-                Hkdf,
-                traffic_secret,
-                "traffic upd",
-                "",
-                secret_len,
-            );
+            return expandLabel(traffic_secret, "traffic upd", "", secret_len);
         }
 
         fn deriveSecretPair(
@@ -309,13 +356,7 @@ pub fn Schedule(comptime Hash: type) type {
             label: []const u8,
             transcript_hash: []const u8,
         ) [secret_len]u8 {
-            return std.crypto.tls.hkdfExpandLabel(
-                Hkdf,
-                secret,
-                label,
-                transcript_hash,
-                secret_len,
-            );
+            return expandLabel(secret, label, transcript_hash, secret_len);
         }
 
         comptime {
@@ -406,4 +447,28 @@ test "prepared SHA-256 traffic-secret pairs match independent HKDF" {
         ),
         application.server_traffic_secret,
     );
+}
+
+test "DTLS 1.3 label prefix changes every expansion" {
+    const Hash = std.crypto.hash.sha2.Sha256;
+    const Hmac = std.crypto.auth.hmac.Hmac(Hash);
+    const Hkdf = std.crypto.kdf.hkdf.Hkdf(Hmac);
+    const Dtls = ScheduleWithPrefix(Hash, "dtls13");
+    const secret = [_]u8{0x42} ** Hash.digest_length;
+    const tls_output = Schedule(Hash).nextTrafficSecret(secret);
+    const dtls_output = Dtls.nextTrafficSecret(secret);
+    try std.testing.expect(!std.mem.eql(u8, &tls_output, &dtls_output));
+
+    // Independent RFC 8446 HkdfLabel construction with the DTLS prefix.
+    const prefix = "dtls13";
+    const label = "traffic upd";
+    var info: [2 + 1 + prefix.len + label.len + 1]u8 = undefined;
+    std.mem.writeInt(u16, info[0..2], Hash.digest_length, .big);
+    info[2] = prefix.len + label.len;
+    @memcpy(info[3..][0..prefix.len], prefix);
+    @memcpy(info[3 + prefix.len ..][0..label.len], label);
+    info[3 + prefix.len + label.len] = 0;
+    var expected: [Hash.digest_length]u8 = undefined;
+    Hkdf.expand(&expected, &info, secret);
+    try std.testing.expectEqual(expected, dtls_output);
 }

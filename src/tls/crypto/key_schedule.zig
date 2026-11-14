@@ -15,6 +15,8 @@ const secret = @import("secret.zig");
 const transcript = @import("transcript.zig");
 
 pub const Schedule = schedule.Schedule;
+pub const ScheduleWithPrefix = schedule.ScheduleWithPrefix;
+pub const expandLabelWithPrefix = schedule.expandLabelWithPrefix;
 pub const Sha256 = Schedule(sha256.Hash);
 pub const Sha384 = Schedule(fast_sha2.Sha384);
 pub const Sm3 = Schedule(sm3.Hash);
