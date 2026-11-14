@@ -790,8 +790,10 @@ to `bignum_mod_n25519`/`bignum_madd_n25519`. Three repeated `bench-ed25519` /
 `bench-aws-lc-ed25519` runs measured deterministic key generation at 10,075 ns
 for Vail versus 10,082 ns for AWS-LC, down from Vail's previous portable
 19,726 ns (1.96x), and signing at 10,509 ns versus 10,494 ns, down from
-19,916 ns (1.90x). One-shot verify remained 68,052 ns versus 53,014 ns; the
-prepared verifier remains 22,532 ns online but costs 82,760 ns to build.
+19,916 ns (1.90x). One-shot verify fell from 68,052 ns to 57,727 ns using the
+s2n-bignum decode/negate/double-scalar kernels, versus 53,014 ns for AWS-LC
+(8.9% higher); the prepared verifier remains 22,532 ns online but costs
+82,760 ns to build.
 
 `ed25519.PreparedVerifier.initInto` builds the public-key table directly in
 caller-owned storage, including a heap cache entry. It validates encoding,

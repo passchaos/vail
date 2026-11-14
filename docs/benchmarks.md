@@ -51,6 +51,7 @@ representative medians, not a complete matrix.
 | ARM64 P-384 ECDH shared secret | 180,165 ns | AWS-LC 299,142 ns | 39.8% lower latency |
 | ARM64 Ed25519 key generation | 10,075 ns | AWS-LC 10,082 ns | ~equal |
 | ARM64 Ed25519 sign | 10,509 ns | AWS-LC 10,494 ns | ~equal |
+| ARM64 Ed25519 verify | 57,727 ns | AWS-LC 53,014 ns | 8.9% higher latency |
 | ML-DSA-44 prepared-key verify | 7,696.5 ns | AWS-LC 22,480.6 ns | 2.92x |
 
 The full dated log, including rejected optimizations and noise analysis, is in

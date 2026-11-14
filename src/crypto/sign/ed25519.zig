@@ -4,6 +4,7 @@ const std = @import("std");
 const decode_adx = @import("ed25519_decode_adx.zig");
 const point_adx = @import("ed25519_point_ops_adx.zig");
 const scalar_adx = @import("ed25519_scalar_adx.zig");
+const verify_arm64 = @import("ed25519_verify_arm64.zig");
 const x25519 = @import("../kex/x25519.zig");
 const table_values = @import("ed25519_tables.zig");
 const verify_table = @import("ed25519_verify_table.zig");
@@ -218,8 +219,9 @@ pub const PreparedVerifier = struct {
 };
 
 /// Verify an Ed25519 signature. Linux x86_64 BMI2/ADX builds use a
-/// public-input variable-time wNAF path; other targets retain Zig std's
-/// cofactored verifier.
+/// public-input variable-time wNAF path; Linux AArch64 ReleaseFast/ReleaseSafe
+/// builds use the s2n-bignum double-scalar kernel; other targets retain Zig
+/// std's cofactored verifier.
 pub fn verify(
     signature: StdEd25519.Signature,
     message: []const u8,
@@ -228,6 +230,17 @@ pub fn verify(
     if (comptime point_adx.enabled and decode_adx.enabled) {
         return verifyAdx(signature, message, public_key);
     }
+    if (comptime verify_arm64.enabled) {
+        return verifyArm64(signature, message, public_key);
+    }
+    return verifyWithStd(signature, message, public_key);
+}
+
+fn verifyWithStd(
+    signature: StdEd25519.Signature,
+    message: []const u8,
+    public_key: StdEd25519.PublicKey,
+) VerifyError!void {
     return signature.verify(message, public_key) catch |err| switch (err) {
         error.IdentityElement => {
             // Zig std currently treats every x=0 point as the identity. The
@@ -244,6 +257,83 @@ pub fn verify(
         },
         else => return err,
     };
+}
+
+fn verifyArm64(
+    signature: StdEd25519.Signature,
+    message: []const u8,
+    public_key: StdEd25519.PublicKey,
+) VerifyError!void {
+    const signature_bytes = signature.toBytes();
+    const encoded_nonce = signature_bytes[0..Curve.encoded_length].*;
+    const response = signature_bytes[Curve.encoded_length..].*;
+    try Curve.scalar.rejectNonCanonical(response);
+    try Curve.rejectNonCanonical(encoded_nonce);
+
+    const public_key_bytes = public_key.toBytes();
+    var public_xy: [8]u64 = undefined;
+    if (!verify_arm64.decode(&public_xy, &public_key_bytes)) {
+        return error.InvalidEncoding;
+    }
+    if (xyIsIdentity(&public_xy)) return error.IdentityElement;
+    if (xyIsLowOrder(&public_xy)) return error.WeakPublicKey;
+
+    var nonce_xy: [8]u64 = undefined;
+    if (!verify_arm64.decode(&nonce_xy, &encoded_nonce)) {
+        return error.InvalidEncoding;
+    }
+    if (xyIsIdentity(&nonce_xy)) return error.IdentityElement;
+    var negated_public = public_xy;
+    verify_arm64.negate(@ptrCast(&negated_public), @ptrCast(&public_xy));
+
+    var challenge_hasher = sha512.initWithPrefix64(
+        &encoded_nonce,
+        &public_key_bytes,
+    );
+    challenge_hasher.update(message);
+    var challenge_wide: [Sha512.digest_length]u8 = undefined;
+    challenge_hasher.final(&challenge_wide);
+    const challenge = scalar_adx.reduce64(&challenge_wide);
+
+    var response_limbs: [4]u64 = undefined;
+    @memcpy(std.mem.asBytes(&response_limbs), &response);
+    var challenge_limbs: [4]u64 = undefined;
+    @memcpy(std.mem.asBytes(&challenge_limbs), &challenge);
+
+    var computed_xy: [8]u64 = undefined;
+    verify_arm64.scalarMulDouble(
+        &computed_xy,
+        &challenge_limbs,
+        &negated_public,
+        &response_limbs,
+    );
+    var computed: [32]u8 = undefined;
+    verify_arm64.encode(&computed, &computed_xy);
+    if (!std.crypto.timing_safe.eql([32]u8, computed, encoded_nonce)) {
+        // Preserve Zig std's cofactored semantics for mixed-torsion edge
+        // cases that the uncofactored s2n-bignum equation rejects.
+        return verifyWithStd(signature, message, public_key);
+    }
+}
+
+fn xyIsIdentity(xy: *const [8]u64) bool {
+    return (xy[0] | xy[1] | xy[2] | xy[3]) == 0 and
+        xy[4] == 1 and (xy[5] | xy[6] | xy[7]) == 0;
+}
+
+fn xyIsLowOrder(xy: *const [8]u64) bool {
+    var projective: [12]u64 = undefined;
+    projective[0..4].* = xy[0..4].*;
+    projective[4..8].* = xy[4..8].*;
+    projective[8] = 1;
+    projective[9] = 0;
+    projective[10] = 0;
+    projective[11] = 0;
+    var doubled: [16]u64 = undefined;
+    verify_arm64.epdouble(&doubled, &projective);
+    verify_arm64.epdouble(&doubled, @ptrCast(&doubled));
+    verify_arm64.epdouble(&doubled, @ptrCast(&doubled));
+    return (doubled[8] | doubled[9] | doubled[10] | doubled[11]) == 0;
 }
 
 fn verifyAdx(
