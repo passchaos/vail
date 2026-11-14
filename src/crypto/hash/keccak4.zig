@@ -2,11 +2,14 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const arm64 = @import("keccak4_arm64.zig");
 
-pub const enabled = builtin.cpu.arch == .x86_64 and
+const x86_enabled = builtin.cpu.arch == .x86_64 and
     builtin.os.tag == .linux and
     builtin.mode != .Debug and
     std.Target.x86.featureSetHas(builtin.cpu.features, .avx2);
+
+pub const enabled = x86_enabled or arm64.enabled;
 
 pub const shake128_rate = 168;
 pub const matrix_input_length = 34;
@@ -54,8 +57,21 @@ extern fn vailKeccakF1600x4Alt(
     rho56_table: *align(32) const [4]u64,
 ) callconv(.c) void;
 
+fn permute4(states: *[4][25]u64) void {
+    if (comptime x86_enabled) {
+        vailKeccakF1600x4Alt(
+            @ptrCast(states),
+            &round_constants,
+            &rho8,
+            &rho56,
+        );
+    } else {
+        arm64.permute(states, &round_constants);
+    }
+}
+
 comptime {
-    if (enabled) asm (@embedFile("keccak4_avx2.S"));
+    if (x86_enabled) asm (@embedFile("keccak4_avx2.S"));
 }
 
 /// Expand four 34-byte ML-KEM matrix inputs with SHAKE128 in parallel.
@@ -76,7 +92,7 @@ fn shake128Fixed(
     comptime output_length: usize,
     inputs: *const [4][matrix_input_length]u8,
 ) [4][output_length]u8 {
-    if (comptime !enabled) @compileError("four-way AVX2 SHAKE128 is unavailable");
+    if (comptime !enabled) @compileError("four-way fast SHAKE128 is unavailable");
     comptime std.debug.assert(output_length % shake128_rate == 0);
     // These states contain only the public matrix seed and domain bytes.
     var states: [4][25]u64 align(32) = [_][25]u64{[_]u64{0} ** 25} ** 4;
@@ -92,7 +108,7 @@ fn shake128Fixed(
 
     var output: [4][output_length]u8 = undefined;
     for (0..output_length / shake128_rate) |block| {
-        vailKeccakF1600x4Alt(@ptrCast(&states), &round_constants, &rho8, &rho56);
+        permute4(&states);
         for (&output, &states) |*bytes, *state| {
             @memcpy(
                 bytes[block * shake128_rate ..][0..shake128_rate],
@@ -121,7 +137,7 @@ fn shake256NoiseFixed(
     seed: *const [32]u8,
     nonce: u8,
 ) [4][output_length]u8 {
-    if (comptime !enabled) @compileError("four-way AVX2 SHAKE256 is unavailable");
+    if (comptime !enabled) @compileError("four-way fast SHAKE256 is unavailable");
     const rate = std.crypto.hash.sha3.Shake256.block_length;
     var states: [4][25]u64 align(32) = [_][25]u64{[_]u64{0} ** 25} ** 4;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&states));
@@ -135,7 +151,7 @@ fn shake256NoiseFixed(
     var output: [4][output_length]u8 = undefined;
     var offset: usize = 0;
     while (offset < output_length) {
-        vailKeccakF1600x4Alt(@ptrCast(&states), &round_constants, &rho8, &rho56);
+        permute4(&states);
         const take = @min(rate, output_length - offset);
         for (&output, &states) |*bytes, *state| {
             @memcpy(bytes[offset..][0..take], std.mem.asBytes(state)[0..take]);
@@ -149,7 +165,7 @@ fn shake256NoiseFixed(
 pub fn shake256MldsaMask(
     inputs: *const [4][mldsa_mask_input_length]u8,
 ) [4][mldsa_mask_output_length]u8 {
-    if (comptime !enabled) @compileError("four-way AVX2 SHAKE256 is unavailable");
+    if (comptime !enabled) @compileError("four-way fast SHAKE256 is unavailable");
     const rate = std.crypto.hash.sha3.Shake256.block_length;
     var states: [4][25]u64 align(32) = [_][25]u64{[_]u64{0} ** 25} ** 4;
     for (&states, 0..) |*state, lane| {
@@ -168,7 +184,7 @@ pub fn shake256MldsaMask(
 
     var output: [4][mldsa_mask_output_length]u8 = undefined;
     for (0..mldsa_mask_output_length / rate) |block| {
-        vailKeccakF1600x4Alt(@ptrCast(&states), &round_constants, &rho8, &rho56);
+        permute4(&states);
         for (&output, &states) |*bytes, *state| {
             @memcpy(
                 bytes[block * rate ..][0..rate],
@@ -183,7 +199,7 @@ pub fn shake256MldsaMask(
 pub fn shake256MldsaEta(
     inputs: *const [4][mldsa_eta_input_length]u8,
 ) [4][mldsa_eta_output_length]u8 {
-    if (comptime !enabled) @compileError("four-way AVX2 SHAKE256 is unavailable");
+    if (comptime !enabled) @compileError("four-way fast SHAKE256 is unavailable");
     const rate = std.crypto.hash.sha3.Shake256.block_length;
     var states: [4][25]u64 align(32) = [_][25]u64{[_]u64{0} ** 25} ** 4;
     for (&states, 0..) |*state, lane| {
@@ -202,7 +218,7 @@ pub fn shake256MldsaEta(
 
     var output: [4][mldsa_eta_output_length]u8 = undefined;
     for (0..mldsa_eta_output_length / rate) |block| {
-        vailKeccakF1600x4Alt(@ptrCast(&states), &round_constants, &rho8, &rho56);
+        permute4(&states);
         for (&output, &states) |*bytes, *state| {
             @memcpy(
                 bytes[block * rate ..][0..rate],

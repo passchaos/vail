@@ -75,7 +75,7 @@ pub const PreparedVerifier44 = struct {
     pub fn fromBytes(
         bytes: [MlDsa44.PublicKey.encoded_length]u8,
     ) !PreparedVerifier44 {
-        if (comptime !keccak4.enabled) {
+        if (comptime !mldsa_avx2.enabled) {
             const public_key = try MlDsa44.PublicKey.fromBytes(bytes);
             return init(&public_key);
         }
@@ -1301,7 +1301,7 @@ pub const Verifier44 = struct {
 pub fn publicKey44FromBytes(
     bytes: [MlDsa44.PublicKey.encoded_length]u8,
 ) !MlDsa44.PublicKey {
-    if (comptime !keccak4.enabled) return MlDsa44.PublicKey.fromBytes(bytes);
+    if (comptime !mldsa_avx2.enabled) return MlDsa44.PublicKey.fromBytes(bytes);
 
     var public_key: MlDsa44.PublicKey = undefined;
     public_key.rho = bytes[0..32].*;

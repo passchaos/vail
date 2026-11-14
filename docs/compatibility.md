@@ -94,7 +94,7 @@ This is a concise summary. The exhaustive feature inventory is in
 | P-521 | ADX | Portable |
 | Ed25519 | ADX | Portable |
 | RSA | ADX Montgomery | Portable |
-| Keccak/SHA-3 | AVX2 | Portable |
+| Keccak/SHA-3 | AVX2 | s2n-bignum (single- and four-way) |
 | ML-KEM | AVX2 | Portable |
 | ML-DSA | AVX2 | Portable |
 

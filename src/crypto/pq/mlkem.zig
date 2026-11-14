@@ -1853,7 +1853,7 @@ fn PolyVec(comptime k: u8) type {
             nonce: u8,
             seed: *const [32]u8,
         ) void {
-            if (comptime (k >= 2 and k <= 4) and eta == 2 and keccak4.enabled) {
+            if (comptime mlkem_avx2.enabled and (k >= 2 and k <= 4) and eta == 2 and keccak4.enabled) {
                 var expanded = keccak4.shake256Noise(seed, nonce);
                 defer crypto.secureZero(u8, mem.asBytes(&expanded));
                 inline for (0..k) |i| {
@@ -1861,7 +1861,7 @@ fn PolyVec(comptime k: u8) type {
                 }
                 return;
             }
-            if (comptime k == 4 and eta == 3 and keccak4.enabled) {
+            if (comptime mlkem_avx2.enabled and k == 4 and eta == 3 and keccak4.enabled) {
                 var expanded = keccak4.shake256NoiseEta3(seed, nonce);
                 defer crypto.secureZero(u8, mem.asBytes(&expanded));
                 inline for (0..k) |i| {

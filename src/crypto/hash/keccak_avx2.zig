@@ -1,12 +1,18 @@
-//! x86_64 AVX2-backed Keccak-f1600 permutation for pure-Zig sponges.
+//! Fast Keccak-f1600 permutation for pure-Zig sponges.
+//!
+//! Linux x86_64 AVX2 and Linux AArch64 ReleaseFast/ReleaseSafe builds use
+//! in-tree hardware schedules; other targets keep the portable sponge.
 
 const std = @import("std");
 const builtin = @import("builtin");
+const arm64 = @import("keccak_arm64.zig");
 
-pub const enabled = builtin.cpu.arch == .x86_64 and
+const x86_enabled = builtin.cpu.arch == .x86_64 and
     builtin.os.tag == .linux and
     builtin.mode != .Debug and
     std.Target.x86.featureSetHas(builtin.cpu.features, .avx2);
+
+pub const enabled = x86_enabled or arm64.enabled;
 
 const round_constants = [24]u64{
     0x0000000000000001, 0x0000000000008082,
@@ -29,8 +35,12 @@ extern fn vailKeccakF1600(
 ) callconv(.c) void;
 
 pub fn permute(state: *[25]u64) void {
-    if (comptime !enabled) @compileError("AVX2 Keccak-f1600 is unavailable");
-    vailKeccakF1600(state, &round_constants);
+    if (comptime !enabled) @compileError("fast Keccak-f1600 is unavailable");
+    if (comptime x86_enabled) {
+        vailKeccakF1600(state, &round_constants);
+    } else {
+        arm64.permute(state, &round_constants);
+    }
 }
 
 fn Sponge(
@@ -53,7 +63,7 @@ fn Sponge(
         finalized: bool = false,
 
         pub fn init(options: Options) Self {
-            if (comptime !enabled) @compileError("AVX2 Keccak sponge is unavailable");
+            if (comptime !enabled) @compileError("fast Keccak sponge is unavailable");
             std.debug.assert(options.delim == default_delimiter);
             return .{};
         }
@@ -133,7 +143,7 @@ fn Sponge(
 }
 
 /// Incremental SHAKE128/SHAKE256 and SHA3 hashes backed by the formally
-/// verified AVX2 permutation.
+/// verified hardware permutation.
 pub const Shake128 = Sponge(168, 32, 0x1f);
 pub const Shake256 = Sponge(136, 64, 0x1f);
 pub const Sha3_256 = Sponge(136, 32, 0x06);
@@ -163,7 +173,7 @@ pub noinline fn sha3_512Parts(first: []const u8, second: []const u8, output: *[6
 }
 
 comptime {
-    if (enabled) asm (@embedFile("keccak_avx2.S"));
+    if (x86_enabled) asm (@embedFile("keccak_avx2.S"));
 }
 
 test "AVX2 Keccak-f1600 permutation matches Zig std" {

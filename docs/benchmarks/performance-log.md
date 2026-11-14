@@ -564,6 +564,13 @@ comparisons; the corresponding `bench-aws-lc-*-random` steps run the test-only
 AWS-LC sides. `bench-mlkem768-keygen` retains the deterministic ML-KEM-768
 key-generation microbenchmark.
 
+On the 2026-11-14 Jetson AGX Thor ARM64 host, single- and four-way Keccak were
+switched to the s2n-bignum/mlkem-native AArch64 schedules. Three repeated runs
+measured ML-DSA-44 prepared verify 24,128 -> 23,278 ns (3.5%), raw verify
+54,025 -> 52,435 ns (2.9%), and prepared sign 182,134 -> 179,485 ns (1.5%);
+ML-KEM-768 results stayed within noise. The remaining PQ gap is dominated by
+portable NTT/pointwise arithmetic, not hashing.
+
 ML-DSA-44 provides an in-tree pure-Zig FIPS 204 fast path, retains Zig std as
 the portable fallback, and interoperates in both RFC 7250 TLS client/server
 directions with rustls/AWS-LC. Its in-tree
