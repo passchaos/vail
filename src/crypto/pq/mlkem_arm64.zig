@@ -5,12 +5,18 @@
 //! pointwise multiply-accumulate, and the serialization/reduction helpers come
 //! from mlkem-native (imported by AWS-LC) and follow the FIPS 203 arithmetic.
 
+const std = @import("std");
 const builtin = @import("builtin");
 const zetas = @import("mlkem/zetas_arm64.zig");
+const rej_uniform_table = @import("mlkem/rej_uniform_table_arm64.zig");
 
 pub const enabled = builtin.cpu.arch == .aarch64 and
     builtin.os.tag == .linux and
     (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSafe);
+
+/// Rejection sampling of the public matrix uses the same AArch64 gating as the
+/// arithmetic kernels and needs no extra CPU features.
+pub const rejection_enabled = enabled;
 
 const q: i16 = 3329;
 
@@ -73,6 +79,19 @@ pub fn invNtt(data: *align(32) [256]i16) void {
     // The inverse NTT leaves coefficients bounded by 8q; reduce to [0, q) to
     // match the portable postcondition.
     vailMlKemReduceArm64(data);
+}
+
+pub fn rejectUniform(output: *align(32) [256]i16, input: []const u8) usize {
+    if (comptime !rejection_enabled) {
+        @compileError("ARM64 ML-KEM rejection sampling is unavailable");
+    }
+    std.debug.assert(input.len % 24 == 0);
+    return vailMlKemRejUniformArm64(
+        output,
+        input.ptr,
+        input.len,
+        &rej_uniform_table.table,
+    );
 }
 
 pub fn mulCache(cache: *align(32) [128]i16, poly: *align(32) const [256]i16) void {
@@ -138,6 +157,13 @@ extern fn vailMlKemInttArm64(
     twiddles56: *const [384]i16,
 ) callconv(.c) void;
 
+extern fn vailMlKemRejUniformArm64(
+    output: *align(32) [256]i16,
+    input: [*]const u8,
+    input_len: usize,
+    table: *const [4096]u8,
+) callconv(.c) usize;
+
 extern fn vailMlKemMulCacheArm64(
     cache: *align(32) [128]i16,
     poly: *align(32) const [256]i16,
@@ -171,6 +197,7 @@ comptime {
         asm (@embedFile("mlkem/poly_reduce_arm64.S"));
         asm (@embedFile("mlkem/poly_tomont_arm64.S"));
         asm (@embedFile("mlkem/poly_tobytes_arm64.S"));
+        asm (@embedFile("mlkem/rej_uniform_arm64.S"));
         asm (@embedFile("mlkem/ntt_arm64.S"));
         asm (@embedFile("mlkem/intt_arm64.S"));
         asm (@embedFile("mlkem/poly_mulcache_compute_arm64.S"));

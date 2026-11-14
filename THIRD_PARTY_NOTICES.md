@@ -23,8 +23,10 @@ SPDX headers are authoritative; this file is a summary.
 - Used for: ML-KEM AVX2 kernels and AArch64 NTT/INTT/basemul/reduction
   kernels.
 - Locations: `src/crypto/pq/mlkem/*.S` (x86_64 and AArch64). The AArch64
-  twiddle-factor tables in `src/crypto/pq/mlkem/zetas_arm64.zig` are extracted
-  from the same upstream `aarch64_zetas.c`.
+  twiddle-factor tables in `src/crypto/pq/mlkem/zetas_arm64.zig` and the
+  rejection-sampling lookup table in
+  `src/crypto/pq/mlkem/rej_uniform_table_arm64.zig` are extracted from the same
+  upstream AArch64 tables.
 - These files are vendored and preprocessed for the ELF x86_64 or AArch64 SysV
   ABI.
 

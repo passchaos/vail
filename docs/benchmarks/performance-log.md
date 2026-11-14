@@ -579,7 +579,7 @@ portable NTT/pointwise arithmetic, not hashing.
 The ML-KEM follow-up moved that remaining arithmetic to the mlkem-native
 AArch64 schedules: forward and inverse NTT, the cached k=2/k=3/k=4 pointwise
 products, the multiplication cache, Barrett reduction, Montgomery conversion,
-and serialization. The kernels use the standard coefficient order shared with
+serialization, and public-matrix rejection sampling. The kernels use the standard coefficient order shared with
 the portable implementation. Because mlkem-native leaves NTT output lazily
 reduced (up to 8q), the accelerated forward and inverse transforms are followed
 by the vectorized Barrett reduction, which restores the documented
@@ -594,18 +594,18 @@ baseline run with them disabled):
 
 | Parameter set and operation | Portable | ARM64 kernels | Speedup |
 | --- | ---: | ---: | ---: |
-| ML-KEM-512 key generation | 17,740 ns | 11,493 ns | 1.54x |
-| ML-KEM-512 encapsulation | 14,901 ns | 6,351 ns | 2.35x |
-| ML-KEM-512 decapsulation | 21,438 ns | 9,299 ns | 2.31x |
-| ML-KEM-768 key generation | 29,523 ns | 17,947 ns | 1.65x |
-| ML-KEM-768 encapsulation | 21,916 ns | 7,490 ns | 2.93x |
-| ML-KEM-768 decapsulation | 31,133 ns | 11,723 ns | 2.66x |
-| ML-KEM-1024 key generation | 47,775 ns | 29,404 ns | 1.62x |
-| ML-KEM-1024 encapsulation | 33,617 ns | 11,986 ns | 2.80x |
-| ML-KEM-1024 decapsulation | 45,288 ns | 17,263 ns | 2.62x |
+| ML-KEM-512 key generation | 17,740 ns | 8,520 ns | 2.08x |
+| ML-KEM-512 encapsulation | 14,901 ns | 6,327 ns | 2.36x |
+| ML-KEM-512 decapsulation | 21,438 ns | 9,308 ns | 2.30x |
+| ML-KEM-768 key generation | 29,523 ns | 11,627 ns | 2.54x |
+| ML-KEM-768 encapsulation | 21,916 ns | 7,484 ns | 2.93x |
+| ML-KEM-768 decapsulation | 31,133 ns | 11,708 ns | 2.66x |
+| ML-KEM-1024 key generation | 47,775 ns | 17,743 ns | 2.69x |
+| ML-KEM-1024 encapsulation | 33,617 ns | 11,955 ns | 2.81x |
+| ML-KEM-1024 decapsulation | 45,288 ns | 17,223 ns | 2.63x |
 
 The X25519MLKEM768 client-start operation in the same harness dropped from
-37,531 ns to 25,864 ns (1.45x). The deterministic ML-KEM-768 encapsulation
+37,531 ns to 19,631 ns (1.91x). The deterministic ML-KEM-768 encapsulation
 checksum was identical before and after (2,261,458), so the speedup is
 output-preserving. These were consecutive same-host runs rather than paired
 A-B-B-A quartets; treat the third significant digit as noise. On this host the

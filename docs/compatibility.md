@@ -95,7 +95,7 @@ This is a concise summary. The exhaustive feature inventory is in
 | Ed25519 | ADX | s2n-bignum (fixed base, verify) |
 | RSA | ADX Montgomery | Portable |
 | Keccak/SHA-3 | AVX2 | s2n-bignum (single- and four-way) |
-| ML-KEM | AVX2 | mlkem-native (NTT, INTT, basemul, reduce, toMont, toBytes) |
+| ML-KEM | AVX2 | mlkem-native (NTT, INTT, basemul, reduce, toMont, toBytes, rejection sampling) |
 | ML-DSA | AVX2 | Portable |
 
 ## Not claimed

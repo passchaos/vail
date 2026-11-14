@@ -1795,6 +1795,8 @@ fn uniformFour(seed: [32]u8, domains: [4][2]u8) [4]Poly {
         var coefficient_index: usize = 0;
         if (comptime mlkem_avx2.rejection_enabled) {
             coefficient_index = mlkem_avx2.rejectUniform(&poly.cs, &expanded[lane]);
+        } else if (comptime mlkem_arm64.rejection_enabled) {
+            coefficient_index = mlkem_arm64.rejectUniform(&poly.cs, &expanded[lane]);
         } else {
             appendUniformCoefficients(poly, &coefficient_index, &expanded[lane]);
         }
@@ -1813,7 +1815,7 @@ fn uniformFour(seed: [32]u8, domains: [4][2]u8) [4]Poly {
     return result;
 }
 
-fn uniformOneAvx2(seed: [32]u8, domain: [2]u8) Poly {
+fn uniformOneExpanded(seed: [32]u8, domain: [2]u8) Poly {
     const input = seed ++ domain;
     var shake = Shake128.init(.{});
     shake.update(&input);
@@ -1824,6 +1826,8 @@ fn uniformOneAvx2(seed: [32]u8, domain: [2]u8) Poly {
     var coefficient_index: usize = 0;
     if (comptime mlkem_avx2.rejection_enabled) {
         coefficient_index = mlkem_avx2.rejectUniform(&result.cs, &expanded);
+    } else if (comptime mlkem_arm64.rejection_enabled) {
+        coefficient_index = mlkem_arm64.rejectUniform(&result.cs, &expanded);
     } else {
         appendUniformCoefficients(&result, &coefficient_index, &expanded);
     }
@@ -1836,7 +1840,9 @@ fn uniformOneAvx2(seed: [32]u8, domain: [2]u8) Poly {
 }
 
 test "single-lane accelerated matrix sampling continues the SHAKE stream" {
-    if (comptime !mlkem_avx2.rejection_enabled) return error.SkipZigTest;
+    if (comptime !mlkem_avx2.rejection_enabled and !mlkem_arm64.rejection_enabled) {
+        return error.SkipZigTest;
+    }
     const seed = [_]u8{0x6f} ++ [_]u8{0} ** 31;
     const domain = [2]u8{ 2, 2 };
     const input = seed ++ domain;
@@ -1845,12 +1851,33 @@ test "single-lane accelerated matrix sampling continues the SHAKE stream" {
     var expanded: [keccak4.matrix_output_length]u8 = undefined;
     shake.squeeze(&expanded);
     var first_pass: Poly = undefined;
-    const accepted = mlkem_avx2.rejectUniform(&first_pass.cs, &expanded);
+    const accepted = if (comptime mlkem_avx2.rejection_enabled)
+        mlkem_avx2.rejectUniform(&first_pass.cs, &expanded)
+    else
+        mlkem_arm64.rejectUniform(&first_pass.cs, &expanded);
     try testing.expectEqual(@as(usize, 255), accepted);
 
-    const actual = uniformOneAvx2(seed, domain);
+    const actual = uniformOneExpanded(seed, domain);
     const expected = Poly.uniform(seed, domain[0], domain[1]);
     try testing.expectEqual(expected.cs, actual.cs);
+}
+
+test "accelerated matrix rejection sampling matches portable oracle" {
+    if (comptime !mlkem_arm64.rejection_enabled) return error.SkipZigTest;
+
+    var rnd = RndGen.init(17);
+    var bytes: [keccak4.matrix_output_length]u8 = undefined;
+    for (0..200) |_| {
+        rnd.random().bytes(&bytes);
+        var accelerated: Poly = undefined;
+        const accepted = mlkem_arm64.rejectUniform(&accelerated.cs, &bytes);
+
+        var portable: Poly = undefined;
+        var index: usize = 0;
+        appendUniformCoefficients(&portable, &index, &bytes);
+        try testing.expectEqual(index, accepted);
+        try testing.expectEqualSlices(i16, portable.cs[0..index], accelerated.cs[0..index]);
+    }
 }
 
 // A vector of k polynomials.
@@ -2273,6 +2300,34 @@ fn Mat(comptime k: u8) type {
         }
 
         fn uniformInto(output: *Self, seed: [32]u8, comptime transposed: bool) void {
+            if (comptime (k >= 2 and k <= 4) and mlkem_arm64.enabled and keccak4.enabled) {
+                var offset: usize = 0;
+                while (offset + 4 <= k * k) : (offset += 4) {
+                    var domains: [4][2]u8 = undefined;
+                    for (&domains, 0..) |*domain, lane| {
+                        const flat_index = offset + lane;
+                        const i: u8 = @intCast(flat_index / k);
+                        const j: u8 = @intCast(flat_index % k);
+                        domain.* = if (transposed) .{ i, j } else .{ j, i };
+                    }
+                    const sampled = uniformFour(seed, domains);
+                    for (0..4) |lane| {
+                        const flat_index = offset + lane;
+                        const i = flat_index / k;
+                        const j = flat_index % k;
+                        output.rows[i].ps[j] = sampled[lane];
+                    }
+                }
+                while (offset < k * k) : (offset += 1) {
+                    const i: u8 = @intCast(offset / k);
+                    const j: u8 = @intCast(offset % k);
+                    output.rows[i].ps[j] = uniformOneExpanded(
+                        seed,
+                        if (transposed) .{ i, j } else .{ j, i },
+                    );
+                }
+                return;
+            }
             if (comptime (k >= 2 and k <= 4) and mlkem_avx2.enabled and keccak4.enabled) {
                 var offset: usize = 0;
                 while (offset + 4 <= k * k) : (offset += 4) {
@@ -2295,7 +2350,7 @@ fn Mat(comptime k: u8) type {
                 while (offset < k * k) : (offset += 1) {
                     const i: u8 = @intCast(offset / k);
                     const j: u8 = @intCast(offset % k);
-                    output.rows[i].ps[j] = uniformOneAvx2(
+                    output.rows[i].ps[j] = uniformOneExpanded(
                         seed,
                         if (transposed) .{ i, j } else .{ j, i },
                     );
