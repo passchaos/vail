@@ -1,7 +1,7 @@
-//! Constant-time Ed25519 scalar reduction and multiply-add on x86_64 ADX.
+//! Constant-time Ed25519 scalar reduction and multiply-add.
 //!
-//! The instruction schedules come from the formally verified s2n-bignum
-//! implementation and are embedded directly in Zig.
+//! Linux x86_64 ADX and Linux AArch64 ReleaseFast/ReleaseSafe builds use
+//! formally verified s2n-bignum schedules; other targets use Zig std.
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT-0
 
@@ -10,16 +10,27 @@ const builtin = @import("builtin");
 
 const Scalar = std.crypto.sign.Ed25519.Curve.scalar;
 
-pub const enabled = builtin.cpu.arch == .x86_64 and
+const x86_enabled = builtin.cpu.arch == .x86_64 and
     builtin.os.tag == .linux and
     builtin.mode != .Debug and
     std.Target.x86.featureSetHas(builtin.cpu.features, .bmi2) and
     std.Target.x86.featureSetHas(builtin.cpu.features, .adx);
 
+const arm64_enabled = builtin.cpu.arch == .aarch64 and
+    builtin.os.tag == .linux and
+    (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSafe);
+
+pub const enabled = x86_enabled or arm64_enabled;
+
 pub fn reduce64(input: *const [64]u8) [32]u8 {
-    if (comptime enabled) {
+    if (comptime x86_enabled) {
         var output: [4]u64 = undefined;
         vailEd25519ScalarReduce(&output, 8, @ptrCast(input));
+        return @bitCast(output);
+    }
+    if (comptime arm64_enabled) {
+        var output: [4]u64 = undefined;
+        vailEd25519ScalarReduceArm64(&output, 8, @ptrCast(input));
         return @bitCast(output);
     }
     return Scalar.reduce64(input.*);
@@ -30,9 +41,19 @@ pub fn mulAdd(
     y: *const [32]u8,
     addend: *const [32]u8,
 ) [32]u8 {
-    if (comptime enabled) {
+    if (comptime x86_enabled) {
         var output: [4]u64 = undefined;
         vailEd25519ScalarMulAdd(
+            &output,
+            @ptrCast(x),
+            @ptrCast(y),
+            @ptrCast(addend),
+        );
+        return @bitCast(output);
+    }
+    if (comptime arm64_enabled) {
+        var output: [4]u64 = undefined;
+        vailEd25519ScalarMulAddArm64(
             &output,
             @ptrCast(x),
             @ptrCast(y),
@@ -55,6 +76,26 @@ extern fn vailEd25519ScalarMulAdd(
     y: *align(1) const [4]u64,
     addend: *align(1) const [4]u64,
 ) callconv(.c) void;
+
+extern fn vailEd25519ScalarReduceArm64(
+    output: *[4]u64,
+    input_limb_count: usize,
+    input: *align(1) const [8]u64,
+) callconv(.c) void;
+
+extern fn vailEd25519ScalarMulAddArm64(
+    output: *[4]u64,
+    x: *align(1) const [4]u64,
+    y: *align(1) const [4]u64,
+    addend: *align(1) const [4]u64,
+) callconv(.c) void;
+
+comptime {
+    if (arm64_enabled) {
+        asm (@embedFile("bignum_mod_n25519_arm64.S"));
+        asm (@embedFile("bignum_madd_n25519_arm64.S"));
+    }
+}
 
 test "Ed25519 ADX scalar operations match Zig std" {
     var state: u64 = 0x243f_6a88_85a3_08d3;
@@ -88,7 +129,7 @@ fn fillDeterministic(output: []u8, state: *u64) void {
 }
 
 comptime {
-    if (enabled) {
+    if (x86_enabled) {
         asm (
             \\       
             \\        .text

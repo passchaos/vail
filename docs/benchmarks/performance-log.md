@@ -784,14 +784,14 @@ comparison, `zig build -Doptimize=ReleaseFast bench-ed25519-verify` and
 `bench-ed25519` and `bench-aws-lc-ed25519` for the component matrix.
 
 On the 2026-11-14 Jetson AGX Thor ARM64 host, the Ed25519 fixed-base
-multiplication used by key generation was switched to the s2n-bignum
-`edwards25519_scalarmulbase` schedule. Three repeated `bench-ed25519` /
+multiplication used by key generation and signing was switched to the
+s2n-bignum `edwards25519_scalarmulbase` schedule, and scalar reduction/mul-add
+to `bignum_mod_n25519`/`bignum_madd_n25519`. Three repeated `bench-ed25519` /
 `bench-aws-lc-ed25519` runs measured deterministic key generation at 10,075 ns
 for Vail versus 10,082 ns for AWS-LC, down from Vail's previous portable
-19,726 ns (1.96x). One-shot signing remained about 20,046 ns versus AWS-LC
-10,500 ns because ARM64 still uses portable scalar reduction/mul-add, and
-one-shot verify remained 68,052 ns versus 53,014 ns; the prepared verifier
-remains 22,532 ns online but costs 82,771 ns to build.
+19,726 ns (1.96x), and signing at 10,509 ns versus 10,494 ns, down from
+19,916 ns (1.90x). One-shot verify remained 68,052 ns versus 53,014 ns; the
+prepared verifier remains 22,532 ns online but costs 82,760 ns to build.
 
 `ed25519.PreparedVerifier.initInto` builds the public-key table directly in
 caller-owned storage, including a heap cache entry. It validates encoding,

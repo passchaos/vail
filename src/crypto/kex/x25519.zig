@@ -96,6 +96,11 @@ pub const X25519 = struct {
             if (!result.non_identity) return error.IdentityElement;
             return result.encoded;
         }
+        if (comptime ed25519_base_arm64.enabled) {
+            const result = ed25519_base_arm64.scalarMultBase(scalar_bytes);
+            if (!result.non_identity) return error.IdentityElement;
+            return result.encoded;
+        }
         const point = try X25519.mulEdwardsBase(scalar_bytes.*);
         return point.toBytes();
     }
