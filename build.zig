@@ -344,6 +344,7 @@ const arm64_asm_paths = [_][]const u8{
     "src/crypto/ec/p256_point_mixed_add_arm64.S",
     "src/crypto/ec/p256_point_mixed_add_alt_arm64.S",
     "src/crypto/ec/p256_scalar_inv_arm64.S",
+    "src/crypto/ec/p256_scalar_mont_arm64.S",
     "src/crypto/ec/p256_scalarmulbase_arm64.S",
     "src/crypto/ec/p256_scalarmulbase_alt_arm64.S",
     "src/crypto/ec/p256_montjscalarmul_arm64.S",

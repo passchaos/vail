@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const field = @import("p256_field.zig");
 const scalar_inv_x86 = @import("p256_scalar_inv_x86.zig");
+const scalar_mont_arm64 = @import("p256_scalar_mont_arm64.zig");
 
 const P256 = std.crypto.ecc.P256;
 pub const Scalar = P256.scalar.Scalar;
@@ -289,6 +290,18 @@ pub noinline fn scalarMontgomeryMulAssign(
     a: *const Scalar,
     b: *const Scalar,
 ) void {
+    if (comptime scalar_mont_arm64.enabled) {
+        scalar_mont_arm64.mul(&output.fe.limbs, &a.fe.limbs, &b.fe.limbs);
+        return;
+    }
+    scalarMontgomeryMulAssignPortable(output, a, b);
+}
+
+noinline fn scalarMontgomeryMulAssignPortable(
+    output: *Scalar,
+    a: *const Scalar,
+    b: *const Scalar,
+) void {
     var product = [_]u64{0} ** (2 * scalar_limb_count + 1);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&product));
     inline for (0..scalar_limb_count) |row| {
@@ -433,8 +446,16 @@ pub noinline fn invertSecretScalarAssign(
     var result = Scalar.one;
     defer std.crypto.secureZero(Scalar, (&result)[0..1]);
     inline for (inversion_schedule.steps[0..inversion_schedule.len]) |step| {
-        inline for (0..step.squares) |_| {
-            scalarMontgomeryMulAssign(&result, &result, &result);
+        if (comptime scalar_mont_arm64.enabled) {
+            scalar_mont_arm64.sqr(
+                &result.fe.limbs,
+                &result.fe.limbs,
+                step.squares,
+            );
+        } else {
+            inline for (0..step.squares) |_| {
+                scalarMontgomeryMulAssign(&result, &result, &result);
+            }
         }
         scalarMontgomeryMulAssign(
             &result,
@@ -510,4 +531,60 @@ pub fn scalarFromDigest(
     var result: Scalar = undefined;
     scalarLimbsToMontgomeryAssign(&result, &limbs);
     return result;
+}
+
+test "ARM64 scalar-order Montgomery kernels match the portable path" {
+    if (comptime scalar_mont_arm64.enabled) {
+        var prng = std.Random.DefaultPrng.init(0x9e3779b97f4a7c15);
+        const random = prng.random();
+        var case_index: usize = 0;
+        while (case_index < 256) : (case_index += 1) {
+            var a = randomScalar(random);
+            var b = randomScalar(random);
+            var expected: Scalar = undefined;
+            scalarMontgomeryMulAssignPortable(&expected, &a, &b);
+            var actual: Scalar = undefined;
+            scalar_mont_arm64.mul(
+                &actual.fe.limbs,
+                &a.fe.limbs,
+                &b.fe.limbs,
+            );
+            try std.testing.expectEqualSlices(
+                u64,
+                &expected.fe.limbs,
+                &actual.fe.limbs,
+            );
+
+            inline for (1..5) |rep| {
+                var squared = a;
+                for (0..rep) |_| {
+                    scalarMontgomeryMulAssignPortable(
+                        &squared,
+                        &squared,
+                        &squared,
+                    );
+                }
+                var actual_squared: Scalar = undefined;
+                scalar_mont_arm64.sqr(
+                    &actual_squared.fe.limbs,
+                    &a.fe.limbs,
+                    rep,
+                );
+                try std.testing.expectEqualSlices(
+                    u64,
+                    &squared.fe.limbs,
+                    &actual_squared.fe.limbs,
+                );
+            }
+        }
+    }
+}
+
+fn randomScalar(random: std.Random) Scalar {
+    var limbs: ScalarLimbs = undefined;
+    for (&limbs) |*limb| limb.* = random.int(u64);
+    while (scalarSubRaw(limbs, scalar_modulus).borrow == 0) {
+        limbs = scalarSubRaw(limbs, scalar_modulus).value;
+    }
+    return .{ .fe = .{ .limbs = limbs } };
 }
