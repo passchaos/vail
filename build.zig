@@ -125,6 +125,37 @@ pub fn build(b: *std.Build) void {
         test_all_step.dependOn(&run_archive_tests.step);
     }
 
+    const test_layers_step = b.step(
+        "test-layers",
+        "Run crypto, X.509, TLS, and QUIC test suites independently",
+    );
+    const layer_tests = [_]struct {
+        name: []const u8,
+        path: []const u8,
+    }{
+        .{ .name = "crypto", .path = "src/test_layer_crypto.zig" },
+        .{ .name = "x509", .path = "src/test_layer_x509.zig" },
+        .{ .name = "tls", .path = "src/test_layer_tls.zig" },
+        .{ .name = "quic", .path = "src/test_layer_quic.zig" },
+    };
+    for (layer_tests) |layer| {
+        const layer_tests_artifact = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(layer.path),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "vort", .module = vort }},
+            }),
+        });
+        const run_layer_tests = b.addRunArtifact(layer_tests_artifact);
+        const layer_step = b.step(
+            b.fmt("test-{s}", .{layer.name}),
+            b.fmt("Run the {s} test suite", .{layer.name}),
+        );
+        layer_step.dependOn(&run_layer_tests.step);
+        test_layers_step.dependOn(&run_layer_tests.step);
+    }
+
     if (enable_bench) benches.add(b, vail, target, optimize);
     if (enable_interop) interop.add(b, vail, target, optimize);
 

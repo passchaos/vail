@@ -19,6 +19,11 @@
 | `zig build test` | Run Vail and package API tests |
 | `zig build test-compile` | Compile tests without running them |
 | `zig build test-all` | Run Vail, package, signature-primitive, and archive tests |
+| `zig build test-layers` | Run the crypto, X.509, TLS, and QUIC suites independently |
+| `zig build test-crypto` | Run only the crypto-layer tests |
+| `zig build test-x509` | Run only the X.509-layer tests |
+| `zig build test-tls` | Run only the TLS-layer tests |
+| `zig build test-quic` | Run only the QUIC-layer tests |
 | `zig build check-generated` | Verify generated files against their manifest |
 | `zig build check-docs` | Verify relative Markdown links |
 | `zig build check` | Run `zig fmt --check`, generated-file, docs-link, and `test-all` gates |
