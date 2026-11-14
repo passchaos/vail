@@ -588,8 +588,9 @@ unchanged. Differential tests compare the forward NTT, the inverse NTT, and the
 pointwise product against the portable oracle for every coefficient over
 randomized inputs, and all ML-KEM KATs pass in ReleaseSafe and ReleaseFast.
 
-On the same 2026-11-14 Jetson AGX Thor ARM64 host, three repeated ReleaseFast
-runs of the same benchmarks with the ARM64 kernels toggled off and on measured:
+On the same 2026-11-14 Jetson AGX Thor ARM64 host, ReleaseFast runs of the
+same benchmarks measured (three runs with the ARM64 kernels enabled, one
+baseline run with them disabled):
 
 | Parameter set and operation | Portable | ARM64 kernels | Speedup |
 | --- | ---: | ---: | ---: |
