@@ -4,9 +4,9 @@
 //! implementation.
 
 const builtin = @import("builtin");
+const asm_compat = @import("../asm_compat.zig");
 
-pub const enabled = builtin.cpu.arch == .aarch64 and
-    builtin.os.tag == .linux and
+pub const enabled = asm_compat.arm64_native and
     (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSafe);
 
 pub fn scalarMult(
@@ -26,6 +26,8 @@ extern fn vailP384JacobianScalarMulArm64(
     point: *const [18]u64,
 ) callconv(.c) void;
 
+const transformed = asm_compat.arm64(@embedFile("p384_scalarmul_arm64.S"));
+
 comptime {
-    if (enabled) asm (@embedFile("p384_scalarmul_arm64.S"));
+    if (enabled) asm (transformed.bytes[0..transformed.len]);
 }

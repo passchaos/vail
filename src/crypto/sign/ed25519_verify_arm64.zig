@@ -5,9 +5,9 @@
 //! `scalar * point + bscalar * B`.
 
 const builtin = @import("builtin");
+const asm_compat = @import("../asm_compat.zig");
 
-pub const enabled = builtin.cpu.arch == .aarch64 and
-    builtin.os.tag == .linux and
+pub const enabled = asm_compat.arm64_native and
     (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSafe);
 
 pub fn decode(point: *[8]u64, encoded: *const [32]u8) bool {
@@ -69,9 +69,12 @@ extern fn vailEd25519ScalarMulDoubleArm64(
     bscalar: *const [4]u64,
 ) callconv(.c) void;
 
+const verify_asm = asm_compat.slice(@embedFile("ed25519_verify_arm64.S"));
+const epdouble_asm = asm_compat.slice(@embedFile("ed25519_epdouble_arm64.S"));
+
 comptime {
     if (enabled) {
-        asm (@embedFile("ed25519_verify_arm64.S"));
-        asm (@embedFile("ed25519_epdouble_arm64.S"));
+        asm (verify_asm);
+        asm (epdouble_asm);
     }
 }

@@ -8,6 +8,9 @@ const comb_groups = 4;
 const comb_width = 8;
 const comb_entries = 1 << comb_width;
 const comb_windows = 8;
+const secret_comb_width = 6;
+const secret_comb_entries = 1 << secret_comb_width;
+const secret_comb_windows = 11;
 const ecdh_block_size = 6;
 // Signed radix-64 recoding covers bit 256 as well as the 256 scalar bits.
 const ecdh_blocks = (257 + ecdh_block_size - 1) / ecdh_block_size;
@@ -45,6 +48,33 @@ pub fn main(init: std.process.Init) !void {
             comb[group][1][index] = affine.y.limbs;
         }
     }
+    var secret_comb: [comb_groups][2][4][secret_comb_entries]u64 = undefined;
+    for (0..comb_groups) |group| {
+        for (0..secret_comb_entries) |index| {
+            // Entry zero is the same harmless dummy as entry one; the secret
+            // multiplier discards it with a conditional move.
+            const effective_index = if (index == 0) 1 else index;
+            var scalar = [_]u8{0} ** 32;
+            for (0..secret_comb_width) |column| {
+                if ((effective_index &
+                    (@as(usize, 1) << @intCast(column))) == 0)
+                {
+                    continue;
+                }
+                const bit_index =
+                    (group * secret_comb_width + column) *
+                    secret_comb_windows;
+                scalar[bit_index / 8] |=
+                    @as(u8, 1) << @intCast(bit_index % 8);
+            }
+            const point = try P256.basePoint.mulPublic(scalar, .little);
+            const affine = point.affineCoordinates();
+            for (0..4) |limb| {
+                secret_comb[group][0][limb][index] = affine.x.limbs[limb];
+                secret_comb[group][1][limb][index] = affine.y.limbs[limb];
+            }
+        }
+    }
     var ecdh: [ecdh_entries][8]u64 = undefined;
     var block_point = P256.basePoint;
     for (0..ecdh_blocks) |block| {
@@ -78,9 +108,9 @@ pub fn main(init: std.process.Init) !void {
     for (coordinates) |coordinate| {
         try writer.writeAll("    .{\n");
         for (coordinate) |limbs| {
-            try writer.writeAll("        .{");
-            for (limbs) |limb| try writer.print(" {d},", .{limb});
-            try writer.writeAll(" },\n");
+            try writer.writeAll("        .{\n");
+            for (limbs) |limb| try writer.print("            {d},\n", .{limb});
+            try writer.writeAll("        },\n");
         }
         try writer.writeAll("    },\n");
     }
@@ -92,8 +122,26 @@ pub fn main(init: std.process.Init) !void {
         for (group) |coordinate| {
             try writer.writeAll("        .{\n");
             for (coordinate) |limbs| {
+                try writer.writeAll("            .{\n");
+                for (limbs) |limb| {
+                    try writer.print("                {d},\n", .{limb});
+                }
+                try writer.writeAll("            },\n");
+            }
+            try writer.writeAll("        },\n");
+        }
+        try writer.writeAll("    },\n");
+    }
+    try writer.writeAll("};\n");
+    try writer.writeByte('\n');
+    try writer.writeAll("pub const base_comb_4x6: [4][2][4][64]u64 = .{\n");
+    for (secret_comb) |group| {
+        try writer.writeAll("    .{\n");
+        for (group) |coordinate| {
+            try writer.writeAll("        .{\n");
+            for (coordinate) |entries| {
                 try writer.writeAll("            .{");
-                for (limbs) |limb| try writer.print(" {d},", .{limb});
+                for (entries) |value| try writer.print(" {d},", .{value});
                 try writer.writeAll(" },\n");
             }
             try writer.writeAll("        },\n");
@@ -106,9 +154,9 @@ pub fn main(init: std.process.Init) !void {
         "pub const base_ecdh_block6: [1376][8]u64 align(64) = .{\n",
     );
     for (ecdh) |entry| {
-        try writer.writeAll("    .{");
-        for (entry) |limb| try writer.print(" {d},", .{limb});
-        try writer.writeAll(" },\n");
+        try writer.writeAll("    .{\n");
+        for (entry) |limb| try writer.print("        {d},\n", .{limb});
+        try writer.writeAll("    },\n");
     }
     try writer.writeAll("};\n");
     try writer.flush();

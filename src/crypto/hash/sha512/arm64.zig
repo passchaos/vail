@@ -8,16 +8,25 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const asm_compat = @import("../../asm_compat.zig");
 
-pub const enabled = builtin.cpu.arch == .aarch64 and
-    builtin.os.tag == .linux and
+const has_sha512 = if (builtin.os.tag == .macos)
+    std.Target.aarch64.featureSetHas(builtin.cpu.features, .sha3)
+else
+    true;
+
+pub const enabled = asm_compat.arm64_native and
     builtin.mode != .Debug and
-    builtin.zig_backend != .stage2_c;
+    builtin.zig_backend != .stage2_c and
+    has_sha512;
 
 const hwcap_sha512: usize = 1 << 21;
 
 fn hasSha512() bool {
-    return (std.os.linux.getauxval(std.elf.AT_HWCAP) & hwcap_sha512) != 0;
+    if (comptime builtin.os.tag == .linux) {
+        return (std.os.linux.getauxval(std.elf.AT_HWCAP) & hwcap_sha512) != 0;
+    }
+    return true;
 }
 
 pub inline fn compress(
@@ -41,8 +50,10 @@ extern fn vailSha512BlockDataOrderArm64(
     block_count: usize,
 ) callconv(.c) void;
 
+const asm_source = asm_compat.slice(@embedFile("arm64.S"));
+
 comptime {
-    if (enabled) asm (@embedFile("arm64.S"));
+    if (enabled) asm (asm_source);
 }
 
 const round_constants = [80]u64{

@@ -7,9 +7,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT-0
 
 const builtin = @import("builtin");
+const asm_compat = @import("../asm_compat.zig");
 
-pub const enabled = builtin.cpu.arch == .aarch64 and
-    builtin.os.tag == .linux and
+pub const enabled = asm_compat.arm64_native and
     (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSafe);
 
 pub fn pointAdd(
@@ -52,10 +52,14 @@ extern fn vailP384MontgomeryJacobianMixedAddArm64(
     affine: *const [12]u64,
 ) callconv(.c) void;
 
+const add = asm_compat.arm64(@embedFile("p384_montjadd_arm64.S"));
+const double = asm_compat.arm64(@embedFile("p384_montjdouble_arm64.S"));
+const mixed_add = asm_compat.arm64(@embedFile("p384_montjmixadd_arm64.S"));
+
 comptime {
     if (enabled) {
-        asm (@embedFile("p384_montjadd_arm64.S"));
-        asm (@embedFile("p384_montjdouble_arm64.S"));
-        asm (@embedFile("p384_montjmixadd_arm64.S"));
+        asm (add.bytes[0..add.len]);
+        asm (double.bytes[0..double.len]);
+        asm (mixed_add.bytes[0..mixed_add.len]);
     }
 }

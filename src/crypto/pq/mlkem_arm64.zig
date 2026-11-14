@@ -7,11 +7,11 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const asm_compat = @import("../asm_compat.zig");
 const zetas = @import("mlkem/zetas_arm64.zig");
 const rej_uniform_table = @import("mlkem/rej_uniform_table_arm64.zig");
 
-pub const enabled = builtin.cpu.arch == .aarch64 and
-    builtin.os.tag == .linux and
+pub const enabled = asm_compat.arm64_native and
     (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSafe);
 
 /// Rejection sampling of the public matrix uses the same AArch64 gating as the
@@ -192,17 +192,28 @@ extern fn vailMlKemBasemulK4Arm64(
     cache: *align(32) const [512]i16,
 ) callconv(.c) void;
 
+const poly_reduce_asm = asm_compat.slice(@embedFile("mlkem/poly_reduce_arm64.S"));
+const poly_tomont_asm = asm_compat.slice(@embedFile("mlkem/poly_tomont_arm64.S"));
+const poly_tobytes_asm = asm_compat.slice(@embedFile("mlkem/poly_tobytes_arm64.S"));
+const rej_uniform_asm = asm_compat.slice(@embedFile("mlkem/rej_uniform_arm64.S"));
+const ntt_asm = asm_compat.slice(@embedFile("mlkem/ntt_arm64.S"));
+const intt_asm = asm_compat.slice(@embedFile("mlkem/intt_arm64.S"));
+const mulcache_asm = asm_compat.slice(@embedFile("mlkem/poly_mulcache_compute_arm64.S"));
+const basemul_k2_asm = asm_compat.slice(@embedFile("mlkem/polyvec_basemul_acc_montgomery_cached_k2_arm64.S"));
+const basemul_k3_asm = asm_compat.slice(@embedFile("mlkem/polyvec_basemul_acc_montgomery_cached_k3_arm64.S"));
+const basemul_k4_asm = asm_compat.slice(@embedFile("mlkem/polyvec_basemul_acc_montgomery_cached_k4_arm64.S"));
+
 comptime {
     if (enabled) {
-        asm (@embedFile("mlkem/poly_reduce_arm64.S"));
-        asm (@embedFile("mlkem/poly_tomont_arm64.S"));
-        asm (@embedFile("mlkem/poly_tobytes_arm64.S"));
-        asm (@embedFile("mlkem/rej_uniform_arm64.S"));
-        asm (@embedFile("mlkem/ntt_arm64.S"));
-        asm (@embedFile("mlkem/intt_arm64.S"));
-        asm (@embedFile("mlkem/poly_mulcache_compute_arm64.S"));
-        asm (@embedFile("mlkem/polyvec_basemul_acc_montgomery_cached_k2_arm64.S"));
-        asm (@embedFile("mlkem/polyvec_basemul_acc_montgomery_cached_k3_arm64.S"));
-        asm (@embedFile("mlkem/polyvec_basemul_acc_montgomery_cached_k4_arm64.S"));
+        asm (poly_reduce_asm);
+        asm (poly_tomont_asm);
+        asm (poly_tobytes_asm);
+        asm (rej_uniform_asm);
+        asm (ntt_asm);
+        asm (intt_asm);
+        asm (mulcache_asm);
+        asm (basemul_k2_asm);
+        asm (basemul_k3_asm);
+        asm (basemul_k4_asm);
     }
 }

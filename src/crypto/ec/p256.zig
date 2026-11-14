@@ -78,6 +78,12 @@ const comb_groups = 4;
 const comb_width = 8;
 const comb_entries = 1 << comb_width;
 const comb_windows = 8;
+const secret_window_width = 6;
+const secret_comb_tables = 4;
+const secret_window_entries = 1 << secret_window_width;
+const secret_window_count = 11;
+const secret_selection_lanes = 8;
+const SecretSelectionVector = @Vector(secret_selection_lanes, u64);
 const WnafEntry = struct {
     position: u16,
     digit: i16,
@@ -708,12 +714,9 @@ noinline fn secretBaseMulXCanonicalAssign(
         );
         return;
     }
-    var scalar_bytes = encodeScalar(scalar.*);
-    defer std.crypto.secureZero(u8, &scalar_bytes);
-    var point = P256.basePoint.mul(scalar_bytes, .little) catch unreachable;
-    defer std.crypto.secureZero(P256, (&point)[0..1]);
-    var affine = point.affineCoordinates();
-    defer std.crypto.secureZero(@TypeOf(affine), (&affine)[0..1]);
+    var affine: AffinePoint = undefined;
+    defer std.crypto.secureZero(AffinePoint, (&affine)[0..1]);
+    secretBaseMulAffineAssign(&affine, scalar);
     output.* = decodeScalar(affine.x.toBytes(.little));
 }
 
@@ -921,6 +924,196 @@ const CachedJacobianPoint = struct {
 
 const base_affine_table = loadBaseAffineTable();
 const base_comb_table = loadBaseCombTable();
+
+const SecretAffinePoint = struct {
+    point: AffinePoint,
+    identity: u1,
+};
+
+const SecretBaseTable = struct {
+    x: [4][secret_window_entries]u64,
+    y: [4][secret_window_entries]u64,
+};
+
+const secret_base_tables = blk: {
+    var tables: [secret_comb_tables]SecretBaseTable = undefined;
+    for (0..secret_comb_tables) |group| {
+        tables[group] = .{
+            .x = table_values.base_comb_4x6[group][0],
+            .y = table_values.base_comb_4x6[group][1],
+        };
+    }
+    break :blk tables;
+};
+
+noinline fn selectSecretBaseAssign(
+    output: *SecretAffinePoint,
+    table: *const SecretBaseTable,
+    index: u6,
+) void {
+    defer wipeCallerSavedRegisters();
+    const offsets = @Vector(secret_selection_lanes, u64){
+        0, 1, 2, 3, 4, 5, 6, 7,
+    };
+    const zero: SecretSelectionVector = @splat(0);
+    const ones: SecretSelectionVector = @splat(std.math.maxInt(u64));
+    output.identity = @truncate(
+        (@as(u7, index) -% 1) >> secret_window_width,
+    );
+    for (0..4) |limb| {
+        var selected_x = zero;
+        var selected_y = zero;
+        inline for (0..secret_window_entries / secret_selection_lanes) |chunk| {
+            const candidate_indices = offsets +
+                @as(SecretSelectionVector, @splat(
+                    chunk * secret_selection_lanes,
+                ));
+            const matches = candidate_indices ==
+                @as(SecretSelectionVector, @splat(index));
+            const mask = @select(u64, matches, ones, zero);
+            const start = chunk * secret_selection_lanes;
+            const x: SecretSelectionVector =
+                table.x[limb][start..][0..secret_selection_lanes].*;
+            const y: SecretSelectionVector =
+                table.y[limb][start..][0..secret_selection_lanes].*;
+            selected_x |= x & mask;
+            selected_y |= y & mask;
+        }
+        output.point.x.limbs[limb] = @reduce(.Or, selected_x);
+        output.point.y.limbs[limb] = @reduce(.Or, selected_y);
+    }
+}
+
+noinline fn secretBaseMulAffineAssign(
+    output: *AffinePoint,
+    scalar: *const ScalarLimbs,
+) void {
+    defer wipeCallerSavedRegisters();
+    var extended: [5]u64 = .{ scalar[0], scalar[1], scalar[2], scalar[3], 0 };
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&extended));
+    var result = JacobianPoint.identity;
+    defer std.crypto.secureZero(JacobianPoint, (&result)[0..1]);
+    var result_identity: u1 = 1;
+    var window: usize = secret_window_count;
+    while (window != 0) {
+        window -= 1;
+        jacobianDblSecretAssign(&result);
+        for (0..secret_comb_tables) |group| {
+            var digit: u6 = 0;
+            inline for (0..secret_window_width) |column| {
+                const bit_index = window +
+                    (group * secret_window_width + column) *
+                        secret_window_count;
+                const scalar_bit: u1 = @truncate(
+                    extended[bit_index / 64] >> @intCast(bit_index % 64),
+                );
+                digit |= @as(u6, scalar_bit) << column;
+            }
+            var selected: SecretAffinePoint = undefined;
+            defer std.crypto.secureZero(u8, std.mem.asBytes(&selected));
+            selectSecretBaseAssign(
+                &selected,
+                &secret_base_tables[group],
+                digit,
+            );
+            jacobianAddMixedSecret(&result, &selected, result_identity);
+            result_identity &= selected.identity;
+        }
+    }
+    var inverse = invertSecretField(result.z);
+    defer std.crypto.secureZero(Fe, (&inverse)[0..1]);
+    var inverse_squared = fieldSquare(inverse);
+    defer std.crypto.secureZero(Fe, (&inverse_squared)[0..1]);
+    output.* = .{
+        .x = fieldMul(result.x, inverse_squared),
+        .y = fieldMul(fieldMul(result.y, inverse_squared), inverse),
+    };
+}
+
+noinline fn jacobianDblSecretAssign(point: *JacobianPoint) void {
+    if (comptime point_arm64.enabled) {
+        point_arm64.pointDouble(
+            @ptrCast(point),
+            @ptrCast(point),
+        );
+        return;
+    }
+    const delta = fieldSquare(point.z);
+    const gamma = fieldSquare(point.y);
+    const beta = fieldMul(point.x, gamma);
+    const alpha_base = fieldMul(point.x.sub(delta), point.x.add(delta));
+    const alpha = fieldDouble(alpha_base).add(alpha_base);
+    const beta4 = fieldDouble(fieldDouble(beta));
+    const beta8 = fieldDouble(beta4);
+    const x = fieldSquare(alpha).sub(beta8);
+    const gamma8 = fieldDouble(fieldDouble(fieldDouble(fieldSquare(gamma))));
+    const y = fieldMul(alpha, beta4.sub(x)).sub(gamma8);
+    const z = fieldSquare(point.y.add(point.z)).sub(gamma).sub(delta);
+    point.* = .{ .x = x, .y = y, .z = z };
+}
+
+noinline fn jacobianAddMixedSecret(
+    point: *JacobianPoint,
+    other: *const SecretAffinePoint,
+    point_identity: u1,
+) void {
+    defer wipeCallerSavedRegisters();
+    var original = point.*;
+    defer std.crypto.secureZero(JacobianPoint, (&original)[0..1]);
+    if (comptime point_arm64.enabled) {
+        point_arm64.pointMixedAdd(
+            @ptrCast(point),
+            @ptrCast(point),
+            @ptrCast(&other.point),
+        );
+    } else {
+        const z_squared = fieldSquare(original.z);
+        const other_x = fieldMul(other.point.x, z_squared);
+        const other_y = fieldMul(
+            fieldMul(other.point.y, original.z),
+            z_squared,
+        );
+        const h = other_x.sub(original.x);
+        const hh = fieldSquare(h);
+        const i = fieldDouble(fieldDouble(hh));
+        const j = fieldMul(h, i);
+        const r = fieldDouble(other_y.sub(original.y));
+        const v = fieldMul(original.x, i);
+        const x = fieldSquare(r).sub(j).sub(fieldDouble(v));
+        const y = fieldMul(r, v.sub(x)).sub(
+            fieldDouble(fieldMul(original.y, j)),
+        );
+        const z = fieldSquare(original.z.add(h)).sub(z_squared).sub(hh);
+        point.* = .{ .x = x, .y = y, .z = z };
+    }
+    const select_other = point_identity & (other.identity ^ 1);
+    feConditionalMove(&point.x, other.point.x, select_other);
+    feConditionalMove(&point.y, other.point.y, select_other);
+    feConditionalMove(&point.z, Fe.one, select_other);
+    jacobianConditionalMove(point, original, other.identity);
+}
+
+fn feConditionalMove(destination: *Fe, source: Fe, choice: u1) void {
+    const mask = opaqueWord(0 -% @as(u64, choice));
+    inline for (0..4) |index| {
+        destination.limbs[index] = (source.limbs[index] & mask) |
+            (destination.limbs[index] & ~mask);
+    }
+}
+
+fn jacobianConditionalMove(
+    point: *JacobianPoint,
+    other: JacobianPoint,
+    choice: u1,
+) void {
+    const mask = opaqueWord(0 -% @as(u64, choice));
+    const destination: *[12]u64 = @ptrCast(point);
+    const source: *const [12]u64 = @ptrCast(&other);
+    inline for (0..12) |index| {
+        destination[index] = (source[index] & mask) |
+            (destination[index] & ~mask);
+    }
+}
 
 fn affineFromP256(point: P256) AffinePoint {
     if (point.z.equivalent(Fe.one)) {

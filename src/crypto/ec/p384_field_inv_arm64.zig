@@ -5,9 +5,9 @@
 //! representation as `p384.zig`.
 
 const builtin = @import("builtin");
+const asm_compat = @import("../asm_compat.zig");
 
-pub const enabled = builtin.cpu.arch == .aarch64 and
-    builtin.os.tag == .linux and
+pub const enabled = asm_compat.arm64_native and
     (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSafe);
 
 pub fn invert(input: *const [6]u64) [6]u64 {
@@ -24,6 +24,8 @@ extern fn vailP384FieldInvertArm64(
     input: *const [6]u64,
 ) callconv(.c) void;
 
+const transformed = asm_compat.arm64(@embedFile("p384_montinv_arm64.S"));
+
 comptime {
-    if (enabled) asm (@embedFile("p384_montinv_arm64.S"));
+    if (enabled) asm (transformed.bytes[0..transformed.len]);
 }

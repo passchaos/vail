@@ -8,9 +8,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT-0
 
 const builtin = @import("builtin");
+const asm_compat = @import("../asm_compat.zig");
 
-pub const enabled = builtin.cpu.arch == .aarch64 and
-    builtin.os.tag == .linux and
+pub const enabled = asm_compat.arm64_native and
     (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSafe);
 
 pub inline fn mul(
@@ -42,6 +42,8 @@ extern fn vailP256MontgomerySquareArm64(
     value: *const [4]u64,
 ) callconv(.c) void;
 
+const asm_source = asm_compat.slice(@embedFile("p256_field_arm64.S"));
+
 comptime {
-    if (enabled) asm (@embedFile("p256_field_arm64.S"));
+    if (enabled) asm (asm_source);
 }

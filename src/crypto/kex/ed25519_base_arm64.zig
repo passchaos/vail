@@ -5,9 +5,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const asm_compat = @import("../asm_compat.zig");
 
-pub const enabled = builtin.cpu.arch == .aarch64 and
-    builtin.os.tag == .linux and
+pub const enabled = asm_compat.arm64_native and
     (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSafe);
 
 pub const Result = struct {
@@ -51,6 +51,8 @@ extern fn vailEd25519ScalarMulBaseArm64(
     scalar: *const [4]u64,
 ) callconv(.c) void;
 
+const asm_source = asm_compat.slice(@embedFile("ed25519_base_arm64.S"));
+
 comptime {
-    if (enabled) asm (@embedFile("ed25519_base_arm64.S"));
+    if (enabled) asm (asm_source);
 }
