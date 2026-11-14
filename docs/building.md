@@ -24,6 +24,7 @@
 | `zig build check` | Run `zig fmt --check`, generated-file, docs-link, and `test-all` gates |
 | `zig build fmt` | Format Zig sources |
 | `zig build bench` | Run every benchmark step |
+| `zig build bench-compile` | Compile local benchmark executables without running them |
 | `zig build interop` | Run every interoperability step |
 
 Individual benchmark and interoperability steps are still available, for
@@ -105,9 +106,16 @@ provenance follow-up.
 
 `.github/workflows/ci.yml` runs on Linux x86_64 and AArch64 and covers:
 
-- `zig build check` (formatting, generated-file drift, and all test suites);
+- `zig build check` in Debug, ReleaseSafe, and a ReleaseSafe baseline-CPU
+  configuration, so accelerated kernels and their portable fallbacks are both
+  compiled and exercised;
+- `zig build test-all -Doptimize=ReleaseFast` on pushes to `main`, which runs
+  the assembly-backed paths in their production optimization mode;
 - `zig build examples`;
-- an OpenSSL P-256 signature interoperability smoke test.
+- `zig build bench-compile`, which compiles every local benchmark executable
+  without running reference-implementation system commands;
+- an OpenSSL P-256 signature interoperability smoke test;
+- library builds for `x86_64-windows`, `aarch64-macos`, and `x86_64-macos`.
 
 The workflow checks out `passchaos/vort` as a sibling `vort` directory. If that
 repository is private, add a `VORT_TOKEN` secret with read access; otherwise the

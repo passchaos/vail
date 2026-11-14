@@ -20,6 +20,7 @@ and boundary-specific; they are not a universal "fastest library" claim.
 
 ```sh
 zig build bench
+zig build bench-compile
 zig build bench-tls-client-connection
 zig build bench-sha256-primitives
 zig build bench-aws-lc-sha256-primitives
