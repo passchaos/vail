@@ -351,6 +351,7 @@ const arm64_asm_paths = [_][]const u8{
     "src/crypto/hash/keccak_arm64.S",
     "src/crypto/hash/sha512/arm64.S",
     "src/crypto/kex/ed25519_base_arm64.S",
+    "src/crypto/kex/ed25519_scalarmulbase_alt_arm64.S",
     "src/crypto/kex/x25519_arm64.S",
     "src/crypto/kex/x25519_base_arm64.S",
     "src/crypto/pq/mldsa/caddq_arm64.S",

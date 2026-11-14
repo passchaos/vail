@@ -20,7 +20,7 @@ pub fn scalarMultBase(scalar: *const [32]u8) Result {
     var scalar_limbs: [4]u64 align(8) = undefined;
     @memcpy(std.mem.asBytes(&scalar_limbs), scalar);
     var coordinates: [8]u64 = undefined;
-    vailEd25519ScalarMulBaseArm64(&coordinates, &scalar_limbs);
+    vailEd25519ScalarMulBaseAltArm64(&coordinates, &scalar_limbs);
     const encoded = encodeCoordinates(&coordinates);
     return .{
         .encoded = encoded,
@@ -36,7 +36,7 @@ pub fn scalarMultBaseNonZero(scalar: *const [32]u8) [32]u8 {
     var scalar_limbs: [4]u64 align(8) = undefined;
     @memcpy(std.mem.asBytes(&scalar_limbs), scalar);
     var coordinates: [8]u64 = undefined;
-    vailEd25519ScalarMulBaseArm64(&coordinates, &scalar_limbs);
+    vailEd25519ScalarMulBaseAltArm64(&coordinates, &scalar_limbs);
     return encodeCoordinates(&coordinates);
 }
 
@@ -46,7 +46,7 @@ inline fn encodeCoordinates(coordinates: *const [8]u64) [32]u8 {
     return encoded;
 }
 
-extern fn vailEd25519ScalarMulBaseArm64(
+extern fn vailEd25519ScalarMulBaseAltArm64(
     output_xy: *[8]u64,
     scalar: *const [4]u64,
 ) callconv(.c) void;
