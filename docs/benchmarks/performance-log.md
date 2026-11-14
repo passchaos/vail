@@ -1913,7 +1913,7 @@ into the consumer.
 Measured on a MacBook Pro (Mac17,8, Apple M5 Pro, 18 cores: 6 Super + 12
 Performance, 48 GB) running macOS 26.6.2 (25G83), against aws-lc-rs 1.18.1 /
 aws-lc-sys 0.45.0 (rustls 0.23.45). Vail was built with Zig 0.16.0,
-`-Doptimize=ReleaseFast -Dcpu=native`, at commit `aa7b18f`.
+`-Doptimize=ReleaseFast -Dcpu=native`, at commit `b2fc8ce`.
 
 The ARM64 kernels are enabled on macOS through a build-time ELF-to-Mach-O
 adaptation of the checked-in assembly snapshots; the build graph assembles them
@@ -1937,10 +1937,10 @@ differences are noise; the TLS pairs used eight samples per side.
 | P-384 sign | 39,932.5 ns | 44,443.5 ns | Vail 10.2% lower |
 | P-384 ECDH public / shared | 22,286 / 93,000 ns | 52,400 / 123,900 ns | 2.36x / 1.33x faster |
 | P-521 ECDH public / shared | 54,344 / 185,326 ns | 73,400 / 184,000 ns | 1.35x faster / equal |
-| Ed25519 prepared verify | 9,152.5 ns | 17,637.5 ns | Vail 1.93x faster |
-| Ed25519 one-shot verify | 18,920 ns | 17,637.5 ns | Vail 1.07x slower |
-| Ed25519 sign | 4,237 ns | 3,886 ns | Vail 1.09x slower |
-| Ed25519 keygen | 4,053 ns | 3,646 ns | Vail 1.11x slower |
+| Ed25519 prepared verify | 8,604 ns | 17,392.5 ns | Vail 2.02x faster |
+| Ed25519 one-shot verify | 18,181.5 ns | 17,392.5 ns | Vail 1.05x slower |
+| Ed25519 sign | 3,822.5 ns | 3,833.5 ns | ~equal |
+| Ed25519 keygen | 3,648.5 ns | 3,628 ns | ~equal |
 | X25519 public / shared | 3,545.5 / 11,938.5 ns | 3,581 / 11,923.5 ns | ~equal |
 | SHA-512 32 B / 1 KiB | 51.5 / 607.5 ns | 75 / 609.5 ns | 1.46x faster / equal |
 | HKDF-SHA256 3 labels | 197.5 ns | 449.5 ns | Vail 2.28x faster |
@@ -1980,4 +1980,5 @@ Notes:
   `bignum_montsqr_p256_alt`).
 - Ed25519 signing and key generation use `edwards25519_scalarmulbase_alt`;
   one-shot verification uses `edwards25519_scalarmuldouble_alt`. The prepared
-  path uses a table.
+  path uses a table. Scalar reduction and multiply-add use the s2n-bignum
+  n25519 kernels.
