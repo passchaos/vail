@@ -1913,7 +1913,7 @@ into the consumer.
 Measured on a MacBook Pro (Mac17,8, Apple M5 Pro, 18 cores: 6 Super + 12
 Performance, 48 GB) running macOS 26.6.2 (25G83), against aws-lc-rs 1.18.1 /
 aws-lc-sys 0.45.0 (rustls 0.23.45). Vail was built with Zig 0.16.0,
-`-Doptimize=ReleaseFast -Dcpu=native`, at commit `4ff9804`.
+`-Doptimize=ReleaseFast -Dcpu=native`, at commit `aa7b18f`.
 
 The ARM64 kernels are enabled on macOS through a build-time ELF-to-Mach-O
 adaptation of the checked-in assembly snapshots; the build graph assembles them
@@ -1928,11 +1928,11 @@ differences are noise; the TLS pairs used eight samples per side.
 | --- | ---: | ---: | --- |
 | TLS 1.3 server first flight | 22,714.5 ns | 35,476.5 ns | Vail 36.0% lower |
 | TLS 1.3 client through Finished | 28,628.5 ns | 43,175.5 ns | Vail 33.7% lower |
-| P-256 sign | 12,902 ns | 11,702.5 ns | Vail 1.10x slower |
-| P-256 prepared verify | 8,421.5 ns | 26,346.5 ns | Vail 3.13x faster |
-| P-256 one-shot verify | 35,623 ns | 26,736.5 ns | Vail 1.33x slower |
-| P-256 ECDH public | 5,559 ns | 10,240 ns | Vail 1.84x faster |
-| P-256 ECDH shared | 29,434 ns | 30,786 ns | Vail 1.05x faster |
+| P-256 sign | 10,375 ns | 11,702.5 ns | Vail 1.13x faster |
+| P-256 prepared verify | 5,721 ns | 26,346.5 ns | Vail 4.61x faster |
+| P-256 one-shot verify | 24,900 ns | 26,736.5 ns | Vail 1.07x faster |
+| P-256 ECDH public | 5,224 ns | 10,240 ns | Vail 1.96x faster |
+| P-256 ECDH shared | 29,704 ns | 30,786 ns | Vail 1.04x faster |
 | P-384 verify | 94,083 ns | 103,035.5 ns | Vail 8.7% lower |
 | P-384 sign | 39,932.5 ns | 44,443.5 ns | Vail 10.2% lower |
 | P-384 ECDH public / shared | 22,286 / 93,000 ns | 52,400 / 123,900 ns | 2.36x / 1.33x faster |
@@ -1969,8 +1969,10 @@ Notes:
 - ChaCha20-Poly1305 uses the AWS-LC stitched ARM64 kernel for disjoint
   seal/open buffers; in-place opening keeps the authenticate-first path.
 - The P-256 signer uses the s2n-bignum `p256_scalarmulbase_alt` kernel with a
-  520-entry precomputed table. Its remaining gap is dominated by the 6.1 us
-  constant-time secret scalar inversion.
+  520-entry precomputed table; its constant-time scalar inversion now runs
+  through the AWS-LC scalar-order Montgomery multiply and square kernels.
+- The TLS handshake rows predate the AEAD, scalar-order, and alt-kernel commits
+  and therefore understate current Vail throughput.
 - P-256 ECDH uses `p256_scalarmulbase_alt` for public-key recovery and the
   constant-time `p256_montjscalarmul_alt` kernel for the shared secret.
 - P-256 verification uses the alt point and field schedules
