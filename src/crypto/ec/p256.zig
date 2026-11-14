@@ -15,6 +15,7 @@ const scalar_inv_arm64 = @import("p256_scalar_inv_arm64.zig");
 const scalar_inv_x86 = @import("p256_scalar_inv_x86.zig");
 const scalar_mul_x86 = @import("p256_scalar_mul_x86.zig");
 const scalarmulbase_arm64 = @import("p256_scalarmulbase_arm64.zig");
+const scalar_mul_arm64 = @import("p256_scalarmul_arm64.zig");
 const sha256 = @import("../hash/sha256.zig");
 const FastSha512 = @import("../hash/sha512.zig").Sha512;
 
@@ -135,6 +136,17 @@ pub fn ecdhPublicKey(
         return .{0x04} ++ x ++ y;
     }
 
+    if (comptime scalarmulbase_arm64.enabled) {
+        var output: [8]u64 = undefined;
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&output));
+        scalarmulbase_arm64.scalarMultBase(&output, &scalar_limbs);
+        var x = encodeScalar(output[0..4].*);
+        var y = encodeScalar(output[4..8].*);
+        std.mem.reverse(u8, &x);
+        std.mem.reverse(u8, &y);
+        return .{0x04} ++ x ++ y;
+    }
+
     const public = P256.basePoint.mul(owned_secret, .big) catch
         return error.KeyAgreementFailed;
     return public.toUncompressedSec1();
@@ -167,6 +179,28 @@ pub fn ecdhSharedSecret(
         var output_limbs: [12]u64 = undefined;
         defer std.crypto.secureZero(u8, std.mem.asBytes(&output_limbs));
         scalar_mul_x86.scalarMult(&output_limbs, &scalar_limbs, &input);
+        const output = decodeJacobian(output_limbs);
+        if (output.isIdentity()) return error.KeyAgreementFailed;
+        var inverse = invertSecretField(output.z);
+        defer std.crypto.secureZero(Fe, (&inverse)[0..1]);
+        var inverse_squared = fieldSquare(inverse);
+        defer std.crypto.secureZero(Fe, (&inverse_squared)[0..1]);
+        var shared_x = fieldMul(output.x, inverse_squared);
+        defer std.crypto.secureZero(Fe, (&shared_x)[0..1]);
+        return shared_x.toBytes(.big);
+    }
+
+    if (comptime scalar_mul_arm64.enabled) {
+        var scalar_bytes = scalar.toBytes(.little);
+        defer std.crypto.secureZero(u8, &scalar_bytes);
+        var scalar_limbs = decodeScalar(scalar_bytes);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&scalar_limbs));
+        const input = encodeJacobian(JacobianPoint.fromAffine(
+            affineFromP256(peer),
+        ));
+        var output_limbs: [12]u64 = undefined;
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&output_limbs));
+        scalar_mul_arm64.scalarMult(&output_limbs, &scalar_limbs, &input);
         const output = decodeJacobian(output_limbs);
         if (output.isIdentity()) return error.KeyAgreementFailed;
         var inverse = invertSecretField(output.z);
