@@ -80,6 +80,24 @@ This is a concise summary. The exhaustive feature inventory is in
 | Other Zig targets | Portable implementations; acceleration is currently Linux-targeted |
 | Windows/macOS | Portable paths; target-specific accelerated kernels are not currently provided |
 
+### Kernel coverage
+
+| Primitive | Linux x86_64 | Linux AArch64 |
+| --- | --- | --- |
+| AES-GCM | AES-NI/VAES/VPCLMULQDQ | AES/PMULL |
+| ChaCha20-Poly1305 | AVX2 | NEON |
+| SHA-256 | SHA-NI/AVX2 | ARM SHA2 via Zig std |
+| SHA-384/SHA-512 | AVX | ARMv8.2 SHA-512, runtime-gated on `HWCAP_SHA512` |
+| X25519 | ADX/AVX2 | s2n-bignum |
+| P-256 | ADX/AVX2 | s2n-bignum |
+| P-384 | ADX | Portable |
+| P-521 | ADX | Portable |
+| Ed25519 | ADX | Portable |
+| RSA | ADX Montgomery | Portable |
+| Keccak/SHA-3 | AVX2 | Portable |
+| ML-KEM | AVX2 | Portable |
+| ML-DSA | AVX2 | Portable |
+
 ## Not claimed
 
 - FIPS certification.
