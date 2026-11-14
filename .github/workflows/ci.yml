@@ -75,6 +75,11 @@ jobs:
           -Doptimize=${{ matrix.optimize }}
           -Dcpu=${{ matrix.cpu }}
 
+      - name: Parser fuzz smoke test
+        if: matrix.fuzz
+        working-directory: vail
+        run: zig build fuzz -Dfuzz-iterations=10000
+
       - name: OpenSSL interoperability smoke test
         if: matrix.optimize == 'Debug' && matrix.cpu == 'native'
         working-directory: vail

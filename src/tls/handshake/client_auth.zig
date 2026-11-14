@@ -242,10 +242,9 @@ pub fn certificateChainMatchesAuthorities(
 ) bool {
     if (encoded_authorities.len == 0) return true;
     for (chain) |certificate_der| {
-        const certificate = std.crypto.Certificate.parse(.{
-            .buffer = certificate_der,
-            .index = 0,
-        }) catch continue;
+        const certificate = x509.certificate.parseStandard(
+            certificate_der,
+        ) catch continue;
         if (certificateAuthoritiesContainIssuer(
             encoded_authorities,
             certificate.issuer(),

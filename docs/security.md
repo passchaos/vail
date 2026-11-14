@@ -54,6 +54,15 @@ APIs (for example, TLS signing nonces and ticket keys). Reusing a nonce or
 providing predictable randomness breaks the security guarantees of the
 corresponding algorithm.
 
+## Parser hardening
+
+- Network-facing DER, TLS, ECH, and QUIC parsers are exercised by
+  `zig build fuzz`.
+- X.509 certificate parsing performs a bounded, recursive DER structure
+  validation before entering Zig std's index-based certificate parser, which
+  otherwise trusts element lengths.
+- Parser work is bounded by explicit length, depth, and element-count limits.
+
 ## Platform and assembly
 
 - x86_64 and AArch64 acceleration is selected at compile time from target CPU

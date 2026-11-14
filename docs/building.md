@@ -25,6 +25,8 @@
 | `zig build fmt` | Format Zig sources |
 | `zig build bench` | Run every benchmark step |
 | `zig build bench-compile` | Compile local benchmark executables without running them |
+| `zig build fuzz` | Run deterministic parser mutation fuzzing |
+| `zig build fuzz-compile` | Compile the parser fuzz harness without running it |
 | `zig build interop` | Run every interoperability step |
 
 Individual benchmark and interoperability steps are still available, for
@@ -79,6 +81,24 @@ OpenSSL interoperability steps assume an `openssl` executable on `PATH`. Some
 steps use fixed local ports and should not run concurrently with another
 interoperability job.
 
+## Fuzzing
+
+`zig build fuzz` runs a deterministic mutation fuzzer over X.509, TLS
+handshake, ECH, QUIC transport-parameter, record framing, and record
+authentication parsers. It starts from valid fixtures and applies random
+mutations; parser errors are expected, while panics, out-of-bounds access, or
+unbounded work are failures.
+
+```sh
+zig build fuzz
+zig build fuzz -Dfuzz-iterations=100000 -Dfuzz-seed=42
+zig build fuzz-compile
+```
+
+Zig 0.16.0's built-in `-ffuzz` test runner does not compile, so the harness uses
+a portable mutation loop instead of libFuzzer coverage feedback. Revisit the
+built-in runner when a Zig patch release fixes it.
+
 ## Generated tables
 
 Generated tables are checked in and must not be edited by hand:
@@ -114,6 +134,7 @@ provenance follow-up.
 - `zig build examples`;
 - `zig build bench-compile`, which compiles every local benchmark executable
   without running reference-implementation system commands;
+- a 10,000-iteration parser fuzz smoke test;
 - an OpenSSL P-256 signature interoperability smoke test;
 - library builds for `x86_64-windows`, `aarch64-macos`, and `x86_64-macos`.
 

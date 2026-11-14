@@ -7,6 +7,33 @@ const std = @import("std");
 
 pub const Error = error{InvalidDer};
 
+pub const max_depth: usize = 64;
+pub const max_elements: usize = 100_000;
+
+/// Validate the complete DER structure, including nested constructed values.
+///
+/// This is a defensive pre-pass for parsers that use index-based readers which
+/// assume every length field is in bounds. It rejects trailing data, empty
+/// end-of-contents tags, over-deep nesting, and excessive element counts.
+pub fn validateDocument(bytes: []const u8) Error!void {
+    var reader = Reader{ .bytes = bytes };
+    const element = (try reader.next()) orelse return error.InvalidDer;
+    if (!reader.done()) return error.InvalidDer;
+    var budget: usize = max_elements;
+    try validateElement(element, 0, &budget);
+}
+
+fn validateElement(element: Element, depth: usize, budget: *usize) Error!void {
+    if (depth > max_depth or budget.* == 0) return error.InvalidDer;
+    budget.* -= 1;
+    if (element.tag == 0x00) return error.InvalidDer;
+    if ((element.tag & 0x20) == 0) return;
+    var reader = Reader{ .bytes = element.value };
+    while (try reader.next()) |child| {
+        try validateElement(child, depth + 1, budget);
+    }
+}
+
 pub const Element = struct {
     tag: u8,
     value: []const u8,
@@ -60,3 +87,24 @@ pub const Reader = struct {
         return self.offset == self.bytes.len;
     }
 };
+
+test "validateDocument rejects truncated and malformed lengths" {
+    const valid = [_]u8{ 0x30, 0x03, 0x02, 0x01, 0x01 };
+    try validateDocument(&valid);
+    try std.testing.expectError(
+        error.InvalidDer,
+        validateDocument(valid[0 .. valid.len - 1]),
+    );
+
+    const nested_overflow = [_]u8{ 0x30, 0x04, 0x30, 0x05, 0x00, 0x00 };
+    try std.testing.expectError(
+        error.InvalidDer,
+        validateDocument(&nested_overflow),
+    );
+
+    const trailing = [_]u8{ 0x30, 0x00, 0x00 };
+    try std.testing.expectError(
+        error.InvalidDer,
+        validateDocument(&trailing),
+    );
+}

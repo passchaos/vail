@@ -69,8 +69,9 @@ See [`docs/architecture.md`](docs/architecture.md) for details.
 
 Changes to secret-dependent code, constant-time behavior, zeroization, key
 parsing, certificate verification, or record protection require targeted
-review. Add evidence under `docs/evidence/` when the change involves a subtle
-compiler, platform, or timing question.
+review. Parser changes should also run `zig build fuzz` with a larger
+`-Dfuzz-iterations` value. Add evidence under `docs/evidence/` when the change
+involves a subtle compiler, platform, or timing question.
 
 Do not report suspected vulnerabilities in a public issue; see
 [`SECURITY.md`](SECURITY.md).

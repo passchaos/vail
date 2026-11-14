@@ -128,6 +128,44 @@ pub fn build(b: *std.Build) void {
     if (enable_bench) benches.add(b, vail, target, optimize);
     if (enable_interop) interop.add(b, vail, target, optimize);
 
+    // Deterministic parser mutation fuzzing is opt-in. The harness starts
+    // from valid X.509/TLS/QUIC seeds and mutates them before exercising every
+    // parser; Zig 0.16.0's built-in `-ffuzz` test runner does not compile.
+    const fuzz_iterations = b.option(
+        usize,
+        "fuzz-iterations",
+        "Parser fuzz iterations",
+    ) orelse 10_000;
+    const fuzz_seed = b.option(
+        []const u8,
+        "fuzz-seed",
+        "Parser fuzz PRNG seed (decimal)",
+    );
+    const fuzz_exe = b.addExecutable(.{
+        .name = "vail-fuzz",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vail", .module = vail }},
+        }),
+    });
+    const run_fuzz = b.addRunArtifact(fuzz_exe);
+    run_fuzz.addArg(b.fmt("--iterations={d}", .{fuzz_iterations}));
+    if (fuzz_seed) |seed| {
+        run_fuzz.addArg(b.fmt("--seed={s}", .{seed}));
+    }
+    const fuzz_step = b.step(
+        "fuzz",
+        "Run deterministic parser mutation fuzzing",
+    );
+    fuzz_step.dependOn(&run_fuzz.step);
+    const fuzz_compile_step = b.step(
+        "fuzz-compile",
+        "Compile the parser fuzz harness without running it",
+    );
+    fuzz_compile_step.dependOn(&fuzz_exe.step);
+
     var bench_deps: std.ArrayList(*std.Build.Step) = .empty;
     var interop_deps: std.ArrayList(*std.Build.Step) = .empty;
     var top_level_it = b.top_level_steps.iterator();

@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const rfc2253 = @import("rfc2253.zig");
+const certificate_structure = @import("certificate_structure.zig");
 
 const Certificate = std.crypto.Certificate;
 
@@ -26,6 +27,8 @@ pub fn commonNameAlloc(
     allocator: std.mem.Allocator,
     certificate_der: []const u8,
 ) Error![]u8 {
+    const parsed = certificate_structure.parseStandard(certificate_der) catch
+        return error.InvalidCertificate;
     const certificate = Certificate.der.Element.parse(
         certificate_der,
         0,
@@ -33,10 +36,6 @@ pub fn commonNameAlloc(
     if (certificate.slice.end != certificate_der.len) {
         return error.InvalidCertificate;
     }
-    const parsed = Certificate.parse(.{
-        .buffer = certificate_der,
-        .index = 0,
-    }) catch return error.InvalidCertificate;
     return commonNameFromSubjectAlloc(
         allocator,
         parsed.subject(),
@@ -52,6 +51,8 @@ pub fn subjectNameAlloc(
     allocator: std.mem.Allocator,
     certificate_der: []const u8,
 ) Error![]u8 {
+    const parsed = certificate_structure.parseStandard(certificate_der) catch
+        return error.InvalidCertificate;
     const certificate = Certificate.der.Element.parse(
         certificate_der,
         0,
@@ -59,10 +60,6 @@ pub fn subjectNameAlloc(
     if (certificate.slice.end != certificate_der.len) {
         return error.InvalidCertificate;
     }
-    const parsed = Certificate.parse(.{
-        .buffer = certificate_der,
-        .index = 0,
-    }) catch return error.InvalidCertificate;
     return rfc2253.nameAlloc(allocator, parsed.subject()) catch |err|
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,

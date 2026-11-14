@@ -7,6 +7,7 @@
 //! used by the trust-path engine.
 
 const std = @import("std");
+const certificate_structure = @import("certificate_structure.zig");
 const x509_signature = @import("signature.zig");
 
 const Certificate = std.crypto.Certificate;
@@ -254,6 +255,7 @@ fn mapSignatureError(err: x509_signature.Error) anyerror {
 }
 
 pub fn parse(der: []const u8) !Parsed {
+    try certificate_structure.validate(der);
     const certificate = Certificate{ .buffer = der, .index = 0 };
     if (Certificate.parse(certificate)) |standard| {
         return .{ .standard = standard };
@@ -261,6 +263,8 @@ pub fn parse(der: []const u8) !Parsed {
         return parseExtendedSignature(certificate);
     }
 }
+
+pub const parseStandard = certificate_structure.parseStandard;
 
 fn parseExtendedSignature(certificate: Certificate) !Parsed {
     const bytes = certificate.buffer;
@@ -661,4 +665,10 @@ test "compatibility parser verifies an RFC 8692 PSS-SHAKE certificate" {
             @intCast(tampered.standard.validity.not_before),
         ),
     );
+}
+
+test "malformed certificate lengths are rejected before std parsing" {
+    const ca = @embedFile("testdata/ca.der");
+    _ = parse(ca[0 .. ca.len - 1]) catch {};
+    _ = parse(ca[0 .. ca.len / 2]) catch {};
 }

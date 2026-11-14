@@ -1448,10 +1448,9 @@ pub const SystemStore = struct {
             defer self.allocator.free(decoded);
             const decoded_len = try pem_base64.decode(decoded, encoded);
             if (only_std_unsupported) {
-                if (Certificate.parse(.{
-                    .buffer = decoded[0..decoded_len],
-                    .index = 0,
-                })) |_| {
+                if (certificate_compat.parseStandard(
+                    decoded[0..decoded_len],
+                )) |_| {
                     position = end + pem_certificate_end.len;
                     continue;
                 } else |_| {}
@@ -1580,10 +1579,7 @@ pub const SystemStore = struct {
                 continue;
             const certificate_der = decoded[0..decoded_len];
 
-            if (Certificate.parse(.{
-                .buffer = certificate_der,
-                .index = 0,
-            })) |_| {
+            if (certificate_compat.parseStandard(certificate_der)) |_| {
                 const start = self.bundle.bytes.items.len;
                 if (start > std.math.maxInt(u32)) {
                     return error.CertificateAuthorityBundleTooBig;
