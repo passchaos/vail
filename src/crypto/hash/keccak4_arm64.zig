@@ -23,8 +23,8 @@ extern fn vailKeccakF1600x4Arm64(
     constants: *const [24]u64,
 ) callconv(.c) void;
 
-const asm_source = asm_compat.slice(@embedFile("keccak4_arm64.S"));
+const asm_source = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("keccak4_arm64.S")) else "";
 
 comptime {
-    if (enabled) asm (asm_source);
+    if (enabled and !asm_compat.external) asm (asm_source);
 }

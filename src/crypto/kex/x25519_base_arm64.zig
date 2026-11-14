@@ -28,8 +28,8 @@ extern fn vailX25519BaseArm64(
     scalar: *const [32]u8,
 ) callconv(.c) void;
 
-const asm_source = asm_compat.slice(@embedFile("x25519_base_arm64.S"));
+const asm_source = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("x25519_base_arm64.S")) else "";
 
 comptime {
-    if (enabled) asm (asm_source);
+    if (enabled and !asm_compat.external) asm (asm_source);
 }

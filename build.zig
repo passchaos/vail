@@ -4,6 +4,7 @@ const mldsa_benchmarks = @import("build_support/mldsa_benchmarks.zig");
 const mlkem_benchmarks = @import("build_support/mlkem_benchmarks.zig");
 const benches = @import("build_support/benches.zig");
 const interop = @import("build_support/interop.zig");
+const macho_asm = @import("build_support/macho_asm.zig");
 
 const required_zig_version = "0.16";
 
@@ -55,6 +56,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "vort", .module = vort }},
     });
+    addArm64Asm(b, vail, target);
     _ = b.addModule("vail_sm", .{
         .root_source_file = b.path("src/crypto/sm.zig"),
         .target = target,
@@ -330,4 +332,85 @@ pub fn build(b: *std.Build) void {
         }
     }
     check_step.dependOn(examples_step);
+}
+
+/// ARM64 assembly snapshots assembled as Mach-O objects on macOS.
+const arm64_asm_paths = [_][]const u8{
+    "src/crypto/ec/p256_field_arm64.S",
+    "src/crypto/ec/p256_point_double_arm64.S",
+    "src/crypto/ec/p256_point_mixed_add_arm64.S",
+    "src/crypto/ec/p256_scalar_inv_arm64.S",
+    "src/crypto/ec/p384_montinv_arm64.S",
+    "src/crypto/ec/p384_montjadd_arm64.S",
+    "src/crypto/ec/p384_montjdouble_arm64.S",
+    "src/crypto/ec/p384_montjmixadd_arm64.S",
+    "src/crypto/ec/p384_scalarmul_arm64.S",
+    "src/crypto/hash/keccak4_arm64.S",
+    "src/crypto/hash/keccak_arm64.S",
+    "src/crypto/hash/sha512/arm64.S",
+    "src/crypto/kex/ed25519_base_arm64.S",
+    "src/crypto/kex/x25519_arm64.S",
+    "src/crypto/kex/x25519_base_arm64.S",
+    "src/crypto/pq/mldsa/caddq_arm64.S",
+    "src/crypto/pq/mldsa/chknorm_arm64.S",
+    "src/crypto/pq/mldsa/decompose_32_arm64.S",
+    "src/crypto/pq/mldsa/decompose_88_arm64.S",
+    "src/crypto/pq/mldsa/intt_arm64.S",
+    "src/crypto/pq/mldsa/ntt_arm64.S",
+    "src/crypto/pq/mldsa/pointwise_acc_l4_arm64.S",
+    "src/crypto/pq/mldsa/pointwise_acc_l5_arm64.S",
+    "src/crypto/pq/mldsa/pointwise_acc_l7_arm64.S",
+    "src/crypto/pq/mldsa/pointwise_arm64.S",
+    "src/crypto/pq/mldsa/rej_uniform_arm64.S",
+    "src/crypto/pq/mldsa/rej_uniform_eta2_arm64.S",
+    "src/crypto/pq/mldsa/rej_uniform_eta4_arm64.S",
+    "src/crypto/pq/mldsa/unpack_z17_arm64.S",
+    "src/crypto/pq/mldsa/unpack_z19_arm64.S",
+    "src/crypto/pq/mldsa/use_hint_32_arm64.S",
+    "src/crypto/pq/mldsa/use_hint_88_arm64.S",
+    "src/crypto/pq/mlkem/intt_arm64.S",
+    "src/crypto/pq/mlkem/ntt_arm64.S",
+    "src/crypto/pq/mlkem/poly_mulcache_compute_arm64.S",
+    "src/crypto/pq/mlkem/poly_reduce_arm64.S",
+    "src/crypto/pq/mlkem/poly_tobytes_arm64.S",
+    "src/crypto/pq/mlkem/poly_tomont_arm64.S",
+    "src/crypto/pq/mlkem/polyvec_basemul_acc_montgomery_cached_k2_arm64.S",
+    "src/crypto/pq/mlkem/polyvec_basemul_acc_montgomery_cached_k3_arm64.S",
+    "src/crypto/pq/mlkem/polyvec_basemul_acc_montgomery_cached_k4_arm64.S",
+    "src/crypto/pq/mlkem/rej_uniform_arm64.S",
+    "src/crypto/sign/ed25519_epdouble_arm64.S",
+    "src/crypto/sign/ed25519_verify_arm64.S",
+};
+
+/// On aarch64-macos, adapt the ELF assembly snapshots and add them to the
+/// module as separate objects. This keeps the kernels out of inline `asm()`
+/// and avoids the compiler's large-module codegen path.
+fn addArm64Asm(
+    b: *std.Build,
+    module: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+) void {
+    if (target.result.cpu.arch != .aarch64 or
+        target.result.os.tag != .macos)
+    {
+        return;
+    }
+    const generated = b.addWriteFiles();
+    for (arm64_asm_paths, 0..) |path, index| {
+        const source = std.Io.Dir.cwd().readFileAlloc(
+            b.graph.io,
+            path,
+            b.allocator,
+            .limited(8 * 1024 * 1024),
+        ) catch @panic("failed to read ARM64 assembly snapshot");
+        const transformed = macho_asm.transform(b.allocator, source) catch
+            @panic("failed to adapt ARM64 assembly snapshot");
+        var name_buffer: [256]u8 = undefined;
+        const name = std.fmt.bufPrint(
+            &name_buffer,
+            "macho_{d}_{s}",
+            .{ index, std.fs.path.basename(path) },
+        ) catch @panic("ARM64 assembly name too long");
+        module.addAssemblyFile(generated.add(name, transformed));
+    }
 }

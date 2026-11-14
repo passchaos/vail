@@ -49,7 +49,7 @@ const mixed_add = asm_compat.arm64(@embedFile("p256_point_mixed_add_arm64.S"));
 const point_double = asm_compat.arm64(@embedFile("p256_point_double_arm64.S"));
 
 comptime {
-    if (enabled) {
+    if (enabled and !asm_compat.external) {
         asm (mixed_add.bytes[0..mixed_add.len]);
         asm (point_double.bytes[0..point_double.len]);
     }

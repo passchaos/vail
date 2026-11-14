@@ -38,8 +38,8 @@ extern fn vailP256ScalarInvertPublicArm64(
     modulus: *const [4]u64,
 ) callconv(.c) c_int;
 
-const transformed = asm_compat.arm64(@embedFile("p256_scalar_inv_arm64.S"));
+const asm_source = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("p256_scalar_inv_arm64.S")) else "";
 
 comptime {
-    if (enabled) asm (transformed.bytes[0..transformed.len]);
+    if (enabled and !asm_compat.external) asm (asm_source);
 }

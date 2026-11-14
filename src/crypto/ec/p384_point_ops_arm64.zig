@@ -57,7 +57,7 @@ const double = asm_compat.arm64(@embedFile("p384_montjdouble_arm64.S"));
 const mixed_add = asm_compat.arm64(@embedFile("p384_montjmixadd_arm64.S"));
 
 comptime {
-    if (enabled) {
+    if (enabled and !asm_compat.external) {
         asm (add.bytes[0..add.len]);
         asm (double.bytes[0..double.len]);
         asm (mixed_add.bytes[0..mixed_add.len]);

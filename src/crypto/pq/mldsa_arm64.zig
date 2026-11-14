@@ -258,26 +258,26 @@ pub fn rejectEta4(
     return bounded;
 }
 
-const ntt_asm = asm_compat.slice(@embedFile("mldsa/ntt_arm64.S"));
-const intt_asm = asm_compat.slice(@embedFile("mldsa/intt_arm64.S"));
-const pointwise_asm = asm_compat.slice(@embedFile("mldsa/pointwise_arm64.S"));
-const pointwise_l4_asm = asm_compat.slice(@embedFile("mldsa/pointwise_acc_l4_arm64.S"));
-const pointwise_l5_asm = asm_compat.slice(@embedFile("mldsa/pointwise_acc_l5_arm64.S"));
-const pointwise_l7_asm = asm_compat.slice(@embedFile("mldsa/pointwise_acc_l7_arm64.S"));
-const rej_uniform_asm = asm_compat.slice(@embedFile("mldsa/rej_uniform_arm64.S"));
-const rej_uniform_eta2_asm = asm_compat.slice(@embedFile("mldsa/rej_uniform_eta2_arm64.S"));
-const rej_uniform_eta4_asm = asm_compat.slice(@embedFile("mldsa/rej_uniform_eta4_arm64.S"));
-const caddq_asm = asm_compat.slice(@embedFile("mldsa/caddq_arm64.S"));
-const chknorm_asm = asm_compat.slice(@embedFile("mldsa/chknorm_arm64.S"));
-const decompose_32_asm = asm_compat.slice(@embedFile("mldsa/decompose_32_arm64.S"));
-const decompose_88_asm = asm_compat.slice(@embedFile("mldsa/decompose_88_arm64.S"));
-const use_hint_32_asm = asm_compat.slice(@embedFile("mldsa/use_hint_32_arm64.S"));
-const use_hint_88_asm = asm_compat.slice(@embedFile("mldsa/use_hint_88_arm64.S"));
-const unpack_z17_asm = asm_compat.slice(@embedFile("mldsa/unpack_z17_arm64.S"));
-const unpack_z19_asm = asm_compat.slice(@embedFile("mldsa/unpack_z19_arm64.S"));
+const ntt_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/ntt_arm64.S")) else "";
+const intt_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/intt_arm64.S")) else "";
+const pointwise_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/pointwise_arm64.S")) else "";
+const pointwise_l4_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/pointwise_acc_l4_arm64.S")) else "";
+const pointwise_l5_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/pointwise_acc_l5_arm64.S")) else "";
+const pointwise_l7_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/pointwise_acc_l7_arm64.S")) else "";
+const rej_uniform_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/rej_uniform_arm64.S")) else "";
+const rej_uniform_eta2_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/rej_uniform_eta2_arm64.S")) else "";
+const rej_uniform_eta4_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/rej_uniform_eta4_arm64.S")) else "";
+const caddq_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/caddq_arm64.S")) else "";
+const chknorm_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/chknorm_arm64.S")) else "";
+const decompose_32_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/decompose_32_arm64.S")) else "";
+const decompose_88_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/decompose_88_arm64.S")) else "";
+const use_hint_32_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/use_hint_32_arm64.S")) else "";
+const use_hint_88_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/use_hint_88_arm64.S")) else "";
+const unpack_z17_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/unpack_z17_arm64.S")) else "";
+const unpack_z19_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mldsa/unpack_z19_arm64.S")) else "";
 
 comptime {
-    if (enabled) {
+    if (enabled and !asm_compat.external) {
         asm (ntt_asm);
         asm (intt_asm);
         asm (pointwise_asm);

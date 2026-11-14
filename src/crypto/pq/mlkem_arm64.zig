@@ -192,19 +192,19 @@ extern fn vailMlKemBasemulK4Arm64(
     cache: *align(32) const [512]i16,
 ) callconv(.c) void;
 
-const poly_reduce_asm = asm_compat.slice(@embedFile("mlkem/poly_reduce_arm64.S"));
-const poly_tomont_asm = asm_compat.slice(@embedFile("mlkem/poly_tomont_arm64.S"));
-const poly_tobytes_asm = asm_compat.slice(@embedFile("mlkem/poly_tobytes_arm64.S"));
-const rej_uniform_asm = asm_compat.slice(@embedFile("mlkem/rej_uniform_arm64.S"));
-const ntt_asm = asm_compat.slice(@embedFile("mlkem/ntt_arm64.S"));
-const intt_asm = asm_compat.slice(@embedFile("mlkem/intt_arm64.S"));
-const mulcache_asm = asm_compat.slice(@embedFile("mlkem/poly_mulcache_compute_arm64.S"));
-const basemul_k2_asm = asm_compat.slice(@embedFile("mlkem/polyvec_basemul_acc_montgomery_cached_k2_arm64.S"));
-const basemul_k3_asm = asm_compat.slice(@embedFile("mlkem/polyvec_basemul_acc_montgomery_cached_k3_arm64.S"));
-const basemul_k4_asm = asm_compat.slice(@embedFile("mlkem/polyvec_basemul_acc_montgomery_cached_k4_arm64.S"));
+const poly_reduce_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mlkem/poly_reduce_arm64.S")) else "";
+const poly_tomont_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mlkem/poly_tomont_arm64.S")) else "";
+const poly_tobytes_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mlkem/poly_tobytes_arm64.S")) else "";
+const rej_uniform_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mlkem/rej_uniform_arm64.S")) else "";
+const ntt_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mlkem/ntt_arm64.S")) else "";
+const intt_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mlkem/intt_arm64.S")) else "";
+const mulcache_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mlkem/poly_mulcache_compute_arm64.S")) else "";
+const basemul_k2_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mlkem/polyvec_basemul_acc_montgomery_cached_k2_arm64.S")) else "";
+const basemul_k3_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mlkem/polyvec_basemul_acc_montgomery_cached_k3_arm64.S")) else "";
+const basemul_k4_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("mlkem/polyvec_basemul_acc_montgomery_cached_k4_arm64.S")) else "";
 
 comptime {
-    if (enabled) {
+    if (enabled and !asm_compat.external) {
         asm (poly_reduce_asm);
         asm (poly_tomont_asm);
         asm (poly_tobytes_asm);

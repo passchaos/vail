@@ -14,6 +14,10 @@ pub const arm64_native = builtin.cpu.arch == .aarch64 and
 
 const is_macho = builtin.object_format == .macho;
 
+/// True when the build graph assembles the ARM64 kernels as separate Mach-O
+/// objects. In that mode the kernel modules only declare the extern symbols.
+pub const external = is_macho;
+
 /// Fixed-capacity buffer returned by `arm64`. Returning the array by value
 /// keeps the rewritten source a comptime constant that `asm` can consume.
 pub fn Source(comptime capacity: usize) type {

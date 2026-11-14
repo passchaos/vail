@@ -69,11 +69,11 @@ extern fn vailEd25519ScalarMulDoubleArm64(
     bscalar: *const [4]u64,
 ) callconv(.c) void;
 
-const verify_asm = asm_compat.slice(@embedFile("ed25519_verify_arm64.S"));
-const epdouble_asm = asm_compat.slice(@embedFile("ed25519_epdouble_arm64.S"));
+const verify_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("ed25519_verify_arm64.S")) else "";
+const epdouble_asm = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("ed25519_epdouble_arm64.S")) else "";
 
 comptime {
-    if (enabled) {
+    if (enabled and !asm_compat.external) {
         asm (verify_asm);
         asm (epdouble_asm);
     }

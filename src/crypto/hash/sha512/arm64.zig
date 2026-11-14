@@ -50,10 +50,10 @@ extern fn vailSha512BlockDataOrderArm64(
     block_count: usize,
 ) callconv(.c) void;
 
-const asm_source = asm_compat.slice(@embedFile("arm64.S"));
+const asm_source = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("arm64.S")) else "";
 
 comptime {
-    if (enabled) asm (asm_source);
+    if (enabled and !asm_compat.external) asm (asm_source);
 }
 
 const round_constants = [80]u64{

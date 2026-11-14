@@ -24,8 +24,8 @@ extern fn vailP384FieldInvertArm64(
     input: *const [6]u64,
 ) callconv(.c) void;
 
-const transformed = asm_compat.arm64(@embedFile("p384_montinv_arm64.S"));
+const asm_source = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("p384_montinv_arm64.S")) else "";
 
 comptime {
-    if (enabled) asm (transformed.bytes[0..transformed.len]);
+    if (enabled and !asm_compat.external) asm (asm_source);
 }

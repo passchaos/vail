@@ -42,8 +42,8 @@ extern fn vailP256MontgomerySquareArm64(
     value: *const [4]u64,
 ) callconv(.c) void;
 
-const asm_source = asm_compat.slice(@embedFile("p256_field_arm64.S"));
+const asm_source = if (enabled and !asm_compat.external) asm_compat.slice(@embedFile("p256_field_arm64.S")) else "";
 
 comptime {
-    if (enabled) asm (asm_source);
+    if (enabled and !asm_compat.external) asm (asm_source);
 }
