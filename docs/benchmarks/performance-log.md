@@ -1935,6 +1935,8 @@ differences are noise; the TLS pairs used eight samples per side.
 | P-256 ECDH shared | 37,848 ns | 30,786 ns | Vail 1.23x slower |
 | P-384 verify | 94,083 ns | 103,035.5 ns | Vail 8.7% lower |
 | P-384 sign | 39,932.5 ns | 44,443.5 ns | Vail 10.2% lower |
+| P-384 ECDH public / shared | 22,286 / 93,000 ns | 52,400 / 123,900 ns | 2.36x / 1.33x faster |
+| P-521 ECDH public / shared | 54,344 / 185,326 ns | 73,400 / 184,000 ns | 1.35x faster / equal |
 | Ed25519 prepared verify | 9,152.5 ns | 17,637.5 ns | Vail 1.93x faster |
 | Ed25519 one-shot verify | 27,093.5 ns | 17,637.5 ns | Vail 1.54x slower |
 | Ed25519 sign | 5,258.5 ns | 3,886 ns | Vail 1.35x slower |
