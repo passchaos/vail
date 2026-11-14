@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const asm_compat = @import("../asm_compat.zig");
 
 const Scalar = std.crypto.sign.Ed25519.Curve.scalar;
 
@@ -16,8 +17,7 @@ const x86_enabled = builtin.cpu.arch == .x86_64 and
     std.Target.x86.featureSetHas(builtin.cpu.features, .bmi2) and
     std.Target.x86.featureSetHas(builtin.cpu.features, .adx);
 
-const arm64_enabled = builtin.cpu.arch == .aarch64 and
-    builtin.os.tag == .linux and
+const arm64_enabled = asm_compat.arm64_native and
     (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSafe);
 
 pub const enabled = x86_enabled or arm64_enabled;
@@ -91,7 +91,7 @@ extern fn vailEd25519ScalarMulAddArm64(
 ) callconv(.c) void;
 
 comptime {
-    if (arm64_enabled) {
+    if (arm64_enabled and !asm_compat.external) {
         asm (@embedFile("bignum_mod_n25519_arm64.S"));
         asm (@embedFile("bignum_madd_n25519_arm64.S"));
     }
