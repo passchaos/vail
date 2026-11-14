@@ -1964,6 +1964,9 @@ Notes:
   constant-time secret scalar inversion.
 - P-256 ECDH uses `p256_scalarmulbase_alt` for public-key recovery and the
   constant-time `p256_montjscalarmul_alt` kernel for the shared secret.
+- P-256 verification uses the alt point and field schedules
+  (`p256_montjdouble_alt`, `p256_montjmixadd_alt`, `bignum_montmul_p256_alt`,
+  `bignum_montsqr_p256_alt`).
 - Ed25519 signing and key generation use `edwards25519_scalarmulbase_alt`;
   one-shot verification uses `edwards25519_scalarmuldouble_alt`. The prepared
   path uses a table.
