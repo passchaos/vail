@@ -15,7 +15,7 @@ const point_ops = @import("p384_point_ops.zig");
 const field_inv_x86 = @import("p384_field_inv_x86.zig");
 const field_inv_arm64 = @import("p384_field_inv_arm64.zig");
 const scalar_inv_x86 = @import("p384_scalar_inv_x86.zig");
-const scalar_mul_x86 = @import("p384_scalar_mul_x86.zig");
+const scalar_mul = @import("p384_scalar_mul.zig");
 const table_data = @import("p384_tables.zig");
 const fast_sha2 = @import("../hash/sha512.zig");
 
@@ -151,7 +151,7 @@ pub fn ecdhSharedSecret(
         return error.InvalidPublicKey;
     peer.rejectIdentity() catch return error.InvalidPublicKey;
 
-    if (comptime scalar_mul_x86.enabled) {
+    if (comptime scalar_mul.enabled) {
         var scalar_bytes = scalar.toBytes(.little);
         defer std.crypto.secureZero(u8, &scalar_bytes);
         var scalar_limbs = decodeScalar(scalar_bytes);
@@ -159,7 +159,7 @@ pub fn ecdhSharedSecret(
         const input = JacobianPoint.fromP384Affine(peer);
         var output: JacobianPoint = undefined;
         defer std.crypto.secureZero(JacobianPoint, (&output)[0..1]);
-        scalar_mul_x86.scalarMult(
+        scalar_mul.scalarMult(
             @ptrCast(&output),
             &scalar_limbs,
             @ptrCast(&input),

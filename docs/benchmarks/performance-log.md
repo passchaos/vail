@@ -77,6 +77,11 @@ The field inverse change alone reduced the sign path from 132,592 ns to
 187,737 ns (3.26x). The portable formulas remain the Debug/ReleaseSmall
 fallback and the differential oracle.
 
+The same AArch64 scalar-multiplication schedule reduced P-384 ECDH
+shared-secret derivation from 922,987 ns to 180,165 ns (5.12x), versus
+AWS-LC 299,142 ns on the same host, a 39.8% reduction. Public-key recovery
+remained 48,129 ns versus AWS-LC 119,766 ns, a 59.8% reduction.
+
 A fixed-width, allocation-free
 P-521 verifier fills the curve left unimplemented by Zig std 0.16: it uses
 9×58-bit reduction modulo the `2^521-1` field prime, Montgomery arithmetic
