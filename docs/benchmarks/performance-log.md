@@ -591,6 +591,48 @@ randomized inputs, and all ML-KEM KATs pass in ReleaseSafe and ReleaseFast.
 On the same 2026-11-14 Jetson AGX Thor ARM64 host, ReleaseFast runs of the
 same benchmarks measured (three runs with the ARM64 kernels enabled, one
 baseline run with them disabled):
+The ML-DSA follow-up applied the same treatment to the mldsa-native AArch64
+backend: forward and inverse NTT, single and cached l=4/l=5/l=7 pointwise
+products, decomposition, use-hint, norm checks, z unpacking, and uniform/eta
+rejection sampling. The AArch64 NTT emits the standard coefficient order, so
+the AVX2-only `nttunpack` permutation is skipped; a differential test compares
+both transforms against the scalar oracle for every coefficient, and the
+remaining kernels are checked against their scalar counterparts. All ML-DSA
+KATs, signature verification tests, and TLS handshakes pass in ReleaseSafe and
+ReleaseFast with the accelerated path enabled.
+
+On the same 2026-11-14 Jetson AGX Thor ARM64 host, ReleaseFast runs with the
+ARM64 backend disabled and enabled measured:
+
+| Operation | Portable | ARM64 kernels | Speedup |
+| --- | ---: | ---: | ---: |
+| ML-DSA-44 prepared verify | 23,213 ns | 12,070 ns | 1.92x |
+| ML-DSA-44 raw verify | 52,197 ns | 28,249 ns | 1.85x |
+| ML-DSA-44 prepared sign | 180,729 ns | 80,746 ns | 2.24x |
+| ML-DSA-44 key generation | 68,515 ns | 28,153 ns | 2.43x |
+| ML-DSA-65 prepared verify | 47,317 ns | 15,999 ns | 2.96x |
+| ML-DSA-65 raw verify | 93,254 ns | 45,866 ns | 2.03x |
+| ML-DSA-65 prepared sign | 285,047 ns | 134,045 ns | 2.13x |
+| ML-DSA-65 key generation | 137,909 ns | 47,819 ns | 2.88x |
+| ML-DSA-87 prepared verify | 70,633 ns | 20,867 ns | 3.38x |
+| ML-DSA-87 raw verify | 154,091 ns | 71,616 ns | 2.15x |
+| ML-DSA-87 prepared sign | 330,773 ns | 136,852 ns | 2.42x |
+| ML-DSA-87 key generation | 211,391 ns | 73,672 ns | 2.87x |
+
+The same host's AWS-LC reference measured 33,290/118,389/34,265 ns for
+ML-DSA-44 prepared verify/sign/keygen, 54,861/178,668/58,713 ns for ML-DSA-65,
+and 88,336/228,040/93,560 ns for ML-DSA-87. Vail is now lower on every
+measured ML-DSA operation. The ML-DSA-44 prepared verifier keeps its cached
+`NTT(2^13 * t1)` term, so its comparison is an end-to-end prepared-verifier
+cost rather than identical work.
+
+The Ed25519 ARM64 verify wrapper previously depended on an encode kernel
+defined in the X25519 fixed-base assembly module, which left
+`vailEd25519EncodeArm64` undefined for consumers that linked Ed25519 verify
+without X25519. The encode kernel now lives in the verify module itself, and a
+minimal ML-DSA benchmark binary links without pulling in the X25519 path.
+
+
 
 | Parameter set and operation | Portable | ARM64 kernels | Speedup |
 | --- | ---: | ---: | ---: |

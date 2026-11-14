@@ -15,6 +15,10 @@ pub const enabled = builtin.cpu.arch == .x86_64 and
     builtin.mode != .Debug and
     std.Target.x86.featureSetHas(builtin.cpu.features, .avx2);
 
+/// The AVX2 NTT emits a permuted coefficient order that callers must convert
+/// back to the standard order.
+pub const uses_custom_order = true;
+
 extern fn vailMldsaNtt(
     data: *align(32) [256]i32,
     constants: *align(32) const [624]i32,

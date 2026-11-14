@@ -30,6 +30,19 @@ SPDX headers are authoritative; this file is a summary.
 - These files are vendored and preprocessed for the ELF x86_64 or AArch64 SysV
   ABI.
 
+## mldsa-native / s2n-bignum
+
+- License: Apache-2.0 OR ISC OR MIT
+- Copyright: The mldsa-native project authors; Amazon.com, Inc. or its
+  affiliates
+- Used for: ML-DSA AArch64 NTT, pointwise, decomposition, use-hint, norm
+  check, z-unpacking, and rejection-sampling kernels.
+- Locations: `src/crypto/pq/mldsa/*.S` (AArch64) and
+  `src/crypto/pq/mldsa/tables_arm64.zig`, which extracts the upstream
+  `aarch64_zetas.c`, `polyz_unpack_table.c`, `rej_uniform_table.c`, and
+  `rej_uniform_eta_table.c` tables.
+- These files are vendored and preprocessed for the ELF AArch64 SysV ABI.
+
 ## OpenSSL SHA-2 assembly
 
 - License: Apache-2.0

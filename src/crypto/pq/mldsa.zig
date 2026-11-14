@@ -4,11 +4,15 @@ const std = @import("std");
 const keccak4 = @import("../hash/keccak4.zig");
 const keccak_avx2 = @import("../hash/keccak_avx2.zig");
 const mldsa_avx2 = @import("mldsa_avx2.zig");
+const mldsa_arm64 = @import("mldsa_arm64.zig");
+/// Accelerated ML-DSA backend: AVX2 on x86_64, mldsa-native AArch64
+/// schedules on Linux ARM64.
+const accel = if (mldsa_avx2.enabled) mldsa_avx2 else mldsa_arm64;
 
 pub const MlDsa44 = std.crypto.sign.mldsa.MLDSA44;
 pub const MlDsa65 = std.crypto.sign.mldsa.MLDSA65;
 pub const MlDsa87 = std.crypto.sign.mldsa.MLDSA87;
-pub const mldsa_accelerated = mldsa_avx2.enabled;
+pub const mldsa_accelerated = accel.enabled;
 pub const mldsa44_accelerated = mldsa_accelerated;
 
 const coefficient_count = 256;
@@ -22,9 +26,9 @@ const decomposition_gamma2: u32 = 95_232;
 const PolyVec4 = @TypeOf(@as(MlDsa44.PublicKey, undefined).t1);
 const Poly = @TypeOf(@as(PolyVec4, undefined).ps[0]);
 const Matrix44 = @TypeOf(@as(MlDsa44.PublicKey, undefined).A);
-const AcceleratedMatrix44 = if (mldsa_avx2.enabled) Matrix44 else void;
-const AcceleratedPolyVec4 = if (mldsa_avx2.enabled) PolyVec4 else void;
-const FallbackSecretKey44 = if (mldsa_avx2.enabled) void else MlDsa44.SecretKey;
+const AcceleratedMatrix44 = if (accel.enabled) Matrix44 else void;
+const AcceleratedPolyVec4 = if (accel.enabled) PolyVec4 else void;
+const FallbackSecretKey44 = if (accel.enabled) void else MlDsa44.SecretKey;
 const Vector4u32 = @Vector(4, u32);
 const Vector4u64 = @Vector(4, u64);
 
@@ -54,14 +58,14 @@ pub const PreparedVerifier44 = struct {
         var t1_2d_hat: PolyVec4 align(32) = public_key.t1;
         for (&t1_2d_hat.ps) |*poly| {
             for (&poly.cs) |*coefficient| coefficient.* <<= 13;
-            if (comptime mldsa_avx2.enabled) {
+            if (comptime accel.enabled) {
                 nttCustomSignedAlignedInPlace(@alignCast(poly));
             } else {
                 nttScalarInPlace(poly);
             }
         }
         return .{
-            .matrix_hat = if (comptime mldsa_avx2.enabled)
+            .matrix_hat = if (comptime accel.enabled)
                 matrixToCustomOrder(&public_key.A)
             else
                 public_key.A,
@@ -75,7 +79,7 @@ pub const PreparedVerifier44 = struct {
     pub fn fromBytes(
         bytes: [MlDsa44.PublicKey.encoded_length]u8,
     ) !PreparedVerifier44 {
-        if (comptime !mldsa_avx2.enabled) {
+        if (comptime !accel.enabled) {
             const public_key = try MlDsa44.PublicKey.fromBytes(bytes);
             return init(&public_key);
         }
@@ -170,7 +174,7 @@ pub const PreparedVerifier44 = struct {
     ) std.crypto.errors.SignatureVerificationError!void {
         var z_hat: PolyVec4 align(32) = signature.z;
         var w_prime: PolyVec4 align(32) = undefined;
-        if (comptime mldsa_avx2.enabled) {
+        if (comptime accel.enabled) {
             nttCustomSignedVectorAlignedInPlace(&z_hat);
             matrixMulVectorHatCustom(
                 &w_prime,
@@ -182,12 +186,12 @@ pub const PreparedVerifier44 = struct {
             nttCustomSignedAlignedInPlace(&challenge_hat);
             for (0..4) |row| {
                 var product: Poly align(32) = self.t1_2d_hat.ps[row];
-                mldsa_avx2.pointwise(
+                accel.pointwise(
                     @ptrCast(@alignCast(&product.cs)),
                     @ptrCast(@alignCast(&challenge_hat.cs)),
                 );
                 subtractSignedForInv(&w_prime.ps[row], &product);
-                mldsa_avx2.invNtt(
+                accel.invNtt(
                     @ptrCast(@alignCast(&w_prime.ps[row].cs)),
                 );
                 normalizeSignedPolyInPlace(&w_prime.ps[row]);
@@ -210,10 +214,10 @@ pub const PreparedVerifier44 = struct {
         }
 
         var w1_packed: [4 * 192]u8 = undefined;
-        if (comptime mldsa_avx2.enabled) {
+        if (comptime accel.enabled) {
             var hint: PolyVec4 align(32) = signature.hint;
             for (0..4) |row| {
-                mldsa_avx2.useHint88(
+                accel.useHint88(
                     @ptrCast(@alignCast(&w_prime.ps[row].cs)),
                     @ptrCast(@alignCast(&hint.ps[row].cs)),
                 );
@@ -254,7 +258,7 @@ pub const PreparedSignature44 = struct {
     pub fn fromBytes(
         bytes: *const [MlDsa44.Signature.encoded_length]u8,
     ) std.crypto.errors.EncodingError!PreparedSignature44 {
-        if (comptime !mldsa_avx2.enabled) {
+        if (comptime !accel.enabled) {
             const signature = try MlDsa44.Signature.fromBytes(bytes.*);
             return .{
                 .c_tilde = signature.c_tilde,
@@ -266,11 +270,11 @@ pub const PreparedSignature44 = struct {
         var signature: PreparedSignature44 = undefined;
         signature.c_tilde = bytes[0..32].*;
         inline for (0..4) |index| {
-            mldsa_avx2.unpackZ17(
+            accel.unpackZ17(
                 @ptrCast(@alignCast(&signature.z.ps[index].cs)),
                 bytes[32 + index * 576 ..][0..576],
             );
-            if (mldsa_avx2.exceeds(
+            if (accel.exceeds(
                 @ptrCast(@alignCast(&signature.z.ps[index].cs)),
                 130_994,
             )) return error.InvalidEncoding;
@@ -334,7 +338,7 @@ fn PreparedSignatureWideImpl(
         pub fn fromBytes(
             bytes: *const [MlDsa.Signature.encoded_length]u8,
         ) std.crypto.errors.EncodingError!Self {
-            if (comptime !mldsa_avx2.enabled) {
+            if (comptime !accel.enabled) {
                 const signature = try MlDsa.Signature.fromBytes(bytes.*);
                 return .{
                     .c_tilde = signature.c_tilde,
@@ -347,11 +351,11 @@ fn PreparedSignatureWideImpl(
             signature.c_tilde = bytes[0..challenge_bytes].*;
             inline for (0..l) |index| {
                 const offset = challenge_bytes + index * 640;
-                mldsa_avx2.unpackZ19(
+                accel.unpackZ19(
                     @ptrCast(@alignCast(&signature.z.ps[index].cs)),
                     bytes[offset..][0..640],
                 );
-                if (mldsa_avx2.exceeds(
+                if (accel.exceeds(
                     @ptrCast(@alignCast(&signature.z.ps[index].cs)),
                     norm_bound,
                 )) return error.InvalidEncoding;
@@ -379,17 +383,17 @@ fn PreparedVerifierWideImpl(
     const Matrix = @TypeOf(@as(PublicKey, undefined).A);
     const VectorK = @TypeOf(@as(PublicKey, undefined).t1);
     const VectorL = @TypeOf(@as(MlDsa.Signature, undefined).z);
-    const FallbackPublicKey = if (mldsa_avx2.enabled) void else PublicKey;
+    const FallbackPublicKey = if (accel.enabled) void else PublicKey;
     return struct {
         tr: [64]u8,
-        matrix_hat: if (mldsa_avx2.enabled) Matrix else void align(if (mldsa_avx2.enabled) 32 else 1),
-        t1_2d_hat: if (mldsa_avx2.enabled) VectorK else void align(if (mldsa_avx2.enabled) 32 else 1),
+        matrix_hat: if (accel.enabled) Matrix else void align(if (accel.enabled) 32 else 1),
+        t1_2d_hat: if (accel.enabled) VectorK else void align(if (accel.enabled) 32 else 1),
         fallback_public_key: FallbackPublicKey,
 
         const Self = @This();
 
         pub fn init(public_key: *const PublicKey) Self {
-            if (comptime !mldsa_avx2.enabled) {
+            if (comptime !accel.enabled) {
                 return .{
                     .tr = public_key.tr,
                     .matrix_hat = {},
@@ -413,7 +417,7 @@ fn PreparedVerifierWideImpl(
         }
 
         pub fn fromBytes(bytes: [PublicKey.encoded_length]u8) !Self {
-            if (comptime !mldsa_avx2.enabled) {
+            if (comptime !accel.enabled) {
                 const public_key = try PublicKey.fromBytes(bytes);
                 return init(&public_key);
             }
@@ -459,7 +463,7 @@ fn PreparedVerifierWideImpl(
             signature: *const PreparedSignature,
             message: []const u8,
         ) std.crypto.errors.SignatureVerificationError!void {
-            if (comptime !mldsa_avx2.enabled) {
+            if (comptime !accel.enabled) {
                 const standard: MlDsa.Signature = .{
                     .c_tilde = signature.c_tilde,
                     .z = signature.z,
@@ -491,7 +495,7 @@ fn PreparedVerifierWideImpl(
                 var product: Poly align(32) = self.t1_2d_hat.ps[row];
                 pointwiseInPlace(&product, &challenge_hat);
                 subtractSignedForInv(&w_prime.ps[row], &product);
-                mldsa_avx2.invNtt(
+                accel.invNtt(
                     @ptrCast(@alignCast(&w_prime.ps[row].cs)),
                 );
                 normalizeSignedPolyInPlace(&w_prime.ps[row]);
@@ -500,7 +504,7 @@ fn PreparedVerifierWideImpl(
             var hint: VectorK align(32) = signature.hint;
             var w1_packed: [k * 128]u8 = undefined;
             for (0..k) |row| {
-                mldsa_avx2.useHint32(
+                accel.useHint32(
                     @ptrCast(@alignCast(&w_prime.ps[row].cs)),
                     @ptrCast(@alignCast(&hint.ps[row].cs)),
                 );
@@ -527,14 +531,14 @@ fn PreparedVerifierWideImpl(
 pub const PreparedSigner44 = struct {
     key: [32]u8,
     tr: [64]u8,
-    matrix_hat: AcceleratedMatrix44 align(if (mldsa_avx2.enabled) 32 else 1),
-    s1_hat: AcceleratedPolyVec4 align(if (mldsa_avx2.enabled) 32 else 1),
-    s2_hat: AcceleratedPolyVec4 align(if (mldsa_avx2.enabled) 32 else 1),
-    t0_hat: AcceleratedPolyVec4 align(if (mldsa_avx2.enabled) 32 else 1),
+    matrix_hat: AcceleratedMatrix44 align(if (accel.enabled) 32 else 1),
+    s1_hat: AcceleratedPolyVec4 align(if (accel.enabled) 32 else 1),
+    s2_hat: AcceleratedPolyVec4 align(if (accel.enabled) 32 else 1),
+    t0_hat: AcceleratedPolyVec4 align(if (accel.enabled) 32 else 1),
     fallback_secret_key: FallbackSecretKey44,
 
     pub fn init(secret_key: *const MlDsa44.SecretKey) PreparedSigner44 {
-        if (comptime !mldsa_avx2.enabled) {
+        if (comptime !accel.enabled) {
             return .{
                 .key = secret_key.key,
                 .tr = secret_key.tr,
@@ -560,7 +564,7 @@ pub const PreparedSigner44 = struct {
     pub fn fromBytes(
         bytes: *const [MlDsa44.SecretKey.encoded_length]u8,
     ) !PreparedSigner44 {
-        if (comptime !mldsa_avx2.enabled) {
+        if (comptime !accel.enabled) {
             var secret_key = try MlDsa44.SecretKey.fromBytes(bytes.*);
             defer std.crypto.secureZero(
                 MlDsa44.SecretKey,
@@ -609,7 +613,7 @@ pub const PreparedSigner44 = struct {
         if (context.len > 255) return error.ContextTooLong;
         var randomizer = noise;
         defer std.crypto.secureZero(u8, &randomizer);
-        if (comptime !mldsa_avx2.enabled) {
+        if (comptime !accel.enabled) {
             var signer = try self.fallback_secret_key.signerWithContext(
                 randomizer,
                 context,
@@ -668,11 +672,11 @@ pub const PreparedSigner44 = struct {
                 &y_hat,
             );
             for (0..4) |row| {
-                mldsa_avx2.invNtt(
+                accel.invNtt(
                     @ptrCast(@alignCast(&w0.ps[row].cs)),
                 );
                 normalizeSignedPolyInPlace(&w0.ps[row]);
-                mldsa_avx2.decompose88(
+                accel.decompose88(
                     @ptrCast(@alignCast(&w1.ps[row].cs)),
                     @ptrCast(@alignCast(&w0.ps[row].cs)),
                 );
@@ -772,7 +776,7 @@ fn PreparedSignerWideImpl(
     const Matrix = @TypeOf(@as(SecretKey, undefined).A);
     const VectorL = @TypeOf(@as(SecretKey, undefined).s1);
     const VectorK = @TypeOf(@as(SecretKey, undefined).s2);
-    const FallbackSecretKey = if (mldsa_avx2.enabled) void else SecretKey;
+    const FallbackSecretKey = if (accel.enabled) void else SecretKey;
     const eta_bytes_per_poly = if (eta == 2) 96 else 128;
     const s1_offset = 128;
     const s2_offset = s1_offset + l * eta_bytes_per_poly;
@@ -784,16 +788,16 @@ fn PreparedSignerWideImpl(
     return struct {
         key: [32]u8,
         tr: [64]u8,
-        matrix_hat: if (mldsa_avx2.enabled) Matrix else void align(if (mldsa_avx2.enabled) 32 else 1),
-        s1_hat: if (mldsa_avx2.enabled) VectorL else void align(if (mldsa_avx2.enabled) 32 else 1),
-        s2_hat: if (mldsa_avx2.enabled) VectorK else void align(if (mldsa_avx2.enabled) 32 else 1),
-        t0_hat: if (mldsa_avx2.enabled) VectorK else void align(if (mldsa_avx2.enabled) 32 else 1),
+        matrix_hat: if (accel.enabled) Matrix else void align(if (accel.enabled) 32 else 1),
+        s1_hat: if (accel.enabled) VectorL else void align(if (accel.enabled) 32 else 1),
+        s2_hat: if (accel.enabled) VectorK else void align(if (accel.enabled) 32 else 1),
+        t0_hat: if (accel.enabled) VectorK else void align(if (accel.enabled) 32 else 1),
         fallback_secret_key: FallbackSecretKey,
 
         const Self = @This();
 
         pub fn init(secret_key: *const SecretKey) Self {
-            if (comptime !mldsa_avx2.enabled) {
+            if (comptime !accel.enabled) {
                 return .{
                     .key = secret_key.key,
                     .tr = secret_key.tr,
@@ -821,7 +825,7 @@ fn PreparedSignerWideImpl(
         pub fn fromBytes(
             bytes: *const [SecretKey.encoded_length]u8,
         ) !Self {
-            if (comptime !mldsa_avx2.enabled) {
+            if (comptime !accel.enabled) {
                 var secret_key = try SecretKey.fromBytes(bytes.*);
                 defer std.crypto.secureZero(SecretKey, (&secret_key)[0..1]);
                 return init(&secret_key);
@@ -883,7 +887,7 @@ fn PreparedSignerWideImpl(
             if (context.len > 255) return error.ContextTooLong;
             var randomizer = noise;
             defer std.crypto.secureZero(u8, &randomizer);
-            if (comptime !mldsa_avx2.enabled) {
+            if (comptime !accel.enabled) {
                 var signer = try self.fallback_secret_key.signerWithContext(
                     randomizer,
                     context,
@@ -944,7 +948,7 @@ fn PreparedSignerWideImpl(
                     l,
                 );
                 for (0..k) |row| {
-                    mldsa_avx2.invNtt(
+                    accel.invNtt(
                         @ptrCast(@alignCast(&w0.ps[row].cs)),
                     );
                     normalizeSignedPolyInPlace(&w0.ps[row]);
@@ -1059,7 +1063,7 @@ fn CompactKeyPairWide(comptime MlDsa: type, comptime PreparedSigner: type) type 
 
 /// Generate a standard encoded ML-DSA-44 key pair.
 pub fn generateKeyPair44(seed: [MlDsa44.seed_length]u8) !KeyPair44 {
-    if (comptime !mldsa_avx2.enabled) {
+    if (comptime !accel.enabled) {
         var key_pair = try MlDsa44.KeyPair.generateDeterministic(seed);
         defer wipeKeyPair44(&key_pair);
         return .{
@@ -1101,12 +1105,12 @@ pub fn generateKeyPair44(seed: [MlDsa44.seed_length]u8) !KeyPair44 {
     prepareSecretVectorInPlace(&s1);
 
     for (0..4) |row| {
-        mldsa_avx2.dotHatL4(
+        accel.dotHatL4(
             @ptrCast(@alignCast(&t.cs)),
             @ptrCast(@alignCast(&matrix_hat.rows[row].ps)),
             @ptrCast(@alignCast(&s1.ps)),
         );
-        mldsa_avx2.invNtt(@ptrCast(@alignCast(&t.cs)));
+        accel.invNtt(@ptrCast(@alignCast(&t.cs)));
         normalizeSignedPolyInPlace(&t);
         addCenteredToCanonical(&t, &s2.ps[row]);
         var t1: Poly = undefined;
@@ -1154,7 +1158,7 @@ fn generateKeyPairWide(
     comptime eta: usize,
     seed: [MlDsa.seed_length]u8,
 ) !EncodedKeyPair {
-    if (comptime !mldsa_avx2.enabled) {
+    if (comptime !accel.enabled) {
         var key_pair = try MlDsa.KeyPair.generateDeterministic(seed);
         defer std.crypto.secureZero(MlDsa.KeyPair, (&key_pair)[0..1]);
         return .{
@@ -1233,7 +1237,7 @@ fn generateKeyPairWide(
     matrixMulVectorHatCustomGeneric(&t, &matrix_hat, s1, k, l);
 
     for (0..k) |row| {
-        mldsa_avx2.invNtt(@ptrCast(@alignCast(&t.ps[row].cs)));
+        accel.invNtt(@ptrCast(@alignCast(&t.ps[row].cs)));
         normalizeSignedPolyInPlace(&t.ps[row]);
         addSignedToCanonical(&t.ps[row], &s2.ps[row]);
         var t1: Poly = undefined;
@@ -1301,7 +1305,7 @@ pub const Verifier44 = struct {
 pub fn publicKey44FromBytes(
     bytes: [MlDsa44.PublicKey.encoded_length]u8,
 ) !MlDsa44.PublicKey {
-    if (comptime !mldsa_avx2.enabled) return MlDsa44.PublicKey.fromBytes(bytes);
+    if (comptime !accel.enabled) return MlDsa44.PublicKey.fromBytes(bytes);
 
     var public_key: MlDsa44.PublicKey = undefined;
     public_key.rho = bytes[0..32].*;
@@ -1323,7 +1327,7 @@ pub fn publicKey44FromBytes(
 /// Deterministically generate an ML-DSA-44 key pair using the accelerated
 /// public and secret arithmetic paths when available.
 pub fn keyPair44FromSeed(seed: [MlDsa44.seed_length]u8) !MlDsa44.KeyPair {
-    if (comptime !mldsa_avx2.enabled) {
+    if (comptime !accel.enabled) {
         return MlDsa44.KeyPair.generateDeterministic(seed);
     }
 
@@ -1357,7 +1361,7 @@ pub fn keyPair44FromSeed(seed: [MlDsa44.seed_length]u8) !MlDsa44.KeyPair {
     }
     matrixMulVectorHatCustom(&t, &matrix_hat, &s1_hat);
     for (0..4) |row| {
-        mldsa_avx2.invNtt(@ptrCast(@alignCast(&t.ps[row].cs)));
+        accel.invNtt(@ptrCast(@alignCast(&t.ps[row].cs)));
         normalizeSignedPolyInPlace(&t.ps[row]);
         addCenteredToCanonical(&t.ps[row], &secret_key.s2.ps[row]);
         power2RoundPoly(
@@ -1456,9 +1460,9 @@ fn appendUniform(
     coefficient_index: *usize,
     bytes: []const u8,
 ) void {
-    if (comptime mldsa_avx2.enabled) {
+    if (comptime accel.enabled) {
         if (bytes.len == 840 and coefficient_index.* == 0) {
-            coefficient_index.* = mldsa_avx2.rejectUniform(
+            coefficient_index.* = accel.rejectUniform(
                 output,
                 bytes[0..840],
             );
@@ -1743,21 +1747,27 @@ fn nttScalarVectorInPlace(vector: *PolyVec4) void {
 }
 
 fn nttInPlace(poly: *Poly) void {
-    if (comptime mldsa_avx2.enabled) {
+    if (comptime accel.enabled) {
         var coefficients: [coefficient_count]i32 align(32) = undefined;
         for (&coefficients, poly.cs) |*output, input| {
             output.* = @intCast(input);
         }
-        mldsa_avx2.ntt(&coefficients);
-        for (0..4) |block| {
-            for (0..8) |row| {
-                for (0..8) |column| {
-                    const standard_index = block * 64 + row * 8 + column;
-                    const custom_index = block * 64 + column * 8 + row;
-                    poly.cs[standard_index] = normalizeSignedNtt(
-                        coefficients[custom_index],
-                    );
+        accel.ntt(&coefficients);
+        if (comptime accel.uses_custom_order) {
+            for (0..4) |block| {
+                for (0..8) |row| {
+                    for (0..8) |column| {
+                        const standard_index = block * 64 + row * 8 + column;
+                        const custom_index = block * 64 + column * 8 + row;
+                        poly.cs[standard_index] = normalizeSignedNtt(
+                            coefficients[custom_index],
+                        );
+                    }
                 }
+            }
+        } else {
+            for (&coefficients, 0..) |coefficient, index| {
+                poly.cs[index] = normalizeSignedNtt(coefficient);
             }
         }
         return;
@@ -1776,7 +1786,7 @@ fn nttCustomSignedVector(vector: anytype) void {
 }
 
 fn nttCustomSignedAlignedInPlace(poly: *align(32) Poly) void {
-    mldsa_avx2.ntt(@ptrCast(@alignCast(&poly.cs)));
+    accel.ntt(@ptrCast(@alignCast(&poly.cs)));
 }
 
 fn matrixMulVectorHatCustom(
@@ -1798,19 +1808,19 @@ fn matrixMulVectorHatCustomGeneric(
         const output_poly: *align(32) [256]i32 =
             @ptrCast(@alignCast(&output.ps[row].cs));
         if (comptime l == 4) {
-            mldsa_avx2.dotHatL4(
+            accel.dotHatL4(
                 output_poly,
                 @ptrCast(@alignCast(&matrix.rows[row].ps)),
                 @ptrCast(@alignCast(&vector.ps)),
             );
         } else if (comptime l == 5) {
-            mldsa_avx2.dotHatL5(
+            accel.dotHatL5(
                 output_poly,
                 @ptrCast(@alignCast(&matrix.rows[row].ps)),
                 @ptrCast(@alignCast(&vector.ps)),
             );
         } else if (comptime l == 7) {
-            mldsa_avx2.dotHatL7(
+            accel.dotHatL7(
                 output_poly,
                 @ptrCast(@alignCast(&matrix.rows[row].ps)),
                 @ptrCast(@alignCast(&vector.ps)),
@@ -1854,7 +1864,7 @@ fn matrixToCustomOrderGeneric(
 ) void {
     for (0..k) |row| {
         for (0..l) |column| {
-            mldsa_avx2.toCustomOrder(
+            accel.toCustomOrder(
                 @alignCast(&matrix.rows[row].ps[column].cs),
             );
         }
@@ -1916,7 +1926,7 @@ fn deriveMask4(
     var expanded = keccak4.shake256MldsaMask(&inputs);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&expanded));
     for (&output.ps, &expanded) |*poly, *bytes| {
-        mldsa_avx2.unpackZ17(
+        accel.unpackZ17(
             @ptrCast(@alignCast(&poly.cs)),
             bytes[0..576],
         );
@@ -1947,7 +1957,7 @@ fn deriveMask19Generic(
         for (&expanded, 0..) |*bytes, lane| {
             const index = offset + lane;
             if (index >= count) break;
-            mldsa_avx2.unpackZ19(
+            accel.unpackZ19(
                 @ptrCast(@alignCast(&output.ps[index].cs)),
                 bytes[0..640],
             );
@@ -1989,7 +1999,7 @@ fn deriveEta2VectorGeneric(
             const index = offset + lane;
             if (index >= count) break;
             const poly = &output.ps[index];
-            var coefficient_index = mldsa_avx2.rejectEta2(
+            var coefficient_index = accel.rejectEta2(
                 &poly.cs,
                 bytes[0..FastShake256.rate],
             );
@@ -2076,7 +2086,7 @@ fn deriveEta4PolyFromExpanded(
     input: *const [keccak4.mldsa_eta_input_length]u8,
     expanded: *const [keccak4.mldsa_eta_output_length]u8,
 ) void {
-    var coefficient_index = mldsa_avx2.rejectEta4(
+    var coefficient_index = accel.rejectEta4(
         &poly.cs,
         expanded,
         coefficient_count,
@@ -2118,7 +2128,7 @@ fn appendEta4Signed(
 fn customSignedToStandard(input: PolyVec4) PolyVec4 {
     var result: PolyVec4 align(32) = input;
     for (&result.ps) |*poly| {
-        mldsa_avx2.toCustomOrder(@alignCast(&poly.cs));
+        accel.toCustomOrder(@alignCast(&poly.cs));
         for (&poly.cs) |*coefficient| {
             coefficient.* = normalizeSignedNtt(@bitCast(coefficient.*));
         }
@@ -2323,14 +2333,14 @@ fn packT0Poly(poly: *const Poly, output: *[416]u8) void {
 }
 
 fn pointwiseInPlace(left_and_output: *align(32) Poly, right: *align(32) const Poly) void {
-    mldsa_avx2.pointwise(
+    accel.pointwise(
         @ptrCast(@alignCast(&left_and_output.cs)),
         @ptrCast(@alignCast(&right.cs)),
     );
 }
 
 fn inverseAndCenter(poly: *align(32) Poly) void {
-    mldsa_avx2.invNtt(@ptrCast(@alignCast(&poly.cs)));
+    accel.invNtt(@ptrCast(@alignCast(&poly.cs)));
     centerSignedPolyInPlace(poly);
 }
 
@@ -2361,7 +2371,7 @@ fn subSignedInPlace(left_and_output: *Poly, right: *const Poly) void {
 }
 
 fn exceedsSigned(poly: *align(32) const Poly, bound: i32) bool {
-    return mldsa_avx2.exceeds(
+    return accel.exceeds(
         @ptrCast(@alignCast(&poly.cs)),
         bound,
     );
@@ -3056,4 +3066,245 @@ fn normalizeCoefficient(value: u32) u32 {
     const at_most_2q = reduceLe2Q(value);
     const reduced = at_most_2q -% modulus;
     return reduced +% (signMask(reduced) & modulus);
+}
+
+test "ARM64 ML-DSA NTT matches scalar oracle" {
+    if (comptime !mldsa_arm64.enabled) return error.SkipZigTest;
+    var rnd = std.Random.DefaultPrng.init(23);
+    for (0..50) |_| {
+        var accelerated: Poly align(32) = undefined;
+        var portable: Poly align(32) = undefined;
+        for (0..coefficient_count) |i| {
+            const value = rnd.random().uintLessThan(u32, modulus);
+            accelerated.cs[i] = value;
+            portable.cs[i] = value;
+        }
+        mldsa_arm64.ntt(@ptrCast(@alignCast(&accelerated.cs)));
+        nttScalarInPlace(&portable);
+        for (0..coefficient_count) |i| {
+            const actual = @mod(
+                @as(i64, @as(i32, @bitCast(accelerated.cs[i]))),
+                @as(i64, modulus),
+            );
+            const expected = @mod(@as(i64, portable.cs[i]), @as(i64, modulus));
+            if (actual != expected) {
+                std.debug.print(
+                    "NTT mismatch at {d}: asm={d} scalar={d}\n",
+                    .{ i, actual, expected },
+                );
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
+
+test "ARM64 ML-DSA inverse NTT matches scalar oracle" {
+    if (comptime !mldsa_arm64.enabled) return error.SkipZigTest;
+    var rnd = std.Random.DefaultPrng.init(29);
+    for (0..50) |_| {
+        var accelerated: Poly align(32) = undefined;
+        var portable: Poly align(32) = undefined;
+        for (0..coefficient_count) |i| {
+            const value = rnd.random().uintLessThan(u32, modulus);
+            accelerated.cs[i] = value;
+            portable.cs[i] = value;
+        }
+        mldsa_arm64.invNtt(@ptrCast(@alignCast(&accelerated.cs)));
+        invNttInPlace(&portable);
+        for (0..coefficient_count) |i| {
+            const actual = @mod(
+                @as(i64, @as(i32, @bitCast(accelerated.cs[i]))),
+                @as(i64, modulus),
+            );
+            const expected = @mod(@as(i64, portable.cs[i]), @as(i64, modulus));
+            if (actual != expected) {
+                std.debug.print(
+                    "invNTT mismatch at {d}: asm={d} scalar={d}\n",
+                    .{ i, actual, expected },
+                );
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
+
+test "ARM64 ML-DSA pointwise kernels match scalar Montgomery arithmetic" {
+    if (comptime !mldsa_arm64.enabled) return error.SkipZigTest;
+
+    var left: Poly align(32) = undefined;
+    var right: Poly align(32) = undefined;
+    for (&left.cs, &right.cs, 0..) |*a, *b, index| {
+        a.* = @intCast((@as(u64, index) * 65_537 + 17) % modulus);
+        b.* = @intCast((@as(u64, index) * 131_071 + 29) % modulus);
+    }
+
+    const expected_product = mulHat(left, right);
+    var actual_product: [coefficient_count]i32 align(32) = undefined;
+    for (&actual_product, left.cs) |*output, coefficient| {
+        output.* = @intCast(coefficient);
+    }
+    var right_i32: [coefficient_count]i32 align(32) = undefined;
+    for (&right_i32, right.cs) |*output, coefficient| {
+        output.* = @intCast(coefficient);
+    }
+    mldsa_arm64.pointwise(&actual_product, &right_i32);
+    for (expected_product.cs, actual_product) |expected, actual| {
+        try std.testing.expectEqual(
+            normalizeSignedNtt(actual),
+            normalizeCoefficient(expected),
+        );
+    }
+
+    var left_vector: [4][coefficient_count]i32 align(32) = undefined;
+    var right_vector: [4][coefficient_count]i32 align(32) = undefined;
+    for (0..4) |lane| {
+        for (&left_vector[lane], left.cs) |*output, coefficient| {
+            output.* = @intCast(coefficient);
+        }
+        for (&right_vector[lane], right.cs) |*output, coefficient| {
+            output.* = @intCast(coefficient);
+        }
+    }
+    var actual_dot: [coefficient_count]i32 align(32) = undefined;
+    mldsa_arm64.dotHatL4(&actual_dot, &left_vector, &right_vector);
+
+    var expected_dot: Poly = .{ .cs = .{0} ** coefficient_count };
+    for (0..4) |_| expected_dot = add(expected_dot, mulHat(left, right));
+    for (expected_dot.cs, actual_dot) |expected, actual| {
+        try std.testing.expectEqual(
+            normalizeSignedNtt(actual),
+            normalizeCoefficient(expected),
+        );
+    }
+}
+
+test "ARM64 ML-DSA-44 decomposition matches scalar coefficients" {
+    if (comptime !mldsa_arm64.enabled) return error.SkipZigTest;
+    var low: Poly align(32) = undefined;
+    var high: Poly align(32) = undefined;
+    var original: [coefficient_count]u32 = undefined;
+    for (&low.cs, &original, 0..) |*coefficient, *copy, index| {
+        coefficient.* = @intCast(
+            (@as(u64, index) * 524_287 + 131_101) % modulus,
+        );
+        copy.* = coefficient.*;
+    }
+    mldsa_arm64.decompose88(
+        @ptrCast(@alignCast(&high.cs)),
+        @ptrCast(@alignCast(&low.cs)),
+    );
+    for (original, 0..) |coefficient, index| {
+        const expected = decompose44(coefficient);
+        try std.testing.expectEqual(expected.high, high.cs[index]);
+        try std.testing.expectEqual(
+            @as(i32, @intCast(expected.low_plus_q)) - @as(i32, modulus),
+            @as(i32, @bitCast(low.cs[index])),
+        );
+    }
+}
+
+test "ARM64 ML-DSA-44 use-hint matches scalar packed output" {
+    if (comptime !mldsa_arm64.enabled) return error.SkipZigTest;
+    var polynomial: Poly align(32) = undefined;
+    var hint: Poly align(32) = .{ .cs = .{0} ** coefficient_count };
+    for (&polynomial.cs, 0..) |*coefficient, index| {
+        coefficient.* = @intCast(
+            (@as(u64, index) * 196_613 + 97_531) % modulus,
+        );
+        hint.cs[index] = @intFromBool(index % 7 == 0 or index % 29 == 0);
+    }
+
+    var expected: [192]u8 = undefined;
+    packW1(&polynomial, &hint, &expected);
+    mldsa_arm64.useHint88(
+        @ptrCast(@alignCast(&polynomial.cs)),
+        @ptrCast(@alignCast(&hint.cs)),
+    );
+    var actual: [192]u8 = undefined;
+    packW1High(&polynomial, &actual);
+    try std.testing.expectEqual(expected, actual);
+}
+
+test "ARM64 ML-DSA uniform rejection matches scalar sampling" {
+    if (comptime !mldsa_arm64.enabled) return error.SkipZigTest;
+    var rnd = std.Random.DefaultPrng.init(31);
+    var bytes: [840]u8 = undefined;
+    for (0..50) |_| {
+        rnd.random().bytes(&bytes);
+        var expected: [coefficient_count]u32 = undefined;
+        var expected_count: usize = 0;
+        appendUniform(&expected, &expected_count, &bytes);
+        var actual: [coefficient_count]u32 align(32) = undefined;
+        const actual_count = mldsa_arm64.rejectUniform(&actual, &bytes);
+        try std.testing.expectEqual(expected_count, actual_count);
+        try std.testing.expectEqualSlices(
+            u32,
+            expected[0..expected_count],
+            actual[0..actual_count],
+        );
+    }
+}
+
+test "ARM64 ML-DSA eta=2 rejection matches scalar sampling" {
+    if (comptime !mldsa_arm64.enabled) return error.SkipZigTest;
+    var rnd = std.Random.DefaultPrng.init(37);
+    var bytes: [136]u8 = undefined;
+    for (0..50) |_| {
+        rnd.random().bytes(&bytes);
+        var expected: [coefficient_count]u32 = undefined;
+        var expected_count: usize = 0;
+        appendEta2Signed(&expected, &expected_count, &bytes);
+        var actual: [coefficient_count]u32 align(32) = undefined;
+        const actual_count = mldsa_arm64.rejectEta2(&actual, &bytes);
+        try std.testing.expectEqual(expected_count, actual_count);
+        try std.testing.expectEqualSlices(
+            u32,
+            expected[0..expected_count],
+            actual[0..actual_count],
+        );
+    }
+}
+
+test "ARM64 ML-DSA eta=4 rejection matches scalar sampling" {
+    if (comptime !mldsa_arm64.enabled) return error.SkipZigTest;
+
+    var inputs: [4][keccak4.mldsa_eta_output_length]u8 = undefined;
+    @memset(&inputs[0], 0x88);
+    @memset(&inputs[1], 0xff);
+    for (&inputs[2], 0..) |*byte, index| byte.* = @truncate(index *% 73 +% 19);
+    for (&inputs[3], 0..) |*byte, index| byte.* = @truncate(index);
+
+    for (&inputs) |*input| {
+        var expected: [coefficient_count]u32 = undefined;
+        var expected_count: usize = 0;
+        appendEta4Signed(&expected, &expected_count, input);
+        var actual: [coefficient_count]u32 align(32) = undefined;
+        const actual_count = mldsa_arm64.rejectEta4(&actual, input, actual.len);
+        try std.testing.expectEqual(expected_count, actual_count);
+        try std.testing.expectEqualSlices(
+            u32,
+            expected[0..expected_count],
+            actual[0..actual_count],
+        );
+
+        inline for ([_]usize{ 1, 7, 8, 9, 31, 255 }) |capacity| {
+            const sentinel: u32 = 0xdeadbeef;
+            var guarded: [coefficient_count + 2]u32 align(32) =
+                .{sentinel} ** (coefficient_count + 2);
+            const bounded_count = mldsa_arm64.rejectEta4(
+                @ptrCast(&guarded[1]),
+                input,
+                capacity,
+            );
+            const expected_bounded = @min(expected_count, capacity);
+            try std.testing.expectEqual(expected_bounded, bounded_count);
+            try std.testing.expectEqualSlices(
+                u32,
+                expected[0..expected_bounded],
+                guarded[1..][0..bounded_count],
+            );
+            try std.testing.expectEqual(sentinel, guarded[0]);
+            try std.testing.expectEqual(sentinel, guarded[1 + capacity]);
+        }
+    }
 }

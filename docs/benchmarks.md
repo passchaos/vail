@@ -55,7 +55,12 @@ representative medians, not a complete matrix.
 | ARM64 ML-KEM-768 key generation | 11,627 ns | AWS-LC 14,729 ns | 21.1% lower latency |
 | ARM64 ML-KEM-768 encapsulation | 7,484 ns | AWS-LC 16,719 ns | 2.23x lower latency |
 | ARM64 ML-KEM-768 decapsulation | 11,708 ns | AWS-LC 19,865 ns | 1.70x lower latency |
-| ML-DSA-44 prepared-key verify | 7,696.5 ns | AWS-LC 22,480.6 ns | 2.92x |
+| ARM64 ML-DSA-44 prepared verify | 12,070 ns | AWS-LC 33,290 ns | 2.76x lower latency |
+| ARM64 ML-DSA-65 prepared verify | 15,999 ns | AWS-LC 54,861 ns | 3.43x lower latency |
+| ARM64 ML-DSA-87 prepared verify | 20,867 ns | AWS-LC 88,336 ns | 4.23x lower latency |
+| ARM64 ML-DSA-44 sign | 80,746 ns | AWS-LC 118,389 ns | 1.47x lower latency |
+| ARM64 ML-DSA-44 key generation | 28,153 ns | AWS-LC 34,265 ns | 1.22x lower latency |
+| ML-DSA-44 prepared-key verify (x86_64) | 7,696.5 ns | AWS-LC 22,480.6 ns | 2.92x |
 
 The full dated log, including rejected optimizations and noise analysis, is in
 [`benchmarks/performance-log.md`](benchmarks/performance-log.md).
