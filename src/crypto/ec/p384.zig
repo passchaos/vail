@@ -11,8 +11,9 @@ const builtin = @import("builtin");
 const P384 = std.crypto.ecc.P384;
 const Scalar = P384.scalar.Scalar;
 const Fe = P384.Fe;
-const point_adx = @import("p384_point_ops_adx.zig");
+const point_ops = @import("p384_point_ops.zig");
 const field_inv_x86 = @import("p384_field_inv_x86.zig");
+const field_inv_arm64 = @import("p384_field_inv_arm64.zig");
 const scalar_inv_x86 = @import("p384_scalar_inv_x86.zig");
 const scalar_mul_x86 = @import("p384_scalar_mul_x86.zig");
 const table_data = @import("p384_tables.zig");
@@ -543,6 +544,9 @@ fn invertSecretField(value: Fe) Fe {
     if (comptime field_inv_x86.enabled) {
         return .{ .limbs = field_inv_x86.invert(&value.limbs) };
     }
+    if (comptime field_inv_arm64.enabled) {
+        return .{ .limbs = field_inv_arm64.invert(&value.limbs) };
+    }
     return value.invert();
 }
 
@@ -580,8 +584,8 @@ const JacobianPoint = struct {
     }
 
     fn dblAssign(point: *JacobianPoint) void {
-        if (!@inComptime() and comptime point_adx.enabled) {
-            point_adx.pointDouble(
+        if (!@inComptime() and comptime point_ops.enabled) {
+            point_ops.pointDouble(
                 @ptrCast(point),
                 @ptrCast(point),
             );
@@ -602,8 +606,8 @@ const JacobianPoint = struct {
     }
 
     fn dblSecretAssign(point: *JacobianPoint) void {
-        if (comptime point_adx.enabled) {
-            point_adx.pointDouble(
+        if (comptime point_ops.enabled) {
+            point_ops.pointDouble(
                 @ptrCast(point),
                 @ptrCast(point),
             );
@@ -626,9 +630,9 @@ const JacobianPoint = struct {
     fn add(point: JacobianPoint, other: JacobianPoint) JacobianPoint {
         if (point.isIdentity()) return other;
         if (other.isIdentity()) return point;
-        if (!@inComptime() and comptime point_adx.enabled) {
+        if (!@inComptime() and comptime point_ops.enabled) {
             var sum: JacobianPoint = undefined;
-            point_adx.pointAdd(
+            point_ops.pointAdd(
                 @ptrCast(&sum),
                 @ptrCast(&point),
                 @ptrCast(&other),
@@ -665,9 +669,9 @@ const JacobianPoint = struct {
         if (point.isIdentity()) {
             return .{ .x = other.x, .y = other.y, .z = Fe.one };
         }
-        if (!@inComptime() and comptime point_adx.enabled) {
+        if (!@inComptime() and comptime point_ops.enabled) {
             var sum: JacobianPoint = undefined;
-            point_adx.pointMixedAdd(
+            point_ops.pointMixedAdd(
                 @ptrCast(&sum),
                 @ptrCast(&point),
                 @ptrCast(&other),
@@ -703,8 +707,8 @@ const JacobianPoint = struct {
         point: *JacobianPoint,
         other: *const JacobianPoint,
     ) bool {
-        std.debug.assert(point_adx.enabled);
-        point_adx.pointAdd(
+        std.debug.assert(point_ops.enabled);
+        point_ops.pointAdd(
             @ptrCast(point),
             @ptrCast(point),
             @ptrCast(other),
@@ -716,8 +720,8 @@ const JacobianPoint = struct {
         point: *JacobianPoint,
         other: *const AffinePoint,
     ) bool {
-        std.debug.assert(point_adx.enabled);
-        point_adx.pointMixedAdd(
+        std.debug.assert(point_ops.enabled);
+        point_ops.pointMixedAdd(
             @ptrCast(point),
             @ptrCast(point),
             @ptrCast(other),
@@ -733,8 +737,8 @@ const JacobianPoint = struct {
         defer wipeCallerSavedRegisters();
         var original = point.*;
         defer std.crypto.secureZero(JacobianPoint, (&original)[0..1]);
-        if (comptime point_adx.enabled) {
-            point_adx.pointMixedAdd(
+        if (comptime point_ops.enabled) {
+            point_ops.pointMixedAdd(
                 @ptrCast(point),
                 @ptrCast(point),
                 @ptrCast(&other.point),
@@ -901,7 +905,7 @@ fn precomputeOdd(
     multiples[0] = point;
     const twice = point.dbl();
     for (1..entries) |index| {
-        if (!@inComptime() and comptime point_adx.enabled) {
+        if (!@inComptime() and comptime point_ops.enabled) {
             multiples[index] = multiples[index - 1];
             _ = multiples[index].addAssignIncomplete(&twice);
         } else {
@@ -1050,7 +1054,7 @@ fn doubleScalarMul(
                 public_table,
                 public_digit,
             );
-        } else if (comptime point_adx.enabled) {
+        } else if (comptime point_ops.enabled) {
             exceptional = addSignedWnafJacobianIncomplete(
                 &result,
                 public_wnaf_entries,
@@ -1073,7 +1077,7 @@ fn doubleScalarMul(
             base_wnaf.entries[base_index - 1].position == position)
         {
             base_index -= 1;
-            if (comptime point_adx.enabled) {
+            if (comptime point_ops.enabled) {
                 exceptional = addSignedWnafAffineIncomplete(
                     &result,
                     base_wnaf_entries,
@@ -1092,7 +1096,7 @@ fn doubleScalarMul(
             public_wnaf.entries[public_index - 1].position == position)
         {
             public_index -= 1;
-            if (comptime point_adx.enabled) {
+            if (comptime point_ops.enabled) {
                 exceptional = addSignedWnafJacobianIncomplete(
                     &result,
                     public_wnaf_entries,

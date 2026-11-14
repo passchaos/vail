@@ -61,6 +61,22 @@ derivation measured 113,664.5 ns for Vail versus 196,926.2 ns for AWS-LC, a
 regressed public-key recovery by 2.33% and was removed. Run `bench-p384-ecdh`
 and `bench-aws-lc-p384-ecdh` for the isolated comparison.
 
+On the 2026-11-14 Jetson AGX Thor ARM64 host, the P-384 Montgomery-Jacobian
+point operations and secret field inverse were switched to the s2n-bignum
+AArch64 schedules. Three repeated `bench-p384-verify` / `bench-aws-lc-p384`
+runs produced these medians (single-run samples, not ABBA quartets):
+
+| P-384 operation | Vail | AWS-LC | Result |
+| --- | ---: | ---: | --- |
+| Verify, SHA-384 | 187,737 ns | 240,796 ns | Vail 22.0% lower |
+| Sign, SHA-384 | 85,664 ns | 93,550 ns | Vail 8.4% lower |
+| Secret field inverse component | 2,522 ns | 50,711 ns (std portable) | 20.1x faster |
+
+The field inverse change alone reduced the sign path from 132,592 ns to
+85,664 ns. The point-kernel change reduced verification from 611,324 ns to
+187,737 ns (3.26x). The portable formulas remain the Debug/ReleaseSmall
+fallback and the differential oracle.
+
 A fixed-width, allocation-free
 P-521 verifier fills the curve left unimplemented by Zig std 0.16: it uses
 9×58-bit reduction modulo the `2^521-1` field prime, Montgomery arithmetic

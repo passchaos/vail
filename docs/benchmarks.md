@@ -46,6 +46,8 @@ representative medians, not a complete matrix.
 | ARM64 SHA-512 1 KiB | 1,186 ns | AWS-LC 1,221 ns | 2.9% lower latency |
 | ARM64 X25519 fixed-base | 7,829 ns | AWS-LC 9,915 ns | 21.0% lower latency |
 | ARM64 P-256 prepared verify | 15,520.5 ns | AWS-LC 49,135 ns | 68.4% lower latency |
+| ARM64 P-384 verify | 187,737 ns | AWS-LC 240,796 ns | 22.0% lower latency |
+| ARM64 P-384 sign | 85,664 ns | AWS-LC 93,550 ns | 8.4% lower latency |
 | ML-DSA-44 prepared-key verify | 7,696.5 ns | AWS-LC 22,480.6 ns | 2.92x |
 
 The full dated log, including rejected optimizations and noise analysis, is in

@@ -76,7 +76,7 @@ This is a concise summary. The exhaustive feature inventory is in
 | Platform | Status |
 | --- | --- |
 | Linux x86_64 | Primary optimized target |
-| Linux AArch64 | Optimized AES/PMULL, s2n-bignum P-256/X25519, and runtime-gated SHA-512 paths (portable fallback without `HWCAP_SHA512`) |
+| Linux AArch64 | Optimized AES/PMULL, s2n-bignum P-256/P-384/X25519, and runtime-gated SHA-512 paths (portable fallback without `HWCAP_SHA512`) |
 | Other Zig targets | Portable implementations; acceleration is currently Linux-targeted |
 | Windows/macOS | Portable paths; target-specific accelerated kernels are not currently provided |
 
@@ -90,7 +90,7 @@ This is a concise summary. The exhaustive feature inventory is in
 | SHA-384/SHA-512 | AVX | ARMv8.2 SHA-512, runtime-gated on `HWCAP_SHA512` |
 | X25519 | ADX/AVX2 | s2n-bignum |
 | P-256 | ADX/AVX2 | s2n-bignum |
-| P-384 | ADX | Portable |
+| P-384 | ADX | s2n-bignum |
 | P-521 | ADX | Portable |
 | Ed25519 | ADX | Portable |
 | RSA | ADX Montgomery | Portable |
