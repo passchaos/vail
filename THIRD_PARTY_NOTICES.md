@@ -20,9 +20,13 @@ SPDX headers are authoritative; this file is a summary.
 - License: Apache-2.0 OR ISC OR MIT
 - Copyright: The mlkem-native project authors; Amazon.com, Inc. or its
   affiliates
-- Used for: ML-KEM AVX2 kernels.
-- Locations: `src/crypto/mlkem/*.S`.
-- These files are vendored and preprocessed for the ELF x86_64 SysV ABI.
+- Used for: ML-KEM AVX2 kernels and AArch64 NTT/INTT/basemul/reduction
+  kernels.
+- Locations: `src/crypto/pq/mlkem/*.S` (x86_64 and AArch64). The AArch64
+  twiddle-factor tables in `src/crypto/pq/mlkem/zetas_arm64.zig` are extracted
+  from the same upstream `aarch64_zetas.c`.
+- These files are vendored and preprocessed for the ELF x86_64 or AArch64 SysV
+  ABI.
 
 ## OpenSSL SHA-2 assembly
 

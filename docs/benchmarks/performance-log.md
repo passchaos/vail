@@ -576,6 +576,44 @@ measured ML-DSA-44 prepared verify 24,128 -> 23,278 ns (3.5%), raw verify
 ML-KEM-768 results stayed within noise. The remaining PQ gap is dominated by
 portable NTT/pointwise arithmetic, not hashing.
 
+The ML-KEM follow-up moved that remaining arithmetic to the mlkem-native
+AArch64 schedules: forward and inverse NTT, the cached k=2/k=3/k=4 pointwise
+products, the multiplication cache, Barrett reduction, Montgomery conversion,
+and serialization. The kernels use the standard coefficient order shared with
+the portable implementation. Because mlkem-native leaves NTT output lazily
+reduced (up to 8q), the accelerated forward and inverse transforms are followed
+by the vectorized Barrett reduction, which restores the documented
+postcondition of coefficients in [0, q) and keeps every downstream bound
+unchanged. Differential tests compare the forward NTT, the inverse NTT, and the
+pointwise product against the portable oracle for every coefficient over
+randomized inputs, and all ML-KEM KATs pass in ReleaseSafe and ReleaseFast.
+
+On the same 2026-11-14 Jetson AGX Thor ARM64 host, three repeated ReleaseFast
+runs of the same benchmarks with the ARM64 kernels toggled off and on measured:
+
+| Parameter set and operation | Portable | ARM64 kernels | Speedup |
+| --- | ---: | ---: | ---: |
+| ML-KEM-512 key generation | 17,740 ns | 11,493 ns | 1.54x |
+| ML-KEM-512 encapsulation | 14,901 ns | 6,351 ns | 2.35x |
+| ML-KEM-512 decapsulation | 21,438 ns | 9,299 ns | 2.31x |
+| ML-KEM-768 key generation | 29,523 ns | 17,947 ns | 1.65x |
+| ML-KEM-768 encapsulation | 21,916 ns | 7,490 ns | 2.93x |
+| ML-KEM-768 decapsulation | 31,133 ns | 11,723 ns | 2.66x |
+| ML-KEM-1024 key generation | 47,775 ns | 29,404 ns | 1.62x |
+| ML-KEM-1024 encapsulation | 33,617 ns | 11,986 ns | 2.80x |
+| ML-KEM-1024 decapsulation | 45,288 ns | 17,263 ns | 2.62x |
+
+The X25519MLKEM768 client-start operation in the same harness dropped from
+37,531 ns to 25,864 ns (1.45x). The deterministic ML-KEM-768 encapsulation
+checksum was identical before and after (2,261,458), so the speedup is
+output-preserving. These were consecutive same-host runs rather than paired
+A-B-B-A quartets; treat the third significant digit as noise. On this host the
+AWS-LC reference harness measured 14,729/16,719/19,865 ns for ML-KEM-768
+key generation, encapsulation, and decapsulation. Vail's `PublicKey` retains
+the expanded public matrix, while the AWS-LC KEM benchmark re-expands it on
+every encapsulation, so the encapsulation rows are end-to-end API costs rather
+than identical work.
+
 ML-DSA-44 provides an in-tree pure-Zig FIPS 204 fast path, retains Zig std as
 the portable fallback, and interoperates in both RFC 7250 TLS client/server
 directions with rustls/AWS-LC. Its in-tree

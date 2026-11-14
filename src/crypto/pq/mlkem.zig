@@ -113,6 +113,7 @@ const keccak4 = @import("../hash/keccak4.zig");
 const keccak_avx2 = @import("../hash/keccak_avx2.zig");
 const crypto_memory = @import("../memory.zig");
 const mlkem_avx2 = @import("mlkem_avx2.zig");
+const mlkem_arm64 = @import("mlkem_arm64.zig");
 
 const Shake128 = if (keccak_avx2.enabled)
     keccak_avx2.Shake128
@@ -249,18 +250,35 @@ fn Kyber(comptime p: Params) type {
         const Self = @This();
         const V = PolyVec(p.k);
         const M = Mat(p.k);
-        const native_k = (p.k >= 2 and p.k <= 4) and mlkem_avx2.enabled;
-        const NativeDotCache = if (p.k == 2)
-            mlkem_avx2.DotHatK2Cache
-        else if (p.k == 4)
-            mlkem_avx2.DotHatK4Cache
+        const native_avx2 = (p.k >= 2 and p.k <= 4) and mlkem_avx2.enabled;
+        const native_arm64 = (p.k >= 2 and p.k <= 4) and mlkem_arm64.enabled;
+        const native_k = native_avx2 or native_arm64;
+        const NativeDotCache = if (mlkem_avx2.enabled)
+            (if (p.k == 2)
+                mlkem_avx2.DotHatK2Cache
+            else if (p.k == 4)
+                mlkem_avx2.DotHatK4Cache
+            else
+                mlkem_avx2.DotHatK3Cache)
+        else if (mlkem_arm64.enabled)
+            (if (p.k == 2)
+                mlkem_arm64.DotHatK2Cache
+            else if (p.k == 4)
+                mlkem_arm64.DotHatK4Cache
+            else
+                mlkem_arm64.DotHatK3Cache)
         else
-            mlkem_avx2.DotHatK3Cache;
+            void;
 
         fn invNttProduct(value: Poly) Poly {
-            if (comptime native_k) {
+            if (comptime native_avx2) {
                 var ret = value;
                 mlkem_avx2.invNtt(&ret.cs);
+                return ret;
+            }
+            if (comptime native_arm64) {
+                var ret = value;
+                mlkem_arm64.invNtt(&ret.cs);
                 return ret;
             }
             return value.invNTT();
@@ -270,24 +288,37 @@ fn Kyber(comptime p: Params) type {
             cache: *align(32) NativeDotCache,
             vector: *const V,
         ) void {
-            if (comptime p.k == 2) {
-                mlkem_avx2.initDotHatK2Cache(
-                    cache,
-                    @ptrCast(&vector.ps[0].cs),
-                );
-            } else if (comptime p.k == 3) {
-                mlkem_avx2.initDotHatK3Cache(
-                    cache,
-                    @ptrCast(&vector.ps[0].cs),
-                );
-            } else if (comptime p.k == 4) {
-                mlkem_avx2.initDotHatK4Cache(
-                    cache,
-                    @ptrCast(&vector.ps[0].cs),
-                );
-            } else {
-                @compileError("unsupported native ML-KEM dimension");
+            if (comptime native_avx2) {
+                if (comptime p.k == 2) {
+                    mlkem_avx2.initDotHatK2Cache(
+                        cache,
+                        @ptrCast(&vector.ps[0].cs),
+                    );
+                } else if (comptime p.k == 3) {
+                    mlkem_avx2.initDotHatK3Cache(
+                        cache,
+                        @ptrCast(&vector.ps[0].cs),
+                    );
+                } else if (comptime p.k == 4) {
+                    mlkem_avx2.initDotHatK4Cache(
+                        cache,
+                        @ptrCast(&vector.ps[0].cs),
+                    );
+                } else {
+                    @compileError("unsupported native ML-KEM dimension");
+                }
+                return;
             }
+            if (comptime native_arm64) {
+                inline for (0..p.k) |i| {
+                    mlkem_arm64.mulCache(
+                        @ptrCast(@alignCast(&cache[i * 128])),
+                        &vector.ps[i].cs,
+                    );
+                }
+                return;
+            }
+            @compileError("unsupported native ML-KEM dimension");
         }
 
         fn dotHatNativeCached(
@@ -296,30 +327,61 @@ fn Kyber(comptime p: Params) type {
             right: *const V,
             cache: *align(32) const NativeDotCache,
         ) void {
-            if (comptime p.k == 2) {
-                mlkem_avx2.dotHatK2Cached(
-                    &output.cs,
-                    @ptrCast(&left.ps[0].cs),
-                    @ptrCast(&right.ps[0].cs),
-                    cache,
-                );
-            } else if (comptime p.k == 3) {
-                mlkem_avx2.dotHatK3Cached(
-                    &output.cs,
-                    @ptrCast(&left.ps[0].cs),
-                    @ptrCast(&right.ps[0].cs),
-                    cache,
-                );
-            } else if (comptime p.k == 4) {
-                mlkem_avx2.dotHatK4Cached(
-                    &output.cs,
-                    @ptrCast(&left.ps[0].cs),
-                    @ptrCast(&right.ps[0].cs),
-                    cache,
-                );
-            } else {
-                @compileError("unsupported native ML-KEM dimension");
+            if (comptime native_avx2) {
+                if (comptime p.k == 2) {
+                    mlkem_avx2.dotHatK2Cached(
+                        &output.cs,
+                        @ptrCast(&left.ps[0].cs),
+                        @ptrCast(&right.ps[0].cs),
+                        cache,
+                    );
+                } else if (comptime p.k == 3) {
+                    mlkem_avx2.dotHatK3Cached(
+                        &output.cs,
+                        @ptrCast(&left.ps[0].cs),
+                        @ptrCast(&right.ps[0].cs),
+                        cache,
+                    );
+                } else if (comptime p.k == 4) {
+                    mlkem_avx2.dotHatK4Cached(
+                        &output.cs,
+                        @ptrCast(&left.ps[0].cs),
+                        @ptrCast(&right.ps[0].cs),
+                        cache,
+                    );
+                } else {
+                    @compileError("unsupported native ML-KEM dimension");
+                }
+                return;
             }
+            if (comptime native_arm64) {
+                if (comptime p.k == 2) {
+                    mlkem_arm64.basemulK2(
+                        &output.cs,
+                        @ptrCast(&left.ps[0].cs),
+                        @ptrCast(&right.ps[0].cs),
+                        @ptrCast(cache),
+                    );
+                } else if (comptime p.k == 3) {
+                    mlkem_arm64.basemulK3(
+                        &output.cs,
+                        @ptrCast(&left.ps[0].cs),
+                        @ptrCast(&right.ps[0].cs),
+                        @ptrCast(cache),
+                    );
+                } else if (comptime p.k == 4) {
+                    mlkem_arm64.basemulK4(
+                        &output.cs,
+                        @ptrCast(&left.ps[0].cs),
+                        @ptrCast(&right.ps[0].cs),
+                        @ptrCast(cache),
+                    );
+                } else {
+                    @compileError("unsupported native ML-KEM dimension");
+                }
+                return;
+            }
+            @compileError("unsupported native ML-KEM dimension");
         }
 
         /// Length (in bytes) of a shared secret.
@@ -597,7 +659,7 @@ fn Kyber(comptime p: Params) type {
                 var rh: V = undefined;
                 var e1: V = undefined;
                 var e2: Poly = undefined;
-                if (comptime native_k and (p.k == 2 or p.k == 3)) {
+                if (comptime native_avx2 and (p.k == 2 or p.k == 3)) {
                     sampleEncryptionNoise(p.k, p.eta1, seed, &rh, &e1, &e2);
                     rh.nttAssign();
                     rh.barrettReduceAssign();
@@ -670,11 +732,7 @@ fn Kyber(comptime p: Params) type {
                     return encoded;
                 }
                 th_dot_rh.barrettReduceAssign();
-                if (comptime native_k) {
-                    mlkem_avx2.invNtt(&th_dot_rh.cs);
-                } else {
-                    th_dot_rh = th_dot_rh.invNTT();
-                }
+                th_dot_rh = invNttProduct(th_dot_rh);
                 var message = Poly.decompress(1, pt);
                 th_dot_rh.addAssign(&message);
                 crypto_memory.zeroAligned32(&message);
@@ -742,11 +800,7 @@ fn Kyber(comptime p: Params) type {
                 var product: Poly = undefined;
                 V.dotHatInto(&product, &sk.sh, &u);
                 product.barrettReduceAssign();
-                if (comptime native_k) {
-                    mlkem_avx2.invNtt(&product.cs);
-                } else {
-                    product = product.invNTT();
-                }
+                product = invNttProduct(product);
                 v.subAssign(&product);
                 crypto_memory.zeroAligned32(&product);
                 v.normalizeAssign();
@@ -820,9 +874,17 @@ fn Kyber(comptime p: Params) type {
                         &sk.sh,
                         &cache,
                     );
-                    mlkem_avx2.toMont(&pk.th.ps[i].cs);
+                    if (comptime native_arm64) {
+                        mlkem_arm64.toMont(&pk.th.ps[i].cs);
+                    } else {
+                        mlkem_avx2.toMont(&pk.th.ps[i].cs);
+                    }
                     for (0..N) |j| pk.th.ps[i].cs[j] += eh.ps[i].cs[j];
-                    mlkem_avx2.normalize(&pk.th.ps[i].cs);
+                    if (comptime native_arm64) {
+                        mlkem_arm64.normalize(&pk.th.ps[i].cs);
+                    } else {
+                        mlkem_avx2.normalize(&pk.th.ps[i].cs);
+                    }
                 }
             } else {
                 var th: V = undefined;
@@ -1124,6 +1186,18 @@ const Poly = struct {
     // form, then the result is in Montgomery form and so (by linearity of the NTT)
     // if the input is in regular form, then the result is also in regular form.
     fn ntt(a: Poly) Poly {
+        if (comptime mlkem_arm64.enabled) {
+            var p = a;
+            mlkem_arm64.ntt(&p.cs);
+            return p;
+        }
+        return nttPortable(a);
+    }
+
+    // Portable forward NTT, kept as the reference oracle for accelerated
+    // backends and as the fallback on other targets.
+    fn nttPortable(a: Poly) Poly {
+        var p = a;
         // Note that ℤ_q does not have a primitive 512ᵗʰ root of unity (as 512
         // does not divide into q-1) and so we cannot do a regular NTT.  ℤ_q
         // does have a primitive 256ᵗʰ root of unity, the smallest of which
@@ -1173,7 +1247,6 @@ const Poly = struct {
         //  (a, b) ↦ (a + ζb, a - ζb)
         //
         // for the appropriate power ζ for that column and row group.
-        var p = a;
         var k: usize = 0; // index into zetas
 
         var l = N >> 1;
@@ -1207,9 +1280,20 @@ const Poly = struct {
     // form, then the result is in Montgomery form and so (by linearity)
     // if the input is in regular form, then the result is also in regular form.
     fn invNTT(a: Poly) Poly {
+        if (comptime mlkem_arm64.enabled) {
+            var p = a;
+            mlkem_arm64.invNtt(&p.cs);
+            return p;
+        }
+        return invNTTPortable(a);
+    }
+
+    // Portable inverse NTT, kept as the reference oracle for accelerated
+    // backends and as the fallback on other targets.
+    fn invNTTPortable(a: Poly) Poly {
+        var p = a;
         var k: usize = 127; // index into zetas
         var r: usize = 0; // index into invNTTReductions
-        var p = a;
 
         // We basically do the oppposite of NTT, but postpone dividing by 2 in the
         // inverse of the Cooley-Tukey butterfly and accumulate that into a big
@@ -1274,6 +1358,10 @@ const Poly = struct {
             mlkem_avx2.normalize(&a.cs);
             return;
         }
+        if (comptime mlkem_arm64.enabled) {
+            mlkem_arm64.normalize(&a.cs);
+            return;
+        }
         a.* = normalizePortable(a.*);
     }
 
@@ -1290,6 +1378,11 @@ const Poly = struct {
         if (comptime mlkem_avx2.enabled) {
             var ret = a;
             mlkem_avx2.toMont(&ret.cs);
+            return ret;
+        }
+        if (comptime mlkem_arm64.enabled) {
+            var ret = a;
+            mlkem_arm64.toMont(&ret.cs);
             return ret;
         }
         var ret: Poly = undefined;
@@ -1311,6 +1404,10 @@ const Poly = struct {
     fn barrettReduceAssign(a: *Poly) void {
         if (comptime mlkem_avx2.enabled) {
             mlkem_avx2.barrettReduce(&a.cs);
+            return;
+        }
+        if (comptime mlkem_arm64.enabled) {
+            mlkem_arm64.barrettReduce(&a.cs);
             return;
         }
         for (0..N) |i| {
@@ -1802,6 +1899,10 @@ fn PolyVec(comptime k: u8) type {
                 inline for (0..k) |i| mlkem_avx2.invNtt(&v.ps[i].cs);
                 return;
             }
+            if (comptime (k >= 2 and k <= 4) and mlkem_arm64.enabled) {
+                inline for (0..k) |i| mlkem_arm64.invNtt(&v.ps[i].cs);
+                return;
+            }
             v.* = map(v.*, Poly.invNTT);
         }
 
@@ -1814,6 +1915,10 @@ fn PolyVec(comptime k: u8) type {
         fn normalizeAssign(v: *Self) void {
             if (comptime (k >= 2 and k <= 4) and mlkem_avx2.enabled) {
                 inline for (0..k) |i| mlkem_avx2.normalize(&v.ps[i].cs);
+                return;
+            }
+            if (comptime (k >= 2 and k <= 4) and mlkem_arm64.enabled) {
+                inline for (0..k) |i| mlkem_arm64.normalize(&v.ps[i].cs);
                 return;
             }
             v.* = map(v.*, Poly.normalize);
@@ -1900,6 +2005,14 @@ fn PolyVec(comptime k: u8) type {
                 }
                 return;
             }
+            if (comptime (k >= 2 and k <= 4) and mlkem_arm64.enabled) {
+                noiseInto(output, eta, nonce, seed);
+                inline for (0..k) |i| {
+                    mlkem_arm64.ntt(&output.ps[i].cs);
+                    if (normalize_result) mlkem_arm64.normalize(&output.ps[i].cs);
+                }
+                return;
+            }
             const transformed = noise(eta, nonce, seed).ntt();
             output.* = if (normalize_result) transformed.normalize() else transformed;
         }
@@ -1915,6 +2028,16 @@ fn PolyVec(comptime k: u8) type {
         fn dotHat(a: Self, b: Self) Poly {
             var ret: Poly = undefined;
             dotHatInto(&ret, &a, &b);
+            return ret;
+        }
+
+        // Portable pointwise inner product, kept as the reference oracle for
+        // accelerated backends.
+        fn dotHatPortable(a: Self, b: Self) Poly {
+            var ret = Poly.zero;
+            for (0..k) |i| {
+                ret = ret.add(a.ps[i].mulHat(b.ps[i]));
+            }
             return ret;
         }
 
@@ -1937,6 +2060,39 @@ fn PolyVec(comptime k: u8) type {
                         &output.cs,
                         @ptrCast(&a.ps[0].cs),
                         @ptrCast(&b.ps[0].cs),
+                    );
+                }
+                return;
+            }
+            if (comptime (k >= 2 and k <= 4) and mlkem_arm64.enabled) {
+                var cache: [@as(usize, k) * 128]i16 align(32) = undefined;
+                defer crypto_memory.zeroAligned32(&cache);
+                inline for (0..k) |i| {
+                    mlkem_arm64.mulCache(
+                        @ptrCast(@alignCast(&cache[i * 128])),
+                        &b.ps[i].cs,
+                    );
+                }
+                if (comptime k == 2) {
+                    mlkem_arm64.basemulK2(
+                        &output.cs,
+                        @ptrCast(&a.ps[0].cs),
+                        @ptrCast(&b.ps[0].cs),
+                        @ptrCast(&cache),
+                    );
+                } else if (comptime k == 3) {
+                    mlkem_arm64.basemulK3(
+                        &output.cs,
+                        @ptrCast(&a.ps[0].cs),
+                        @ptrCast(&b.ps[0].cs),
+                        @ptrCast(&cache),
+                    );
+                } else {
+                    mlkem_arm64.basemulK4(
+                        &output.cs,
+                        @ptrCast(&a.ps[0].cs),
+                        @ptrCast(&b.ps[0].cs),
+                        @ptrCast(&cache),
                     );
                 }
                 return;
@@ -1983,6 +2139,11 @@ fn PolyVec(comptime k: u8) type {
             inline for (0..k) |i| {
                 if (comptime (k >= 2 and k <= 4) and mlkem_avx2.enabled) {
                     mlkem_avx2.toBytes(
+                        ret[i * Poly.encoded_length ..][0..Poly.encoded_length],
+                        &v.ps[i].cs,
+                    );
+                } else if (comptime (k >= 2 and k <= 4) and mlkem_arm64.enabled) {
+                    mlkem_arm64.toBytes(
                         ret[i * Poly.encoded_length ..][0..Poly.encoded_length],
                         &v.ps[i].cs,
                     );
@@ -2255,6 +2416,79 @@ test "NTT" {
         p = p.normalize();
 
         try testing.expectEqual(p, q);
+    }
+}
+
+test "ARM64 NTT matches portable oracle" {
+    if (comptime !mlkem_arm64.enabled) return error.SkipZigTest;
+
+    var rnd = RndGen.init(7);
+    for (0..100) |_| {
+        const input = randPolyAbsLeqQ(&rnd);
+        var accelerated = input;
+        mlkem_arm64.ntt(&accelerated.cs);
+        const portable = input.nttPortable().normalize();
+        const actual = accelerated.normalize();
+        for (0..N) |i| {
+            if (actual.cs[i] != portable.cs[i]) {
+                std.debug.print(
+                    "NTT mismatch at {d}: asm={d} portable={d}\n",
+                    .{ i, actual.cs[i], portable.cs[i] },
+                );
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
+
+test "ARM64 inverse NTT matches portable oracle" {
+    if (comptime !mlkem_arm64.enabled) return error.SkipZigTest;
+
+    var rnd = RndGen.init(11);
+    for (0..100) |_| {
+        const input = randPolyAbsLeqQ(&rnd);
+        var accelerated = input;
+        mlkem_arm64.invNtt(&accelerated.cs);
+        const portable = input.invNTTPortable().normalize();
+        const actual = accelerated.normalize();
+        for (0..N) |i| {
+            if (actual.cs[i] != portable.cs[i]) {
+                std.debug.print(
+                    "invNTT mismatch at {d}: asm={d} portable={d}\n",
+                    .{ i, actual.cs[i], portable.cs[i] },
+                );
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
+
+test "ARM64 pointwise product matches portable oracle" {
+    if (comptime !mlkem_arm64.enabled) return error.SkipZigTest;
+
+    var rnd = RndGen.init(13);
+    inline for (.{ 2, 3, 4 }) |k| {
+        for (0..20) |_| {
+            var a: PolyVec(k) = undefined;
+            var b: PolyVec(k) = undefined;
+            for (0..k) |i| {
+                a.ps[i] = randPolyAbsLeqQ(&rnd);
+                b.ps[i] = randPolyAbsLeqQ(&rnd);
+            }
+            var accelerated: Poly = undefined;
+            PolyVec(k).dotHatInto(&accelerated, &a, &b);
+            const portable = a.dotHatPortable(b).normalize();
+            const actual = accelerated.normalize();
+            for (0..N) |i| {
+                if (actual.cs[i] != portable.cs[i]) {
+                    std.debug.print(
+                        "dotHat k={d} mismatch at {d}: asm={d} portable={d}\n",
+                        .{ k, i, actual.cs[i], portable.cs[i] },
+                    );
+                    return error.TestUnexpectedResult;
+                }
+            }
+        }
     }
 }
 

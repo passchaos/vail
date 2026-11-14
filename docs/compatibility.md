@@ -76,7 +76,7 @@ This is a concise summary. The exhaustive feature inventory is in
 | Platform | Status |
 | --- | --- |
 | Linux x86_64 | Primary optimized target |
-| Linux AArch64 | Optimized AES/PMULL, s2n-bignum P-256/P-384/X25519, and runtime-gated SHA-512 paths (portable fallback without `HWCAP_SHA512`) |
+| Linux AArch64 | Optimized AES/PMULL, s2n-bignum P-256/P-384/X25519/Ed25519, mlkem-native ML-KEM kernels, and runtime-gated SHA-512 paths (portable fallback without `HWCAP_SHA512`) |
 | Other Zig targets | Portable implementations; acceleration is currently Linux-targeted |
 | Windows/macOS | Portable paths; target-specific accelerated kernels are not currently provided |
 
@@ -92,10 +92,10 @@ This is a concise summary. The exhaustive feature inventory is in
 | P-256 | ADX/AVX2 | s2n-bignum |
 | P-384 | ADX | s2n-bignum |
 | P-521 | ADX | Portable |
-| Ed25519 | ADX | Portable |
+| Ed25519 | ADX | s2n-bignum (fixed base, verify) |
 | RSA | ADX Montgomery | Portable |
 | Keccak/SHA-3 | AVX2 | s2n-bignum (single- and four-way) |
-| ML-KEM | AVX2 | Portable |
+| ML-KEM | AVX2 | mlkem-native (NTT, INTT, basemul, reduce, toMont, toBytes) |
 | ML-DSA | AVX2 | Portable |
 
 ## Not claimed

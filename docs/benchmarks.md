@@ -52,6 +52,9 @@ representative medians, not a complete matrix.
 | ARM64 Ed25519 key generation | 10,075 ns | AWS-LC 10,082 ns | ~equal |
 | ARM64 Ed25519 sign | 10,509 ns | AWS-LC 10,494 ns | ~equal |
 | ARM64 Ed25519 verify | 57,727 ns | AWS-LC 53,014 ns | 8.9% higher latency |
+| ARM64 ML-KEM-768 key generation | 17,947 ns | AWS-LC 14,729 ns | 21.8% higher latency |
+| ARM64 ML-KEM-768 encapsulation | 7,490 ns | AWS-LC 16,719 ns | 2.23x lower latency |
+| ARM64 ML-KEM-768 decapsulation | 11,723 ns | AWS-LC 19,865 ns | 1.69x lower latency |
 | ML-DSA-44 prepared-key verify | 7,696.5 ns | AWS-LC 22,480.6 ns | 2.92x |
 
 The full dated log, including rejected optimizations and noise analysis, is in
@@ -65,6 +68,9 @@ The full dated log, including rejected optimizations and noise analysis, is in
   1,200-byte QUIC payloads or 1 KiB digests).
 - Prepared-verifier results exclude preparation time; they are not one-shot
   claims.
+- Vail's ML-KEM `PublicKey` retains the expanded public matrix, while the
+  AWS-LC KEM harness re-expands it on every encapsulation; ML-KEM encapsulation
+  rows compare end-to-end API costs rather than identical work.
 - Cross-process and real-network results are sensitive to scheduling and are
   not used for causal performance claims.
 - Small differences (roughly 1% or less) should be treated as noise unless a
