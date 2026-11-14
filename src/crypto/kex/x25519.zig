@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const ed25519_base_adx = @import("../sign/ed25519_base_adx.zig");
+const ed25519_base_arm64 = @import("ed25519_base_arm64.zig");
 const x25519_adx = @import("x25519_adx.zig");
 const x25519_arm64 = @import("x25519_arm64.zig");
 const x25519_base_adx = @import("x25519_base_adx.zig");
@@ -106,6 +107,9 @@ pub const X25519 = struct {
     ) [Edwards25519.encoded_length]u8 {
         if (comptime ed25519_base_adx.enabled) {
             return ed25519_base_adx.scalarMultBaseNonZero(scalar_bytes);
+        }
+        if (comptime ed25519_base_arm64.enabled) {
+            return ed25519_base_arm64.scalarMultBaseNonZero(scalar_bytes);
         }
         return (X25519.mulEdwardsBase(scalar_bytes.*) catch unreachable)
             .toBytes();
