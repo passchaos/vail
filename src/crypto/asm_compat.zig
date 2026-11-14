@@ -189,7 +189,7 @@ fn appendWithSymbolPrefix(output: []u8, start: usize, line: []const u8) usize {
         @memcpy(output[len..][0..suffix.len], suffix);
         len += suffix.len;
     }
-    if (is_adrp) {
+    if (is_adrp and std.mem.indexOf(u8, line, "@PAGE") == null) {
         const suffix = "@PAGE";
         @memcpy(output[len..][0..suffix.len], suffix);
         len += suffix.len;

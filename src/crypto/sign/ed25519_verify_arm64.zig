@@ -32,7 +32,7 @@ pub fn scalarMulDouble(
     bscalar: *const [4]u64,
 ) void {
     if (comptime !enabled) @compileError("ARM64 Ed25519 verify is unavailable");
-    vailEd25519ScalarMulDoubleArm64(output, scalar, point, bscalar);
+    vailEd25519ScalarMulDoubleAltArm64(output, scalar, point, bscalar);
 }
 
 /// Defined by the ARM64 fixed-base module; reused here to avoid duplicating
@@ -62,7 +62,7 @@ extern fn vailEd25519NegateArm64(
     input: *const [4]u64,
 ) callconv(.c) void;
 
-extern fn vailEd25519ScalarMulDoubleArm64(
+extern fn vailEd25519ScalarMulDoubleAltArm64(
     output: *[8]u64,
     scalar: *const [4]u64,
     point: *const [8]u64,

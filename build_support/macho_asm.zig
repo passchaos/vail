@@ -124,7 +124,9 @@ fn appendTransformed(
         i += 1;
     }
     if (pending_pageoff) try output.appendSlice(allocator, "@PAGEOFF");
-    if (is_adrp) try output.appendSlice(allocator, "@PAGE");
+    if (is_adrp and std.mem.indexOf(u8, line, "@PAGE") == null) {
+        try output.appendSlice(allocator, "@PAGE");
+    }
 }
 
 fn isDirective(line: []const u8, name: []const u8) bool {
