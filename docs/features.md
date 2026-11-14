@@ -355,6 +355,10 @@ The current foundation provides:
   `receive` APIs remain compatibility wrappers. The dual-version client and
   server expose the same interface with a tagged caller-owned established
   union, so automatic TLS 1.2/TLS 1.3 selection preserves this property.
+  Version-selecting servers retain only the selected protocol engine, and
+  ClientHello/ServerHello reassembly buffers are capped independently from the
+  encrypted-client-auth bound so large handshake limits do not multiply
+  per-connection memory.
 - Established TLS 1.3 and TLS 1.2 record layers can be consumed into owned
   transmit/receive AEAD keys, 12-byte nonce bases, current sequence numbers,
   and TLS 1.3 key generations for kTLS or user-space offload. Successful

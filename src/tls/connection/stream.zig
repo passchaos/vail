@@ -13,6 +13,16 @@ const traffic = @import("../crypto/traffic.zig");
 
 pub const content_type_change_cipher_spec: u8 = 20;
 
+/// Upper bound for a reassembled ClientHello. ClientHello messages are small
+/// compared with encrypted certificate chains, so negotiation layers cap this
+/// buffer independently from the caller's full handshake-message bound.
+pub const max_client_hello_len: usize = 64 * 1024;
+
+/// Upper bound for a reassembled ServerHello. ServerHello and
+/// HelloRetryRequest messages are much smaller than a server certificate
+/// flight.
+pub const max_server_hello_len: usize = 16 * 1024;
+
 pub const Error = error{
     InvalidContentType,
     InvalidLegacyVersion,

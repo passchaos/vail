@@ -33,18 +33,23 @@ pub const Error = std.mem.Allocator.Error || stream.Error ||
     ConnectionFailed,
 };
 
-/// `max_handshake_message_len` bounds both the ClientHello and the TLS 1.3
-/// encrypted client authentication messages.
+/// `max_handshake_message_len` bounds encrypted client authentication
+/// messages. ClientHello reassembly is capped at `stream.max_client_hello_len`
+/// so negotiation layers do not duplicate a large caller bound.
 pub fn ServerConnection(
     comptime max_handshake_message_len: usize,
     comptime max_post_handshake_len: usize,
 ) type {
+    const max_client_hello_len = @min(
+        max_handshake_message_len,
+        stream.max_client_hello_len,
+    );
     const Tls13 = server13.ServerConnection(
         max_handshake_message_len,
         max_post_handshake_len,
     );
     const Tls12 = server12.ServerConnection(
-        max_handshake_message_len,
+        max_client_hello_len,
         max_post_handshake_len,
     );
     return struct {
@@ -92,10 +97,18 @@ pub fn ServerConnection(
 
         config: Config,
         state: State = .initial,
-        tls13: Tls13 = undefined,
-        tls12: Tls12 = undefined,
+        /// Only the selected protocol engine is retained. A union keeps the
+        /// inactive version's large inline receive buffers out of every
+        /// connection.
+        engine: union(enum) {
+            none,
+            tls13: Tls13,
+            tls12: Tls12,
+        } = .none,
         records: stream.RecordDeframer = .{},
-        messages: stream.HandshakeReassembler(max_handshake_message_len) = .{},
+        messages: stream.HandshakeReassembler(
+            @min(max_handshake_message_len, stream.max_client_hello_len),
+        ) = .{},
 
         pub fn init(config: Config) Self {
             var self: Self = undefined;
@@ -108,6 +121,7 @@ pub fn ServerConnection(
         pub fn initInto(self: *Self, config: Config) void {
             self.*.config = config;
             self.*.state = .initial;
+            self.*.engine = .none;
             self.*.records.buffered = 0;
             self.*.messages.buffered = 0;
         }
@@ -123,10 +137,15 @@ pub fn ServerConnection(
         pub fn deinit(self: *Self) void {
             switch (self.state) {
                 .initial => self.wipeAllKeyMaterial(),
-                .tls13 => self.tls13.deinit(),
-                .tls12 => self.tls12.deinit(),
-                .failed => {},
+                .tls13 => self.engine.tls13.deinit(),
+                .tls12 => self.engine.tls12.deinit(),
+                .failed => switch (self.engine) {
+                    .none => {},
+                    .tls13 => |*engine| engine.deinit(),
+                    .tls12 => |*engine| engine.deinit(),
+                },
             }
+            self.engine = .none;
             self.* = undefined;
         }
 
@@ -176,7 +195,7 @@ pub fn ServerConnection(
                 },
                 .tls13 => blk: {
                     established_output.* = .{ .tls13 = undefined };
-                    break :blk wrap13(try self.tls13.receiveInto(
+                    break :blk wrap13(try self.engine.tls13.receiveInto(
                         input,
                         output,
                         &established_output.tls13,
@@ -184,7 +203,7 @@ pub fn ServerConnection(
                 },
                 .tls12 => blk: {
                     established_output.* = .{ .tls12 = undefined };
-                    break :blk wrap12(try self.tls12.receiveInto(
+                    break :blk wrap12(try self.engine.tls12.receiveInto(
                         input,
                         output,
                         &established_output.tls12,
@@ -221,7 +240,7 @@ pub fn ServerConnection(
             const parsed = try client_hello.parse(message);
             if (self.config.enable_tls13 and parsed.supportsVersion(0x0304)) {
                 self.wipeTls12KeyMaterial();
-                self.tls13 = Tls13.init(self.config.tls13);
+                self.engine = .{ .tls13 = Tls13.init(self.config.tls13) };
                 self.state = .tls13;
                 established_output.* = .{ .tls13 = undefined };
                 const output_start = output.items.len;
@@ -229,7 +248,7 @@ pub fn ServerConnection(
                     Tls13,
                     Tls13.ReceiveIntoResult,
                     Tls13.Established,
-                    &self.tls13,
+                    &self.engine.tls13,
                     self.config.tls13.allocator,
                     framed.legacy_version,
                     message,
@@ -257,14 +276,14 @@ pub fn ServerConnection(
                 return error.NoSupportedProtocolVersion;
             }
             self.wipeTls13KeyMaterial();
-            self.tls12 = Tls12.init(self.config.tls12);
+            self.engine = .{ .tls12 = Tls12.init(self.config.tls12) };
             self.state = .tls12;
             established_output.* = .{ .tls12 = undefined };
             const delegated = try replayClientHelloInto(
                 Tls12,
                 server12.ReceiveIntoResult,
                 server12.Established,
-                &self.tls12,
+                &self.engine.tls12,
                 self.config.tls12.allocator,
                 framed.legacy_version,
                 message,
@@ -505,4 +524,9 @@ test "versioned server selects TLS 1.3 and TLS 1.2 from ClientHello" {
         try std.testing.expect(result.event != null);
         try std.testing.expectEqual(expected, server.protocol().?);
     }
+}
+
+test "versioned server retains only one protocol engine" {
+    const Server = ServerConnection(256 * 1024, 64 * 1024);
+    try std.testing.expect(@sizeOf(Server) < 600 * 1024);
 }

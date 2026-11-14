@@ -92,7 +92,9 @@ pub fn ClientConnection(
         tls13: Tls13,
         tls12: Tls12,
         records: stream.RecordDeframer = .{},
-        messages: stream.HandshakeReassembler(max_server_flight_len) = .{},
+        messages: stream.HandshakeReassembler(
+            @min(max_server_flight_len, stream.max_server_hello_len),
+        ) = .{},
         server_prefix: std.ArrayList(u8) = .empty,
 
         pub fn init(
@@ -482,4 +484,9 @@ test "versioned ClientHello carries a TLS 1.2 session ticket" {
         hello.session_id,
     );
     try std.testing.expectEqual(@as(?u16, 1024), hello.record_size_limit);
+}
+
+test "versioned client bounds negotiation buffers" {
+    const Client = ClientConnection(256 * 1024, 64 * 1024);
+    try std.testing.expect(@sizeOf(Client) < 512 * 1024);
 }

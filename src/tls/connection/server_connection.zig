@@ -244,8 +244,9 @@ pub const ServerResumption = union(enum) {
     tickets: TicketResumption,
 };
 
-/// `max_handshake_message_len` bounds both ClientHello and encrypted client
-/// Certificate messages, including an RFC 7250 SubjectPublicKeyInfo.
+/// `max_handshake_message_len` bounds encrypted client Certificate messages,
+/// including an RFC 7250 SubjectPublicKeyInfo. The plaintext ClientHello
+/// reassembler is capped at `stream.max_client_hello_len` independently.
 pub fn ServerConnection(
     comptime max_handshake_message_len: usize,
     comptime max_post_handshake_len: usize,
@@ -569,7 +570,7 @@ pub fn ServerConnection(
         psk_consumed: bool = false,
         records: stream.RecordDeframer = .{},
         hello_messages: stream.HandshakeReassembler(
-            max_handshake_message_len,
+            @min(max_handshake_message_len, stream.max_client_hello_len),
         ) = .{},
         retry: ?RetryState = null,
         ech_context: ?ech.ServerContext = null,
