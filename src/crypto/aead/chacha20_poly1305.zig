@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const chacha_arm64 = @import("chacha20_poly1305_arm64.zig");
 
 const StdChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const Poly1305 = std.crypto.onetimeauth.Poly1305;
@@ -54,6 +55,11 @@ pub const Context = struct {
         self.* = undefined;
     }
 
+    inline fn rawKey(self: *const Context) [key_length]u8 {
+        if (comptime wide_enabled) return std.mem.asBytes(&self.key).*;
+        return self.key;
+    }
+
     pub inline fn encrypt(
         self: *const Context,
         ciphertext: []u8,
@@ -76,6 +82,17 @@ pub const Context = struct {
                 nonce,
                 self.key,
             );
+        }
+        if (comptime chacha_arm64.enabled) {
+            chacha_arm64.seal(
+                ciphertext,
+                tag,
+                plaintext,
+                associated_data,
+                nonce,
+                self.rawKey(),
+            );
+            return;
         }
         if (comptime builtin.cpu.arch == .x86_64) {
             if (plaintext.len == 1200 and
@@ -151,6 +168,20 @@ pub const Context = struct {
         }
 
         if (!in_place) {
+            if (comptime chacha_arm64.enabled) {
+                chacha_arm64.open(
+                    plaintext,
+                    ciphertext,
+                    tag,
+                    associated_data,
+                    nonce,
+                    self.rawKey(),
+                ) catch |err| {
+                    std.crypto.secureZero(u8, plaintext);
+                    return err;
+                };
+                return;
+            }
             var poly_key = self.encryptWideAndPolyKey(
                 plaintext,
                 ciphertext,

@@ -357,6 +357,7 @@ const arm64_asm_paths = [_][]const u8{
     "src/crypto/aead/aes_gcm_8x_arm64.S",
     "src/crypto/aead/aes_gcm_4x_arm64.S",
     "src/crypto/aead/ghash_v8_arm64.S",
+    "src/crypto/aead/chacha20_poly1305_arm64.S",
     "src/crypto/hash/keccak_arm64.S",
     "src/crypto/hash/sha512/arm64.S",
     "src/crypto/kex/ed25519_base_arm64.S",
