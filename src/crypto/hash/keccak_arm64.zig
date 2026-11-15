@@ -5,11 +5,16 @@
 
 const builtin = @import("builtin");
 const asm_compat = @import("../asm_compat.zig");
+const sha3_scalar = @import("keccak_sha3_arm64.zig");
 
 pub const enabled = asm_compat.arm64_native and
     (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSafe);
 
 pub fn permute(state: *[25]u64, constants: *const [24]u64) void {
+    if (comptime sha3_scalar.enabled) {
+        sha3_scalar.permute(state, constants);
+        return;
+    }
     if (comptime !enabled) @compileError("ARM64 Keccak-f1600 is unavailable");
     vailKeccakF1600Arm64(state, constants);
 }

@@ -355,6 +355,8 @@ const arm64_asm_paths = [_][]const u8{
     "src/crypto/ec/p384_montjmixadd_arm64.S",
     "src/crypto/ec/p384_scalarmul_arm64.S",
     "src/crypto/hash/keccak4_arm64.S",
+    "src/crypto/hash/keccak2_sha3_arm64.S",
+    "src/crypto/hash/keccak_sha3_arm64.S",
     "src/crypto/aead/aes_gcm_8x_arm64.S",
     "src/crypto/aead/aes_gcm_4x_arm64.S",
     "src/crypto/aead/ghash_v8_arm64.S",

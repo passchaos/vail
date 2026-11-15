@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const asm_compat = @import("../asm_compat.zig");
+const sha3_two_way = @import("keccak2_sha3_arm64.zig");
 
 const has_sha3 = std.Target.aarch64.featureSetHas(builtin.cpu.features, .sha3);
 
@@ -14,6 +15,11 @@ pub const enabled = asm_compat.arm64_native and
     (builtin.mode == .ReleaseFast or builtin.mode == .ReleaseSafe);
 
 pub fn permute(states: *[4][25]u64, constants: *const [24]u64) void {
+    if (comptime sha3_two_way.enabled) {
+        sha3_two_way.permute2(@ptrCast(&states[0]), constants);
+        sha3_two_way.permute2(@ptrCast(&states[2]), constants);
+        return;
+    }
     if (comptime !enabled) @compileError("ARM64 four-way Keccak is unavailable");
     vailKeccakF1600x4Arm64(states, constants);
 }
