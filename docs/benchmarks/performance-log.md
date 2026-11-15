@@ -1913,7 +1913,7 @@ into the consumer.
 Measured on a MacBook Pro (Mac17,8, Apple M5 Pro, 18 cores: 6 Super + 12
 Performance, 48 GB) running macOS 26.6.2 (25G83), against aws-lc-rs 1.18.1 /
 aws-lc-sys 0.45.0 (rustls 0.23.45). Vail was built with Zig 0.16.0,
-`-Doptimize=ReleaseFast -Dcpu=native`, at commit `b2fc8ce`.
+`-Doptimize=ReleaseFast -Dcpu=native`, at commit `c76b1fc`.
 
 The ARM64 kernels are enabled on macOS through a build-time ELF-to-Mach-O
 adaptation of the checked-in assembly snapshots; the build graph assembles them
@@ -1948,11 +1948,11 @@ differences are noise; the TLS pairs used eight samples per side.
 | AES-128-GCM record seal / open+seal | 169 / 318 ns | 151 / 313 ns | 1.12x / 1.02x slower |
 | AES-256-GCM record seal / open+seal | 192 / 355 ns | 172 / 345 ns | 1.12x / 1.03x slower |
 | ChaCha20-Poly1305 record seal / open+seal | 646 / 1,374 ns | 664 / 1,389 ns | 1.03x / 1.01x faster |
-| ML-KEM-768 encaps / decaps | 3,688.5 / 6,466.5 ns | 8,697.5 / 7,390 ns | 2.36x / 1.14x faster |
-| ML-DSA-44 sign | 36,254.5 ns | 41,569.5 ns | Vail 1.15x faster |
-| ML-DSA-44 prepared verify | 4,851 ns | 11,771 ns | Vail 2.43x faster |
-| ML-DSA-44 raw verify | 17,059.5 ns | 11,968 ns | Vail 1.43x slower |
-| ML-DSA-44 keygen | 16,732 ns | 12,224.5 ns | Vail 1.37x slower |
+| ML-KEM-768 encaps / decaps | 3,163 / 5,392 ns | 8,575 / 7,297 ns | 2.71x / 1.35x faster |
+| ML-DSA-44 sign | 30,341 ns | 42,182 ns | Vail 1.39x faster |
+| ML-DSA-44 prepared verify | 4,087 ns | 12,013 ns | Vail 2.94x faster |
+| ML-DSA-44 raw verify | 12,688 ns | 12,097 ns | Vail 1.05x slower |
+| ML-DSA-44 keygen | 12,809 ns | 12,595 ns | ~equal |
 
 Notes:
 
@@ -1966,6 +1966,9 @@ Notes:
 - AES-GCM uses the AWS-LC stitched 4x/8x ARM64 kernels for whole ciphertext
   blocks: the context absorbs the associated data, the final partial block, and
   the length block around the kernel.
+- Keccak uses the s2n-bignum SHA3-extension kernels on Apple silicon: scalar
+  SHAKE through the one-way kernel and batched SHAKE through two two-way
+  calls, matching AWS-LC's dispatch.
 - ChaCha20-Poly1305 uses the AWS-LC stitched ARM64 kernel for disjoint
   seal/open buffers; in-place opening keeps the authenticate-first path.
 - The P-256 signer uses the s2n-bignum `p256_scalarmulbase_alt` kernel with a
