@@ -1926,8 +1926,8 @@ differences are noise; the TLS pairs used eight samples per side.
 
 | Boundary | Vail | AWS-LC | Result |
 | --- | ---: | ---: | --- |
-| TLS 1.3 server first flight | 22,714.5 ns | 35,476.5 ns | Vail 36.0% lower |
-| TLS 1.3 client through Finished | 28,628.5 ns | 43,175.5 ns | Vail 33.7% lower |
+| TLS 1.3 server first flight | 20,261.5 ns | 34,209.5 ns | Vail 40.8% lower |
+| TLS 1.3 client through Finished | 27,959.5 ns | 41,487.5 ns | Vail 32.6% lower |
 | P-256 sign | 10,375 ns | 11,702.5 ns | Vail 1.13x faster |
 | P-256 prepared verify | 5,721 ns | 26,346.5 ns | Vail 4.61x faster |
 | P-256 one-shot verify | 24,900 ns | 26,736.5 ns | Vail 1.07x faster |
@@ -1974,8 +1974,6 @@ Notes:
 - The P-256 signer uses the s2n-bignum `p256_scalarmulbase_alt` kernel with a
   520-entry precomputed table; its constant-time scalar inversion now runs
   through the AWS-LC scalar-order Montgomery multiply and square kernels.
-- The TLS handshake rows predate the AEAD, scalar-order, and alt-kernel commits
-  and therefore understate current Vail throughput.
 - P-256 ECDH uses `p256_scalarmulbase_alt` for public-key recovery and the
   constant-time `p256_montjscalarmul_alt` kernel for the shared secret.
 - P-256 verification uses the alt point and field schedules
