@@ -1913,21 +1913,30 @@ into the consumer.
 Measured on a MacBook Pro (Mac17,8, Apple M5 Pro, 18 cores: 6 Super + 12
 Performance, 48 GB) running macOS 26.6.2 (25G83), against aws-lc-rs 1.18.1 /
 aws-lc-sys 0.45.0 (rustls 0.23.45). Vail was built with Zig 0.16.0,
-`-Doptimize=ReleaseFast -Dcpu=native`, at commit `c76b1fc`.
+`-Doptimize=ReleaseFast -Dcpu=native`, at commit `c26dca1`.
 
 The ARM64 kernels are enabled on macOS through a build-time ELF-to-Mach-O
 adaptation of the checked-in assembly snapshots; the build graph assembles them
 as separate objects. Scoped tests and the full ReleaseFast suite pass
-(602 passed, 12 skipped, 0 failed).
+(603 passed, 12 skipped, 0 failed).
 
-Primitive pairs were run in A-B-B-A order with four samples per side and
-reported as medians. The host was shared with other builds, so small
-differences are noise; the TLS pairs used eight samples per side.
+Pairs were run in A-B-B-A order with four samples per side (the TLS 1.3
+handshake rows used eight) and reported as medians. The host was shared with
+other builds, so small differences are noise.
 
 | Boundary | Vail | AWS-LC | Result |
 | --- | ---: | ---: | --- |
 | TLS 1.3 server first flight | 20,261.5 ns | 34,209.5 ns | Vail 40.8% lower |
 | TLS 1.3 client through Finished | 27,959.5 ns | 41,487.5 ns | Vail 32.6% lower |
+| TLS 1.3 resumption | 41,703.5 ns | 56,537 ns | Vail 26.2% lower |
+| TLS 1.2 RSA-PKCS1 AES-128 handshake | 362,087.5 ns | 372,852 ns | Vail 2.9% lower |
+| TLS 1.2 RSA-PSS AES-128 handshake | 383,443 ns | 405,472 ns | Vail 5.4% lower |
+| X.509 client handshake | 33,361 ns | 45,815.5 ns | Vail 27.2% lower |
+| X.509 server flight | 293,350 ns | 319,324 ns | Vail 8.1% lower |
+| QUIC TLS 1.3 handshake | 325,813 ns | 362,937.5 ns | Vail 10.2% lower |
+| QUIC 0-RTT | 42,962 ns | 64,020 ns | Vail 32.9% lower |
+| QUIC resumption | 39,309 ns | 65,454 ns | Vail 39.9% lower |
+| RSA-2048 PSS SHA-256 sign | 275,141.5 ns | 287,197.5 ns | Vail 4.2% faster |
 | P-256 sign | 10,375 ns | 11,702.5 ns | Vail 1.13x faster |
 | P-256 prepared verify | 5,721 ns | 26,346.5 ns | Vail 4.61x faster |
 | P-256 one-shot verify | 24,900 ns | 26,736.5 ns | Vail 1.07x faster |
@@ -1971,6 +1980,8 @@ Notes:
   calls, matching AWS-LC's dispatch.
 - ChaCha20-Poly1305 uses the AWS-LC stitched ARM64 kernel for disjoint
   seal/open buffers; in-place opening keeps the authenticate-first path.
+- RSA private operations use the AWS-LC ARM64 `bn_mul_mont` kernel, which
+  selects its eight-way squaring path for the CRT exponentiations.
 - The P-256 signer uses the s2n-bignum `p256_scalarmulbase_alt` kernel with a
   520-entry precomputed table; its constant-time scalar inversion now runs
   through the AWS-LC scalar-order Montgomery multiply and square kernels.
