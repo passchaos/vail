@@ -4,6 +4,7 @@
 //! public-exponent Montgomery kernels used by `rsa.zig`.
 
 const std = @import("std");
+const rsa_mont_arm64 = @import("rsa_mont_arm64.zig");
 const builtin = @import("builtin");
 
 const RsaModulus = std.crypto.ff.Modulus(4096);
@@ -340,6 +341,17 @@ pub const Montgomery1024 = struct {
     }
 
     pub fn mul(self: *const Montgomery1024, a: Limbs, b: Limbs) Limbs {
+        if (comptime rsa_mont_arm64.enabled) {
+            var result: Limbs = undefined;
+            rsa_mont_arm64.mul(
+                &result,
+                &a,
+                &b,
+                &self.modulus,
+                &self.negative_inverse,
+            );
+            return result;
+        }
         var intermediate = [_]u64{0} ** (limb_count + 2);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&intermediate));
 
@@ -504,6 +516,22 @@ pub const Montgomery1024 = struct {
         first_value: Limbs,
         second_value: Limbs,
     ) Pair {
+        if (comptime rsa_mont_arm64.enabled) {
+            var result: Pair = undefined;
+            rsa_mont_arm64.square(
+                &result.first,
+                &first_value,
+                &first_context.modulus,
+                &first_context.negative_inverse,
+            );
+            rsa_mont_arm64.square(
+                &result.second,
+                &second_value,
+                &second_context.modulus,
+                &second_context.negative_inverse,
+            );
+            return result;
+        }
         if (comptime !use_x86_64_adx_montgomery) {
             return mulPairFiosWithWorkspace(
                 first_context,
@@ -599,6 +627,24 @@ pub const Montgomery1024 = struct {
         first_b: Limbs,
         second_b: Limbs,
     ) Pair {
+        if (comptime rsa_mont_arm64.enabled) {
+            var result: Pair = undefined;
+            rsa_mont_arm64.mul(
+                &result.first,
+                &first_a,
+                &first_b,
+                &first_context.modulus,
+                &first_context.negative_inverse,
+            );
+            rsa_mont_arm64.mul(
+                &result.second,
+                &second_a,
+                &second_b,
+                &second_context.modulus,
+                &second_context.negative_inverse,
+            );
+            return result;
+        }
         const first_intermediate = &workspace.first;
         const second_intermediate = &workspace.second;
 
@@ -1549,6 +1595,17 @@ pub const Montgomery2048 = struct {
     }
 
     pub fn mul(self: *const Montgomery2048, a: Limbs, b: Limbs) Limbs {
+        if (comptime rsa_mont_arm64.enabled) {
+            var result: Limbs = undefined;
+            rsa_mont_arm64.mul(
+                &result,
+                &a,
+                &b,
+                &self.modulus,
+                &self.negative_inverse,
+            );
+            return result;
+        }
         var intermediate = [_]u64{0} ** (limb_count + 2);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&intermediate));
 

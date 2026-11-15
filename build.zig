@@ -394,6 +394,7 @@ const arm64_asm_paths = [_][]const u8{
     "src/crypto/pq/mlkem/polyvec_basemul_acc_montgomery_cached_k3_arm64.S",
     "src/crypto/pq/mlkem/polyvec_basemul_acc_montgomery_cached_k4_arm64.S",
     "src/crypto/pq/mlkem/rej_uniform_arm64.S",
+    "src/crypto/sign/armv8_mont_arm64.S",
     "src/crypto/sign/bignum_madd_n25519_arm64.S",
     "src/crypto/sign/bignum_mod_n25519_arm64.S",
     "src/crypto/sign/ed25519_epdouble_arm64.S",
