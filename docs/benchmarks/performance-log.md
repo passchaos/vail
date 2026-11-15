@@ -1951,6 +1951,8 @@ other builds, so small differences are noise.
 | Ed25519 sign | 3,822.5 ns | 3,833.5 ns | ~equal |
 | Ed25519 keygen | 3,648.5 ns | 3,628 ns | ~equal |
 | X25519 public / shared | 3,545.5 / 11,938.5 ns | 3,581 / 11,923.5 ns | ~equal |
+| SHA-256 32 B / 1 KiB | 17 / 334 ns | 28 / 344 ns | 1.65x / 1.03x faster |
+| HMAC-SHA256 prepared 32 B | 42 ns | 63 ns | Vail 1.50x faster |
 | SHA-512 32 B / 1 KiB | 51.5 / 607.5 ns | 75 / 609.5 ns | 1.46x faster / equal |
 | HKDF-SHA256 3 labels | 197.5 ns | 449.5 ns | Vail 2.28x faster |
 | HKDF-SHA384 3 labels | 964 ns | 1,390 ns | Vail 1.44x faster |
