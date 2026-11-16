@@ -51,7 +51,9 @@ const rho56: [4]u64 align(32) = .{
 };
 
 extern fn vailKeccakF1600x4Alt(
-    states: *align(32) [100]u64,
+    // The assembly loads and stores the state with vmovdqu, so callers do not
+    // need to provide 32-byte-aligned storage.
+    states: *[100]u64,
     constants: *const [24]u64,
     rho8_table: *align(32) const [4]u64,
     rho56_table: *align(32) const [4]u64,
