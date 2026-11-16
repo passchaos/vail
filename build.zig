@@ -417,7 +417,9 @@ fn addArm64Asm(
     }
     const generated = b.addWriteFiles();
     for (arm64_asm_paths, 0..) |path, index| {
-        const source = std.Io.Dir.cwd().readFileAlloc(
+        // Resolve against the Vail package root, not the dependent project's
+        // working directory. Path dependencies build with the consumer's cwd.
+        const source = b.build_root.handle.readFileAlloc(
             b.graph.io,
             path,
             b.allocator,

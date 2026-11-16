@@ -826,3 +826,71 @@ test "prepared P-256 verifier authenticates a certificate" {
         &verifier,
     );
 }
+
+test "bundled trust store enforces out-of-certificate name constraints" {
+    const root = decodeHex(path_vectors.root_hex);
+    const intermediate = decodeHex(path_vectors.intermediate_hex);
+    const leaf = decodeHex(path_vectors.leaf_hex);
+    const now = 1_900_000_000;
+    // NameConstraints ::= SEQUENCE { permittedSubtrees [0] ... }
+    const permit_localhost = [_]u8{
+        0x30, 0x0f, 0xa0, 0x0d, 0x30, 0x0b, 0x82, 0x09,
+        'l',  'o',  'c',  'a',  'l',  'h',  'o',  's',
+        't',
+    };
+    const permit_example = [_]u8{
+        0x30, 0x11, 0xa0, 0x0f, 0x30, 0x0d, 0x82, 0x0b,
+        'e',  'x',  'a',  'm',  'p',  'l',  'e',  '.',
+        'c',  'o',  'm',
+    };
+    const timestamp = std.Io.Timestamp{
+        .nanoseconds = @as(i96, now) * std.time.ns_per_s,
+    };
+
+    var allowed = try trust.SystemStore.initBundled(
+        std.testing.allocator,
+        &.{.{
+            .certificate_der = &root,
+            .name_constraints = &permit_localhost,
+        }},
+        timestamp,
+    );
+    defer allowed.deinit();
+    var allowed_verifier = allowed.verifier(now);
+    try allowed_verifier.verify(.{
+        .server_name = "localhost",
+        .chain = &.{ &leaf, &intermediate },
+    });
+
+    var rejected = try trust.SystemStore.initBundled(
+        std.testing.allocator,
+        &.{.{
+            .certificate_der = &root,
+            .name_constraints = &permit_example,
+        }},
+        timestamp,
+    );
+    defer rejected.deinit();
+    var rejected_verifier = rejected.verifier(now);
+    try std.testing.expectError(
+        error.CertificateNameConstraintViolation,
+        rejected_verifier.verify(.{
+            .server_name = "localhost",
+            .chain = &.{ &leaf, &intermediate },
+        }),
+    );
+
+    // The same store accepts the chain when the external constraint is not
+    // attached, proving the rejection above comes from the constraint.
+    var unconstrained = try trust.SystemStore.initBundled(
+        std.testing.allocator,
+        &.{.{ .certificate_der = &root }},
+        timestamp,
+    );
+    defer unconstrained.deinit();
+    var unconstrained_verifier = unconstrained.verifier(now);
+    try unconstrained_verifier.verify(.{
+        .server_name = "localhost",
+        .chain = &.{ &leaf, &intermediate },
+    });
+}

@@ -77,11 +77,22 @@ pub const StapledOcspPolicy = enum {
     require,
 };
 
+/// Mozilla-applied NameConstraints for a trust anchor whose certificate does
+/// not encode them. `subject` is the DER-encoded X.501 Name of the anchor;
+/// `name_constraints` is a DER-encoded NameConstraints extension value.
+pub const AnchorNameConstraints = struct {
+    subject: []const u8,
+    name_constraints: []const u8,
+};
+
 pub const BundleVerifier = struct {
     bundle: *const Certificate.Bundle,
     /// Additional borrowed trust anchors parsed by Vail's compatibility
     /// parser, including algorithms not understood by Zig std's Bundle.
     compatible_trust_anchors: []const []const u8 = &.{},
+    /// Out-of-certificate constraints for selected trust anchors. Matching is
+    /// by the anchor's DER-encoded subject name.
+    anchor_constraints: []const AnchorNameConstraints = &.{},
     now_seconds: i64,
     path_limits: PathLimits = .{},
     revocation: ?RevocationPolicy = null,
@@ -127,6 +138,7 @@ pub const BundleVerifier = struct {
         try verifyChain(
             self.bundle,
             self.compatible_trust_anchors,
+            self.anchor_constraints,
             self.now_seconds,
             trust_context.chain,
             .server_auth,
@@ -150,6 +162,7 @@ pub const BundleVerifier = struct {
         try verifyChain(
             self.bundle,
             self.compatible_trust_anchors,
+            self.anchor_constraints,
             self.now_seconds,
             trust_context.chain,
             .server_auth,
@@ -284,6 +297,7 @@ pub const ClientCertificateBundleVerifier = struct {
         try verifyChain(
             self.bundle,
             self.compatible_trust_anchors,
+            &.{},
             self.now_seconds,
             trust_context.chain,
             .client_auth,
@@ -331,6 +345,7 @@ pub const CrlSignerBundleVerifier = struct {
         try verifyChain(
             self.bundle,
             self.compatible_trust_anchors,
+            &.{},
             self.now_seconds,
             chain,
             .crl_signing,
@@ -365,6 +380,7 @@ pub const CertificateAuthorityBundleVerifier = struct {
         try verifyChain(
             self.bundle,
             self.compatible_trust_anchors,
+            &.{},
             self.now_seconds,
             chain,
             .certificate_authority,
@@ -454,6 +470,7 @@ pub fn validateCertificateRevocationListSigner(
 fn verifyChain(
     bundle: *const Certificate.Bundle,
     compatible_trust_anchors: []const []const u8,
+    anchor_constraints: []const AnchorNameConstraints,
     now_seconds: i64,
     chain: []const []const u8,
     purpose: EndpointPurpose,
@@ -469,6 +486,7 @@ fn verifyChain(
     if (chain.len == 0) return error.EmptyCertificateChain;
     try validatePathLimits(limits);
     try validateCompatibleTrustAnchors(compatible_trust_anchors, limits);
+    try validateAnchorConstraints(anchor_constraints);
     try certificate_policy.validateConfig(policy_config);
     if (chain.len > limits.max_presented_certificates) {
         return error.CertificatePathTooManyCertificates;
@@ -504,6 +522,7 @@ fn verifyChain(
     var search = PathSearch{
         .bundle = bundle,
         .compatible_trust_anchors = compatible_trust_anchors,
+        .anchor_constraints = anchor_constraints,
         .now_seconds = now_seconds,
         .chain = chain,
         .parsed = parsed[0..chain.len],
@@ -529,6 +548,7 @@ fn verifyChain(
 const PathSearch = struct {
     bundle: *const Certificate.Bundle,
     compatible_trust_anchors: []const []const u8,
+    anchor_constraints: []const AnchorNameConstraints,
     now_seconds: i64,
     chain: []const []const u8,
     parsed: []const Certificate.Parsed,
@@ -564,6 +584,7 @@ const PathSearch = struct {
                 subject_index,
                 subject,
                 anchor,
+                used,
                 depth,
             );
             return;
@@ -577,6 +598,7 @@ const PathSearch = struct {
                 subject_index,
                 subject,
                 anchor,
+                used,
                 depth,
             );
             return;
@@ -772,6 +794,7 @@ const PathSearch = struct {
                 subject_index,
                 subject,
                 anchor,
+                used,
                 depth,
             );
             return;
@@ -785,6 +808,7 @@ const PathSearch = struct {
                 subject_index,
                 subject,
                 anchor,
+                used,
                 depth,
             );
             return;
@@ -836,6 +860,13 @@ const PathSearch = struct {
             ca_below,
             used,
         );
+        if (anchorNameConstraints(
+            self.anchor_constraints,
+            anchor.subject(),
+        )) |encoded| {
+            @branchHint(.unlikely);
+            try self.validateSelectedCertificateNameConstraints(encoded, used);
+        }
         try self.verifyIssuerEdge(
             subject_index,
             subject,
@@ -851,6 +882,7 @@ const PathSearch = struct {
         subject_index: usize,
         subject: Certificate.Parsed,
         anchor: Certificate.Parsed,
+        used: u32,
         depth: usize,
     ) !void {
         if (subject_index == 0 and self.stapled_ocsp_policy != .ignore) {
@@ -863,6 +895,13 @@ const PathSearch = struct {
         }
         try verifyValidity(subject, self.now_seconds);
         try verifyValidity(anchor, self.now_seconds);
+        if (anchorNameConstraints(
+            self.anchor_constraints,
+            anchor.subject(),
+        )) |encoded| {
+            @branchHint(.unlikely);
+            try self.validateSelectedCertificateNameConstraints(encoded, used);
+        }
         try self.verifySelectedCertificatePolicies(depth);
     }
 
@@ -1145,13 +1184,133 @@ fn validateCompatibleTrustAnchors(
     }
 }
 
+const hard_max_anchor_constraints = 256;
+
+fn validateAnchorConstraints(
+    constraints: []const AnchorNameConstraints,
+) !void {
+    if (constraints.len > hard_max_anchor_constraints) {
+        return error.CertificatePathTooManyTrustAnchors;
+    }
+    for (constraints, 0..) |item, index| {
+        if (item.subject.len == 0) return error.InvalidCertificateExtension;
+        try validateNameConstraintsSyntax(item.name_constraints);
+        for (constraints[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.subject, item.subject)) {
+                return error.DuplicateTrustAnchor;
+            }
+        }
+    }
+}
+
+fn anchorNameConstraints(
+    constraints: []const AnchorNameConstraints,
+    subject: []const u8,
+) ?[]const u8 {
+    for (constraints) |item| {
+        if (std.mem.eql(u8, item.subject, subject)) {
+            return item.name_constraints;
+        }
+    }
+    return null;
+}
+
+/// One in-memory trust anchor supplied by a compiled-in root set.
+pub const BundledAnchor = struct {
+    certificate_der: []const u8,
+    /// Mozilla-applied NameConstraints extension value, when the restriction
+    /// is not encoded in the certificate itself.
+    name_constraints: ?[]const u8 = null,
+};
+
 pub const SystemStore = struct {
     allocator: std.mem.Allocator,
     bundle: Certificate.Bundle = .empty,
     compatible_trust_anchors: std.ArrayList([]u8) = .empty,
+    anchor_constraints: std.ArrayList(AnchorNameConstraints) = .empty,
 
     pub fn initEmpty(allocator: std.mem.Allocator) SystemStore {
         return .{ .allocator = allocator };
+    }
+
+    /// Build a store from caller-provided DER roots instead of the platform
+    /// trust store. This is the entry point for compiled-in root sets such as
+    /// Mozilla CCADB data. The input slices are borrowed only for the duration
+    /// of this call.
+    pub fn initBundled(
+        allocator: std.mem.Allocator,
+        anchors: []const BundledAnchor,
+        now: std.Io.Timestamp,
+    ) !SystemStore {
+        const now_seconds = now.toSeconds();
+        var result = SystemStore{ .allocator = allocator };
+        errdefer result.deinit();
+        for (anchors) |anchor| {
+            try result.addBundledAnchor(anchor, now_seconds);
+        }
+        return result;
+    }
+
+    fn addBundledAnchor(
+        self: *SystemStore,
+        anchor: BundledAnchor,
+        now_seconds: i64,
+    ) !void {
+        if (anchor.certificate_der.len == 0 or
+            anchor.certificate_der.len > max_compatible_certificate_bytes)
+        {
+            return error.CompatibleTrustAnchorTooLarge;
+        }
+        const parsed = try certificate_compat.parse(anchor.certificate_der);
+        const subject = parsed.standard.subject();
+        if (self.bundle.find(subject) == null) {
+            const start = self.bundle.bytes.items.len;
+            if (start > std.math.maxInt(u32)) {
+                return error.CertificateAuthorityBundleTooBig;
+            }
+            try self.bundle.bytes.appendSlice(
+                self.allocator,
+                anchor.certificate_der,
+            );
+            self.bundle.parseCert(
+                self.allocator,
+                @intCast(start),
+                now_seconds,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => self.bundle.bytes.shrinkRetainingCapacity(start),
+            };
+            if (self.bundle.bytes.items.len == start) {
+                _ = try self.addCompatibleCertificate(
+                    anchor.certificate_der,
+                    now_seconds,
+                );
+            }
+        }
+        if (anchor.name_constraints) |encoded| {
+            try self.addAnchorConstraints(subject, encoded);
+        }
+    }
+
+    fn addAnchorConstraints(
+        self: *SystemStore,
+        subject: []const u8,
+        encoded: []const u8,
+    ) !void {
+        try validateNameConstraintsSyntax(encoded);
+        for (self.anchor_constraints.items) |item| {
+            if (std.mem.eql(u8, item.subject, subject)) {
+                return error.DuplicateTrustAnchor;
+            }
+        }
+        const owned_subject = try self.allocator.dupe(u8, subject);
+        errdefer self.allocator.free(owned_subject);
+        const owned_constraints = try self.allocator.dupe(u8, encoded);
+        errdefer self.allocator.free(owned_constraints);
+        try self.anchor_constraints.append(self.allocator, .{
+            .subject = owned_subject,
+            .name_constraints = owned_constraints,
+        });
     }
 
     pub fn init(
@@ -1295,8 +1454,17 @@ pub const SystemStore = struct {
     pub fn deinit(self: *SystemStore) void {
         self.rollbackCompatibleAnchors(0);
         self.compatible_trust_anchors.deinit(self.allocator);
+        self.deinitAnchorConstraints();
         self.bundle.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    fn deinitAnchorConstraints(self: *SystemStore) void {
+        for (self.anchor_constraints.items) |item| {
+            self.allocator.free(item.subject);
+            self.allocator.free(item.name_constraints);
+        }
+        self.anchor_constraints.deinit(self.allocator);
     }
 
     /// Copy one DER certificate into the compatibility store. Returns false
@@ -1631,6 +1799,7 @@ pub const SystemStore = struct {
         return .{
             .bundle = &self.bundle,
             .compatible_trust_anchors = self.compatible_trust_anchors.items,
+            .anchor_constraints = self.anchor_constraints.items,
             .now_seconds = now_seconds,
         };
     }

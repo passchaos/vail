@@ -27,6 +27,9 @@ pub const sm4 = @import("block/sm4.zig");
 pub const x25519 = @import("kex/x25519.zig");
 pub const xchacha20_poly1305 = @import("aead/xchacha20_poly1305.zig");
 
+/// Test-only fixtures retained for cross-package tests. Not a stable API.
+pub const testing = @import("../testdata.zig").crypto;
+
 test {
     _ = @import("tests.zig");
     _ = @import("pq/mldsa_tests.zig");

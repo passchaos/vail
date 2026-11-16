@@ -12,6 +12,9 @@ pub const issuer_fetch = @import("issuer_fetch.zig");
 pub const crl = @import("crl.zig");
 pub const ocsp = @import("ocsp.zig");
 
+/// Test-only fixtures retained for cross-package tests. Not a stable API.
+pub const testing = @import("../testdata.zig").x509;
+
 test {
     _ = crl;
     _ = certificate_set;
