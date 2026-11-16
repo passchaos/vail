@@ -25,7 +25,7 @@ protocol APIs rather than embedding cryptographic logic.
 | --- | --- |
 | TLS 1.3 | Client/server state machines, HelloRetryRequest, PSK-DHE and 0-RTT resumption, KeyUpdate, record-size limits, raw public keys, mTLS, ECH, ALPS, certificate compression, stateless tickets |
 | TLS 1.2 | Client/server, ECDHE-RSA/ECDSA, AES-GCM, ChaCha20-Poly1305, extended master secret, session IDs, RFC 5077 tickets, P-521, AES-256-GCM/SHA-384 |
-| X.509 | Bounded path building, policy and name constraints, CRL and OCSP verification, system trust stores, RFC 2253 names, certificate sets |
+| X.509 | Bounded path building, policy and name constraints, CRL and OCSP verification, system trust stores, macOS Security.framework and Windows CryptoAPI platform verification, RFC 2253 names, certificate sets |
 | QUIC | Initial/Retry secrets, TLS handshake adapters, transport parameters, traffic-key derivation and packet protection |
 | AEAD and hashing | AES-128/256-GCM, AES-CCM, AES-CBC/CTR, ChaCha20-Poly1305, XChaCha20-Poly1305, SHA-256/384/512, SHA-3/SHAKE signature support, BLAKE2s, SM3, HMAC, HKDF |
 | Key exchange | X25519, P-256, P-384, P-521, hybrid X25519MLKEM768, pure ML-KEM-768/1024, secp256r1MLKEM768, secp384r1MLKEM1024 |

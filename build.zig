@@ -56,6 +56,19 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "vort", .module = vort }},
     });
+    switch (target.result.os.tag) {
+        .macos => {
+            vail.link_libc = true;
+            vail.linkFramework("Security", .{});
+            vail.linkFramework("CoreFoundation", .{});
+        },
+        .windows => {
+            vail.link_libc = true;
+            vail.linkSystemLibrary("crypt32", .{});
+            vail.linkSystemLibrary("wintrust", .{});
+        },
+        else => {},
+    }
     addArm64Asm(b, vail, target);
     _ = b.addModule("vail_sm", .{
         .root_source_file = b.path("src/crypto/sm.zig"),
